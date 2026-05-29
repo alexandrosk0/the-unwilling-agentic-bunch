@@ -1,24 +1,31 @@
 ---
 name: perf-instrument
 description: Add or remove `SMATCHET_UI_PERF_SCOPE("perf_temp:...")` markers per a spec provided by `perf-detective` or `spike-hunter`. Encodes the overhead rules (string-literal scope names, no nesting in million-call loops, one outer scope always safe, mandatory `perf_temp:` prefix, header include check). Use for inserting instrumentation or stripping all `perf_temp:` markers after a perf round.
+complexity: low
+read-only: false
+capabilities:
+  - semantic-code-search
+  - file-skeleton
+  - file-read
+  - file-edit
+  - text-search
+  - file-glob
+  - shell
 triggers:
   - instrument
   - perf-scope
   - perf-marker
   - perf-cleanup
+harness-hints:
+  claude-code:
+    model: haiku
+    effort: low
 version: 2
 ---
 
-<!--
-  Claude-Code skill mirror of agents/core/perf-instrument.md (cross-harness canonical).
-  Both files must stay in sync — V7 doc-consistency assertion checks this.
-  When updating the procedure, edit BOTH files. Codex / Cursor read the agent
-  form; Claude Code orchestrator may pick either (skill form is lighter).
--->
+Mechanical perf-marker editor for Smatchet.
 
-# perf-instrument (skill)
-
-Mechanical perf-marker editor for Smatchet. Same procedure as `agents/core/perf-instrument.md`, minus agent-spawn telemetry (banner / `## Outcome` / `## Self-improvement`).
+**Banner** — open with: `🤖 AGENT: perf-instrument · haiku/low · read-edit · v2`. Close (before `## Self-improvement`) with: `✅ END — perf-instrument · haiku/low · read-edit · v2`.
 
 **Tooling** — use **text-search** for exhaustive cleanup enumeration (you need every match). Call your harness's semantic codebase search (e.g. vexp `run_pipeline`) only when the spec doesn't name a file and you need to locate a call site.
 
@@ -58,4 +65,11 @@ Mechanical perf-marker editor for Smatchet. Same procedure as `agents/core/perf-
 4. Re-search all three directories to confirm zero matches.
 5. Build `cmake --build --preset ninja-iter-msvc --target SmatchetStandalone` to confirm clean compile after the deletions.
 
-Report: files touched + scope names added (or removed) + final `perf_temp:` search result (must be zero across all three directories after cleanup).
+## Output contract
+
+Per AGENTS.md § Agent output contract § Helper class — these sections must appear, in order, in every report:
+
+- `## Spec executed` — the `(file, function-or-block, scope-name)` tuples (insert mode) OR the strip-target directories + the text-search pattern used (cleanup mode), copied verbatim from the caller's packet. One bullet per tuple.
+- `## Result` — files touched + scope names added (insert) or removed (cleanup) + final `perf_temp:` text-search count (must be zero across `Source_Core/`, `Plugins/`, `Target_Standalone/` after cleanup). Includes the build target name + pass/fail of the `cmake --build` step.
+- `## Outcome: <state>` — one of `applied | halted | failed | partial | aborted`. Telemetry keys on this line per AGENTS.md § Agent output contract.
+- `## Self-improvement` — only if the spec was ambiguous or a rule wasn't covered. Empty is fine. Orchestrator appends to `docs/backlog/AGENT_SELF_IMPROVEMENT.md`.

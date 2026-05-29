@@ -1,24 +1,27 @@
 ---
 name: perf-measure
 description: Run a Smatchet perf measurement loop — `perf.reset` → `scenario.run` → `perf.snapshot` — parse JSON, return top-N rows by `lastTotalMs`. Use when `perf-detective` or `spike-hunter` has hypothesised + instrumented and wants numbers, or as a standalone "what's hot right now" check against a named scenario.
+complexity: low
+read-only: true
+capabilities:
+  - semantic-code-search
+  - file-read
+  - shell
 triggers:
   - measure
   - snapshot
   - scenario
   - perf-run
+harness-hints:
+  claude-code:
+    model: sonnet
+    effort: low
 version: 2
 ---
 
-<!--
-  Claude-Code skill mirror of agents/core/perf-measure.md (cross-harness canonical).
-  Both files must stay in sync — V7 doc-consistency assertion checks this.
-  When updating the procedure, edit BOTH files. Codex / Cursor read the agent
-  form; Claude Code orchestrator may pick either (skill form is lighter).
--->
+Smatchet perf-measurement runner.
 
-# perf-measure (skill)
-
-Smatchet perf-measurement runner. Same procedure as `agents/core/perf-measure.md`, minus agent-spawn telemetry (banner / `## Outcome` / `## Self-improvement`).
+**Banner** — open with: `🤖 AGENT: perf-measure · sonnet/low · read-only · v2`. Close (before `## Self-improvement`) with: `✅ END — perf-measure · sonnet/low · read-only · v2`.
 
 **Tooling** — measurement is CLI + JSON. Use direct file-read for written-out snapshot files. Use your harness's semantic codebase search only if you need to locate a scenario definition by name.
 
@@ -63,17 +66,23 @@ Smatchet.exe cmd perf.snapshot \
 
 **Sort by `lastTotalMs`, NEVER by `avgPerCallMs`.** A 200-call × 50 µs row (10 ms total) beats a 1-call × 5 ms row when you're trying to recover frame time. The calling agent will diagnose from the totals.
 
-## Report format
+## Output contract
 
-```
-Scenario: <name>, <N> frames
-Top rows by lastTotalMs:
-1. <name>  lastTotalMs=<ms>  callCount=<n>  avgPerCallMs=<µs>
-2. ...
+Per AGENTS.md § Agent output contract § Helper class — these sections must appear, in order, in every report:
 
-perf_temp:* rows: <list>  (markers the caller is tracking this round)
-Pre-existing dominant rows: <list>  (context — what perf_temp: markers are competing against)
-```
+- `## Spec executed` — scenario name, frame count, build preset, run path (A1 spawn / A2 ad-hoc / A3 new scenario registered). One line per parameter.
+- `## Result` — top rows by `lastTotalMs`, formatted as:
+  ```text
+  Scenario: <name>, <N> frames
+  Top rows by lastTotalMs:
+  1. <name>  lastTotalMs=<ms>  callCount=<n>  avgPerCallMs=<ms>
+  2. ...
+
+  perf_temp:* rows: <list>  (markers the caller is tracking this round)
+  Pre-existing dominant rows: <list>  (context — what perf_temp: markers are competing against)
+  ```
+- `## Outcome: <state>` — one of `applied | halted | failed | partial | aborted`. Telemetry keys on this line per AGENTS.md § Agent output contract.
+- `## Self-improvement` — only if a scenario was missing, the CLI didn't expose a needed field, or the fallback path took multiple round-trips. Empty is fine. Orchestrator appends to `docs/backlog/AGENT_SELF_IMPROVEMENT.md`.
 
 ## Fallback — CLI unavailable
 
@@ -82,6 +91,7 @@ If `mcp_enabled: false`, `--spawn` can't reach the MCP socket within 15 s, or `p
 End the run with:
 
 ```
+## Outcome: halted
 halt_reason: cli-gap — <name the missing CLI surface, e.g. "MCP socket unreachable after 15 s on --spawn", or "perf.snapshot errored: <message>", or "scenario `<name>` not registered with ScenarioRunner">
 ```
 
@@ -95,5 +105,3 @@ Do not attempt to read FPS visually — you can't observe the GUI, and the rule 
 ## Consistency rule
 
 For a before / after comparison, run the **same** scenario, same `--frames` value. Numbers from different scenarios are not comparable.
-
-Report: scenario + frame count + top-5 rows by `lastTotalMs` + which rows are `perf_temp:*` vs pre-existing + the raw `perf.snapshot --pretty` block for reference.
