@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+"""
+merge-watcher-cli — register / unregister / status / list subcommands.
+
+Phase 1 of `docs/plans/shipped/smatchet-merge-watcher.md`. Per-user registry at
+`%LOCALAPPDATA%/Smatchet/merge-watch/active.json` (cross-clone). The
+companion daemon (`merge-watcher.py`) polls every registered PR via
+`agents/scripts/core/merge-gates.sh`.
+
+Phase-1 scope: registry CRUD only. No auto-merge (Phase 2), no triage
+(Phase 3), no notify (Phase 4). The daemon prints per-PR state to stdout;
+state transitions are observed by reading `state/<pr>.json` files.
+
+Owner transfer: `register` prints "watcher now owns this PR; use
+`unregister` to take back control" per the locked design decision. The
+orchestrator is expected to check the registry before any merge-gates
+poll and skip if the PR is registered.
+
+Usage:
+  merge-watch register <pr>        # add PR to registry (clone_path = cwd repo root)
+  merge-watch unregister <pr>      # remove PR
+  merge-watch status [<pr>]        # show one PR's state or all
+  merge-watch list                 # JSON dump of full registry
+  merge-watch prune [--dry-run]    # unregister PRs gh reports MERGED/CLOSED
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Per-user registry path resolution
+# ---------------------------------------------------------------------------
+def watcher_root() -> pathlib.Path:
+    """`%LOCALAPPDATA%/Smatchet/merge-watch/` on Windows; XDG-style fallback otherwise.
+
+    Per the 2026-05-21 plan-doc locked decision: per-user registry watches
+    PRs across all Smatchet clones. The path is OUTSIDE any specific git
+    clone so a `git clean -fx` doesn't nuke watch state.
+    """
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        if not base:
+            raise RuntimeError("LOCALAPPDATA not set; cannot resolve watcher root on Windows")
+        return pathlib.Path(base) / "Smatchet" / "merge-watch"
+    # POSIX fallback — XDG_STATE_HOME with $HOME/.local/state default.
+    xdg = os.environ.get("XDG_STATE_HOME") or str(pathlib.Path.home() / ".local" / "state")
+    return pathlib.Path(xdg) / "smatchet" / "merge-watch"
+
+
+def registry_path() -> pathlib.Path:
+    return watcher_root() / "active.json"
+
+
+def state_dir() -> pathlib.Path:
+    return watcher_root() / "state"
+
+
+def lockfile_path() -> pathlib.Path:
+    return watcher_root() / "active.json.lockfile"
+
+
+# ---------------------------------------------------------------------------
+# File-locked registry read / write
+# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def registry_lock(timeout_seconds: float = 10.0):
+    """Cross-platform file lock around the registry.
+
+    Uses a sentinel file with exclusive `O_CREAT | O_EXCL`. Polls every
+    50ms up to `timeout_seconds` before raising `TimeoutError`. The
+    cleanup `os.unlink` runs even on exception via try/finally.
+
+    Lock contention is expected to be rare: foreground-default daemon
+    means multi-daemon misconfigurations are visible; the CLI commands
+    are short-lived (sub-second) and only one runs at a time per user
+    invocation.
+    """
+    watcher_root().mkdir(parents=True, exist_ok=True)
+    lock = lockfile_path()
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{os.getpid()}\n".encode())
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"merge-watcher: registry lock at {lock} held > {timeout_seconds}s"
+                )
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            os.unlink(str(lock))
+        except FileNotFoundError:
+            pass
+
+
+def read_registry() -> list[dict[str, Any]]:
+    p = registry_path()
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"merge-watcher: registry at {p} is malformed JSON: {exc}") from exc
+    if not isinstance(data, list):
+        raise RuntimeError(f"merge-watcher: registry at {p} is not a JSON list")
+    return data
+
+
+def write_registry(entries: list[dict[str, Any]]) -> None:
+    p = registry_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic-replace via tempfile rename so a partial write doesn't corrupt the registry.
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(entries, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(p)
+
+
+# ---------------------------------------------------------------------------
+# Clone-path resolution (gh / git surfaces)
+# ---------------------------------------------------------------------------
+def resolve_clone_path(cwd: str | pathlib.Path | None = None) -> str:
+    """Find the git repo root for `cwd` (default: `os.getcwd()`).
+
+    Raises if not inside a git repo.
+    """
+    cwd_str = str(cwd or os.getcwd())
+    result = subprocess.run(
+        ["git", "-C", cwd_str, "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"merge-watcher: cwd '{cwd_str}' is not inside a git repository "
+            f"(`git rev-parse --show-toplevel` exited {result.returncode}): "
+            f"{result.stderr.strip()}"
+        )
+    return result.stdout.strip()
+
+
+# ---------------------------------------------------------------------------
+# gh lifecycle-state probe (for `prune`)
+# ---------------------------------------------------------------------------
+def _resolve_gh() -> str:
+    """Locate the GitHub CLI. A Scheduled Task that runs `prune` inherits a
+    minimal PATH that often lacks the gh install dir, so probe the standard
+    Windows locations after PATH (mirrors merge-watcher.py's _resolve_bin)."""
+    import shutil
+
+    via_path = shutil.which("gh") or shutil.which("gh.exe")
+    if via_path:
+        return via_path
+    for candidate in (
+        r"C:\Program Files\GitHub CLI\gh.exe",
+        r"C:\Program Files (x86)\GitHub CLI\gh.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\GitHub CLI\gh.exe"),
+    ):
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return "gh"  # last resort — subprocess will FileNotFoundError loudly
+
+
+_GH_BIN = _resolve_gh()
+
+
+def _pr_lifecycle_state(pr: int, clone_path: str) -> str:
+    """Return the PR's lifecycle state via `gh pr view --json state` — one of
+    'MERGED' / 'CLOSED' / 'OPEN', or '' when gh is unavailable or errors.
+
+    Isolated so `prune` is unit-testable by monkeypatching this seam (the bats
+    suite cannot reliably stub a `gh` binary on native-Windows Python — its
+    shutil.which skips extensionless PATH stubs). Returning '' on any failure
+    makes `prune` KEEP the entry (fail-safe: never unregister on uncertainty).
+    """
+    try:
+        r = subprocess.run(
+            [_GH_BIN, "pr", "view", str(pr), "--json", "state", "-q", ".state"],
+            cwd=clone_path or None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return ""
+    if r.returncode == 0:
+        return r.stdout.strip().upper()
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+def cmd_register(args: argparse.Namespace) -> int:
+    pr = int(args.pr)
+    clone_path = resolve_clone_path()
+    now = int(time.time())
+    with registry_lock():
+        entries = read_registry()
+        for e in entries:
+            if int(e.get("pr", -1)) == pr and e.get("clone_path") == clone_path:
+                print(
+                    f"merge-watch: PR #{pr} already registered for clone {clone_path} "
+                    f"(registered_at={e.get('registered_at', '?')})",
+                    file=sys.stderr,
+                )
+                return 1
+        entries.append(
+            {
+                "pr": pr,
+                "clone_path": clone_path,
+                "registered_at": now,
+                "triage_attempts": 0,
+            }
+        )
+        write_registry(entries)
+    print(
+        f"merge-watch: registered PR #{pr} for clone {clone_path}.\n"
+        f"  Watcher now owns this PR; use `merge-watch unregister {pr}` to take back control.\n"
+        f"  The orchestrator must check this registry before any merge-gates poll + skip if "
+        f"the PR is registered."
+    )
+    return 0
+
+
+def cmd_unregister(args: argparse.Namespace) -> int:
+    pr = int(args.pr)
+    clone_path = resolve_clone_path()
+    with registry_lock():
+        entries = read_registry()
+        before = len(entries)
+        entries = [
+            e
+            for e in entries
+            if not (int(e.get("pr", -1)) == pr and e.get("clone_path") == clone_path)
+        ]
+        removed = before - len(entries)
+        if removed == 0:
+            print(
+                f"merge-watch: PR #{pr} not registered for clone {clone_path}; nothing to do.",
+                file=sys.stderr,
+            )
+            return 1
+        write_registry(entries)
+        # Also drop the per-PR state file so a re-register starts clean.
+        state = state_dir() / f"{pr}.json"
+        if state.exists():
+            state.unlink()
+    print(f"merge-watch: unregistered PR #{pr}. Ownership returned to orchestrator.")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    pr_filter = int(args.pr) if args.pr is not None else None
+    entries = read_registry()
+    if pr_filter is not None:
+        entries = [e for e in entries if int(e.get("pr", -1)) == pr_filter]
+    if not entries:
+        if pr_filter is not None:
+            print(f"merge-watch: PR #{pr_filter} not registered.")
+        else:
+            print("merge-watch: registry empty.")
+        return 0
+    # Pretty table.
+    rows = []
+    for e in entries:
+        pr = int(e.get("pr", -1))
+        state_file = state_dir() / f"{pr}.json"
+        last_state = "(no poll yet)"
+        last_poll = "-"
+        if state_file.exists():
+            try:
+                s = json.loads(state_file.read_text(encoding="utf-8"))
+                last_state = s.get("last_state", "?")
+                last_poll = time.strftime("%H:%M:%S", time.localtime(s.get("last_poll_unix", 0)))
+            except json.JSONDecodeError:
+                last_state = "(state-file corrupt)"
+        rows.append(
+            (
+                f"#{pr}",
+                pathlib.Path(e.get("clone_path", "?")).name or "?",
+                last_state,
+                last_poll,
+                str(e.get("triage_attempts", 0)),
+            )
+        )
+    widths = [max(len(r[i]) for r in [("PR", "CLONE", "LAST_STATE", "LAST_POLL", "TRIAGE"), *rows]) for i in range(5)]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format("PR", "CLONE", "LAST_STATE", "LAST_POLL", "TRIAGE"))
+    print("-" * (sum(widths) + 8))
+    for r in rows:
+        print(fmt.format(*r))
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    print(json.dumps(read_registry(), indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    """Sweep the registry: unregister every PR that gh reports as MERGED or
+    CLOSED (and wipe its per-PR state file).
+
+    Belt-and-suspenders to the daemon's reconcile-on-poll short-circuit: the
+    daemon can only reconcile while it is RUNNING, so a janitor that runs this
+    verb heals the registry even across daemon-down windows (crash, logout,
+    machine off). OPEN PRs and PRs whose state can't be determined (gh
+    error/offline -> '') are KEPT — fail-safe; never unregister on uncertainty.
+
+    `--dry-run` reports the plan without mutating the registry.
+    """
+    dry_run = bool(getattr(args, "dry_run", False))
+    entries = read_registry()
+    if not entries:
+        print("merge-watch prune: registry empty; nothing to do.")
+        return 0
+    # Query gh state OUTSIDE the registry lock — gh calls are slow and we must
+    # not hold the cross-process lock across them. The actual removal re-reads
+    # under the lock and deletes only the keys we resolved here.
+    pruned = []   # (pr, clone_path, state, registered_at)
+    kept = []     # (pr, clone_path)  — OPEN
+    unknown = []  # (pr, clone_path)  — gh error / offline
+    for e in entries:
+        pr = int(e.get("pr", -1))
+        clone_path = e.get("clone_path", "")
+        state = _pr_lifecycle_state(pr, clone_path)
+        if state in ("MERGED", "CLOSED"):
+            pruned.append((pr, clone_path, state, e.get("registered_at")))
+        elif state == "OPEN":
+            kept.append((pr, clone_path))
+        else:
+            unknown.append((pr, clone_path))
+
+    if pruned and not dry_run:
+        # Identity includes registered_at so an entry unregistered + re-registered
+        # between the gh probe (above, outside the lock) and this locked delete is
+        # NOT pruned as if it were the original watch (CR #534).
+        prune_keys = {(pr, cp, ra) for pr, cp, _state, ra in pruned}
+        with registry_lock():
+            current = read_registry()
+            remaining = [
+                e
+                for e in current
+                if (int(e.get("pr", -1)), e.get("clone_path", ""), e.get("registered_at"))
+                not in prune_keys
+            ]
+            write_registry(remaining)
+            for pr, _cp, _state, _ra in pruned:
+                sf = state_dir() / f"{pr}.json"
+                if sf.exists():
+                    try:
+                        sf.unlink()
+                    except OSError:
+                        pass
+
+    verb = "would prune" if dry_run else "pruned"
+    for pr, cp, state, _ra in pruned:
+        print(f"merge-watch prune: {verb} #{pr} ({state}) [{pathlib.Path(cp).name}]")
+    for pr, cp in unknown:
+        print(
+            f"merge-watch prune: kept #{pr} (state unknown — gh error/offline) "
+            f"[{pathlib.Path(cp).name}]",
+            file=sys.stderr,
+        )
+    print(
+        f"merge-watch prune: {verb} {len(pruned)}, kept {len(kept)} open, "
+        f"{len(unknown)} unknown."
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="merge-watch",
+        description=(
+            "Per-user CLI for smatchet-merge-watcher Phase 1 (registry CRUD). "
+            "See docs/plans/shipped/smatchet-merge-watcher.md for the full design."
+        ),
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("register", help="add a PR to the watcher registry")
+    r.add_argument("pr", help="PR number (e.g. 361)")
+    r.set_defaults(func=cmd_register)
+
+    u = sub.add_parser("unregister", help="remove a PR from the watcher registry")
+    u.add_argument("pr", help="PR number")
+    u.set_defaults(func=cmd_unregister)
+
+    s = sub.add_parser("status", help="show registry state (one PR or all)")
+    s.add_argument("pr", nargs="?", help="optional PR number filter")
+    s.set_defaults(func=cmd_status)
+
+    l = sub.add_parser("list", help="dump full registry as JSON")
+    l.set_defaults(func=cmd_list)
+
+    pr = sub.add_parser(
+        "prune",
+        help="unregister PRs that gh reports as MERGED/CLOSED (registry janitor)",
+    )
+    pr.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would be pruned without mutating the registry",
+    )
+    pr.set_defaults(func=cmd_prune)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except (RuntimeError, TimeoutError) as exc:
+        print(f"merge-watch: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
