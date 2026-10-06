@@ -76,8 +76,20 @@ case "$1" in
     pr)
         case "${2:-}" in
             list)
-                f=""; prev=""
-                for a in "$@"; do [ "$prev" = "--jq" ] && { f="$a"; break; }; prev="$a"; done
+                f=""; lim=""; prev=""
+                for a in "$@"; do
+                    case "$prev" in --jq) f="$a" ;; --limit) lim="$a" ;; esac
+                    prev="$a"
+                done
+                # Failure seams (postmortem-owed-graphql-504-reads-as-clean):
+                # STUB_PRLIST_FAIL = stderr text for an unconditional exit 1;
+                # STUB_PRLIST_FAIL_ABOVE = 504 only while --limit exceeds it.
+                printf '%s\n' "$lim" >> "$PM_DATA/prlist_limits.log"
+                if [ -n "${STUB_PRLIST_FAIL:-}" ]; then echo "$STUB_PRLIST_FAIL" >&2; exit 1; fi
+                if [ -n "${STUB_PRLIST_FAIL_ABOVE:-}" ] && [ "$lim" -gt "$STUB_PRLIST_FAIL_ABOVE" ]; then
+                    echo "HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)" >&2
+                    exit 1
+                fi
                 if [ -n "$f" ]; then jq -r "$f" "$PM_PRLIST_FIXTURE"; else cat "$PM_PRLIST_FIXTURE"; fi
                 exit 0 ;;
             view)
@@ -102,7 +114,20 @@ case "$1" in
                 exit 0 ;;
         esac ;;
     api)
-        path="$2"
+        path="$2"; [ "$path" = "--paginate" ] && path="$3"
+        case "$path" in
+            # cr-context-not-green exemption probes (REST). Defaults model an
+            # ordinary human code PR; prfiles_<n>.txt / prmeta_<n>.txt override
+            # with the already-jq-filtered output ("<login> <head-ref>").
+            */pulls/*/files*)
+                pr="${path#*/pulls/}"; pr="${pr%%/*}"
+                if [ -f "$PM_DATA/prfiles_${pr}.txt" ]; then cat "$PM_DATA/prfiles_${pr}.txt"; else echo "Source/Core/src/Feature.cpp"; fi
+                exit 0 ;;
+            */pulls/*)
+                pr="${path##*/pulls/}"
+                if [ -f "$PM_DATA/prmeta_${pr}.txt" ]; then cat "$PM_DATA/prmeta_${pr}.txt"; else echo "someone feature/branch"; fi
+                exit 0 ;;
+        esac
         sha="${path#*/commits/}"; sha="${sha%/pulls}"
         cntfile="$PM_DATA/pulls_${sha}.txt"
         if [ -f "$cntfile" ]; then cat "$cntfile"; else echo 1; fi
@@ -290,6 +315,48 @@ JSON
     run_detector
     [ "$status" -eq 0 ]
     [[ "$output" != *"PR #2009"* ]]
+}
+
+# The All-checks-green aggregate re-derives the other checks' verdict; it is not
+# an independent gate. A red aggregate on a merged head (its run raced the merge,
+# or timed out) beside an otherwise-green rollup is no escape.
+@test "a red All-checks-green aggregate alone owes nothing (it is not an independent gate)" {
+    prlist <<'JSON'
+[{"number":2014,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"a14"},"labels":[],
+  "statusCheckRollup":[
+    {"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-10T09:00:00Z"},
+    {"__typename":"CheckRun","name":"All checks green (block-on-any-red)","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    run_detector
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"PR #2014"* ]]
+    [[ "$output" == *"no gate escapes owed"* ]]
+}
+
+@test "a real red beside a red aggregate is still owed, named without the aggregate" {
+    prlist <<'JSON'
+[{"number":2015,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"a15"},"labels":[],
+  "statusCheckRollup":[
+    {"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-06-10T09:00:00Z"},
+    {"__typename":"CheckRun","name":"All checks green (block-on-any-red)","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    run_detector
+    [[ "$output" == *"postmortem owed: PR #2015 — red-check: Windows + MSVC"* ]]
+    [[ "$output" != *"All checks green"* ]]
+}
+
+@test "a REQUIRED All-checks-green aggregate still running at merge is not never-terminal" {
+    export POSTMORTEM_ABSENT_GRACE_SECONDS=0
+    export POSTMORTEM_REQUIRED_CONTEXTS="Windows + MSVC,All checks green (block-on-any-red)"
+    prlist <<'JSON'
+[{"number":2016,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"a16"},"labels":[],
+  "statusCheckRollup":[
+    {"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-10T09:00:00Z"},
+    {"__typename":"CheckRun","name":"All checks green (block-on-any-red)","status":"IN_PROGRESS","conclusion":null,"startedAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    run_detector
+    [[ "$output" != *"PR #2016"* ]]
+    [[ "$output" != *"required-never-terminal"* ]]
 }
 
 @test "allow-list is sourced from merge-gates.sh, not hand-duplicated (drift guard)" {
@@ -1436,4 +1503,247 @@ JSON
     run_detector
     [[ "$output" != *"required-absent"* ]]
     [[ "$output" != *"PR #8046"* ]]
+}
+
+# ============================================================================
+# postmortem-owed-graphql-504-reads-as-clean (tooling P1) — a failed or empty
+# merged-PR fetch must read "window NOT scanned", never "merges clean"; a
+# 5xx / timeout retries at a halved --limit before giving up.
+# ============================================================================
+
+@test "fetch: a 504 on every attempt reads NOT scanned, never merges clean (--list exit 0)" {
+    export STUB_PRLIST_FAIL="HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)"
+    run bash "$SCRIPT" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"postmortem-owed: merged-PR fetch failed (HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)) — window NOT scanned"* ]]
+    [[ "$output" != *"merges clean"* ]]
+    [[ "$output" != *"no gate escapes owed"* ]]
+    # 60 → 30 → 15, then give up (two halvings by default).
+    [ "$(paste -sd, "$PM_DATA/prlist_limits.log")" = "60,30,15" ]
+}
+
+@test "fetch: --blocking exits non-zero when the window was NOT scanned" {
+    export STUB_PRLIST_FAIL="HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)"
+    run bash "$SCRIPT" --blocking
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"window NOT scanned"* ]]
+    [[ "$output" != *"merges clean"* ]]
+}
+
+@test "fetch: --nudge stays advisory but says NOT scanned (no clean silence)" {
+    export STUB_PRLIST_FAIL="HTTP 504: 504 Gateway Timeout (https://api.github.com/graphql)"
+    run bash "$SCRIPT" --nudge
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"window NOT scanned"* ]]
+}
+
+@test "fetch: a retry that succeeds at a smaller --limit scans normally" {
+    export STUB_PRLIST_FAIL_ABOVE=30
+    prlist <<'JSON'
+[{"number":9201,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"r1"},"labels":[],
+  "statusCheckRollup":[{"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    run bash "$SCRIPT" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"retrying with --limit 30"* ]]
+    [[ "$output" == *"postmortem owed: PR #9201 — red-check: Windows + MSVC"* ]]
+    [[ "$output" != *"NOT scanned"* ]]
+    [ "$(paste -sd, "$PM_DATA/prlist_limits.log")" = "60,30" ]
+}
+
+@test "fetch: a retried clean window still prints the clean line (rows were read)" {
+    export STUB_PRLIST_FAIL_ABOVE=30
+    prlist <<'JSON'
+[{"number":9202,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"r2"},"labels":[],
+  "statusCheckRollup":[{"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    run bash "$SCRIPT" --blocking
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no gate escapes owed a postmortem (last 1 merges clean)"* ]]
+}
+
+@test "fetch: a non-transient failure is not retried" {
+    export STUB_PRLIST_FAIL="HTTP 401: Bad credentials (https://api.github.com/graphql)"
+    run bash "$SCRIPT" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"merged-PR fetch failed (HTTP 401: Bad credentials"*"window NOT scanned"* ]]
+    [ "$(wc -l < "$PM_DATA/prlist_limits.log")" -eq 1 ]
+}
+
+@test "fetch: zero rows is NOT a clean window either" {
+    # setup()'s default fixture is an empty merged-PR list.
+    run bash "$SCRIPT" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"merged-PR fetch failed (0 merged PRs returned) — window NOT scanned"* ]]
+    [[ "$output" != *"merges clean"* ]]
+    run bash "$SCRIPT" --blocking
+    [ "$status" -eq 3 ]
+}
+
+@test "fetch: an owed escape from another trigger still lists when the window was NOT scanned" {
+    export STUB_PRLIST_FAIL="HTTP 502: Bad Gateway"
+    printf 'deadbee\tfeat: sneaky direct push\n' > "$PM_DATA/gitlog_directpush.txt"
+    echo 0 > "$PM_DATA/pulls_deadbee.txt"
+    run bash "$SCRIPT" --blocking
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"commit deadbee — direct push"* ]]
+    [[ "$output" == *"window NOT scanned"* ]]
+}
+
+# ============================================================================
+# Trigger 5 — cr-context-not-green (cr-gate-greens-with-no-cr-status-on-head,
+# item 4): merged while the CR findings StatusContext was never green, with no
+# cr-out-of-band and no policy exemption.
+# ============================================================================
+
+@test "cr-context-not-green: merged with CR findings PENDING and no cr-out-of-band owes" {
+    prlist <<'JSON'
+[{"number":9301,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"g1"},"labels":[],
+  "statusCheckRollup":[
+    {"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-10T09:00:00Z"},
+    {"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"PENDING","createdAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    run_detector
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"postmortem owed: PR #9301 — cr-context-not-green: PENDING"* ]]
+    run bash "$SCRIPT" --blocking
+    [ "$status" -eq 1 ]
+}
+
+@test "cr-context-not-green: the LATEST CR findings status decides (a later SUCCESS clears an earlier PENDING)" {
+    prlist <<'JSON'
+[{"number":9302,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"g2"},"labels":[],
+  "statusCheckRollup":[
+    {"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"PENDING","createdAt":"2026-06-10T08:00:00Z"},
+    {"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"SUCCESS","createdAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    run_detector
+    [[ "$output" != *"PR #9302"* ]]
+    [[ "$output" == *"no gate escapes owed"* ]]
+}
+
+@test "cr-context-not-green: a live cr-out-of-band label hands the PR to the override trigger instead" {
+    prlist <<'JSON'
+[{"number":9303,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"g3"},"labels":[{"name":"cr-out-of-band"}],
+  "statusCheckRollup":[{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"PENDING","createdAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    echo '{"statusCheckRollup":[{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"PENDING","startedAt":"2026-06-10T09:00:00Z"}]}' > "$PM_DATA/rollup_9303.json"
+    run_detector
+    [[ "$output" == *"PR #9303 — override: cr-out-of-band"* ]]
+    [[ "$output" != *"cr-context-not-green"* ]]
+}
+
+@test "cr-context-not-green: cr-out-of-band recorded only in the snapshot (label stripped post-merge) still exempts" {
+    prlist <<'JSON'
+[{"number":9304,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"g4"},"labels":[],
+  "statusCheckRollup":[{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"PENDING","createdAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    echo '{"pr":9304,"mergeCommit":"g4","redChecks":["CodeRabbit"],"overrideLabels":["cr-out-of-band"]}' > "$SNAPSHOT_LEDGER"
+    run_detector
+    [[ "$output" != *"cr-context-not-green"* ]]
+    [[ "$output" == *"PR #9304 — red-check: CodeRabbit; override: cr-out-of-band"* ]]
+}
+
+@test "cr-context-not-green: a self-improvement-only diff is CR-exempt by policy" {
+    prlist <<'JSON'
+[{"number":9305,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"g5"},"labels":[],
+  "statusCheckRollup":[{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"PENDING","createdAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    printf 'docs/self-improvement/categories/tooling/x.md\ndocs/self-improvement/postmortems.md\n' > "$PM_DATA/prfiles_9305.txt"
+    run_detector
+    [[ "$output" != *"PR #9305"* ]]
+}
+
+@test "cr-context-not-green: one code file outside docs/self-improvement/ removes the exemption" {
+    prlist <<'JSON'
+[{"number":9306,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"g6"},"labels":[],
+  "statusCheckRollup":[{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"PENDING","createdAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    printf 'docs/self-improvement/postmortems.md\nagents/scripts/core/x.sh\n' > "$PM_DATA/prfiles_9306.txt"
+    run_detector
+    [[ "$output" == *"PR #9306 — cr-context-not-green: PENDING"* ]]
+}
+
+@test "cr-context-not-green: a Dependabot github-actions bump is CR-exempt by policy" {
+    prlist <<'JSON'
+[{"number":9307,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"g7"},"labels":[],
+  "statusCheckRollup":[{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"PENDING","createdAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    echo 'dependabot[bot] dependabot/github_actions/actions/checkout-7.0.2' > "$PM_DATA/prmeta_9307.txt"
+    run_detector
+    [[ "$output" != *"PR #9307"* ]]
+}
+
+@test "cr-context-not-green: a FAILURE already named by trigger 1 is not repeated" {
+    prlist <<'JSON'
+[{"number":9308,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"g8"},"labels":[],
+  "statusCheckRollup":[{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"FAILURE","createdAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    run_detector
+    [[ "$output" == *"PR #9308 — red-check: CR findings (0 actionable)"* ]]
+    [[ "$output" != *"cr-context-not-green"* ]]
+}
+
+@test "cr-context-not-green: snapshot path (poller passed) is still judged on the live CR context" {
+    # Class A/B: the poller's grace expiry greened a silent CR, so the snapshot
+    # is clean (redChecks=[]) while the CR findings context never went green.
+    prlist <<'JSON'
+[{"number":9309,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"g9"},"labels":[],
+  "statusCheckRollup":[{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"PENDING","createdAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    echo '{"pr":9309,"mergeCommit":"g9","redChecks":[],"overrideLabels":[]}' > "$SNAPSHOT_LEDGER"
+    run_detector
+    [[ "$output" == *"PR #9309 — cr-context-not-green: PENDING"* ]]
+}
+
+@test "cr-context-not-green: ABSENT on a code PR owes once the gate is live in the window and past grace" {
+    export POSTMORTEM_ABSENT_GRACE_SECONDS=0
+    export POSTMORTEM_REQUIRED_CONTEXTS=""
+    prlist <<'JSON'
+[{"number":9310,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"h0"},"labels":[],
+  "statusCheckRollup":[{"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-10T09:00:00Z"}]},
+ {"number":9311,"mergedAt":"2026-06-09T10:00:00Z","mergeCommit":{"oid":"h1"},"labels":[],
+  "statusCheckRollup":[{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"SUCCESS","createdAt":"2026-06-09T09:00:00Z"}]}]
+JSON
+    run_detector
+    [[ "$output" == *"PR #9310 — cr-context-not-green: absent"* ]]
+    [[ "$output" != *"PR #9311"* ]]
+}
+
+@test "cr-context-not-green: ABSENT is inert when no PR in the window carries the context (gate not live)" {
+    export POSTMORTEM_ABSENT_GRACE_SECONDS=0
+    export POSTMORTEM_REQUIRED_CONTEXTS=""
+    prlist <<'JSON'
+[{"number":9312,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"h2"},"labels":[],
+  "statusCheckRollup":[{"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    run_detector
+    [[ "$output" != *"cr-context-not-green"* ]]
+    [[ "$output" == *"no gate escapes owed"* ]]
+}
+
+@test "cr-context-not-green: ABSENT on a PR merged before the gate was first seen live is not judged" {
+    export POSTMORTEM_ABSENT_GRACE_SECONDS=0
+    export POSTMORTEM_REQUIRED_CONTEXTS=""
+    prlist <<'JSON'
+[{"number":9313,"mergedAt":"2026-06-08T10:00:00Z","mergeCommit":{"oid":"h3"},"labels":[],
+  "statusCheckRollup":[{"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-08T09:00:00Z"}]},
+ {"number":9314,"mergedAt":"2026-06-09T10:00:00Z","mergeCommit":{"oid":"h4"},"labels":[],
+  "statusCheckRollup":[{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"SUCCESS","createdAt":"2026-06-09T09:00:00Z"}]}]
+JSON
+    run_detector
+    [[ "$output" != *"PR #9313"* ]]
+}
+
+@test "cr-context-not-green: ABSENT inside the run-creation grace window is not judged" {
+    # setup() keeps every fixture inside an absurd grace (absent_judgeable=0).
+    export POSTMORTEM_REQUIRED_CONTEXTS=""
+    prlist <<'JSON'
+[{"number":9315,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"h5"},"labels":[],
+  "statusCheckRollup":[]},
+ {"number":9316,"mergedAt":"2026-06-09T10:00:00Z","mergeCommit":{"oid":"h6"},"labels":[],
+  "statusCheckRollup":[{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"SUCCESS","createdAt":"2026-06-09T09:00:00Z"}]}]
+JSON
+    run_detector
+    [[ "$output" != *"PR #9315"* ]]
 }
