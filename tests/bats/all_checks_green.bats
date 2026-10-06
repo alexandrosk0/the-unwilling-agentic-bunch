@@ -374,6 +374,7 @@ done
 case "$endpoint" in
     */check-runs*) kind=runs; field=check_runs ;;
     */status*) kind=status; field=statuses ;;
+    */commits/*/pulls*) kind=assoc; field="" ;;
     */pulls/*) kind=pr; field="" ;;
     *) echo "stub gh: unexpected endpoint $endpoint" >&2; exit 1 ;;
 esac
@@ -429,6 +430,12 @@ serve() {
 
 serve_pr() { # <head-sha> [state]
     jq -n --arg h "$1" --arg s "${2:-open}" '{head: {sha: $h}, state: $s, labels: [], body: ""}' > "$STUB/pr.json"
+}
+
+# serve_assoc '<jq array>' — the head commit's associated pulls
+# (GET .../commits/<sha>/pulls); $h is bound to $HEAD_SHA.
+serve_assoc() {
+    jq -n --arg h "$HEAD_SHA" "$1" > "$STUB/assoc.json"
 }
 
 HEAD_SHA="dfa2e0ce6c52711d0825e5aa772818785050887f"
@@ -491,19 +498,53 @@ run_live() {
     [[ "$output" == *"superseded"* ]]
 }
 
-@test "live: a PR that is no longer open ends the run green as moot (no red on the merged head)" {
+# merged_pr — serve the PR as merged (GitHub reports state closed + merged true).
+merged_pr() {
+    jq -n --arg h "$HEAD_SHA" '{head: {sha: $h}, state: "closed", merged: true, labels: [], body: ""}' > "$STUB/pr.json"
+}
+
+@test "live: a merged PR ends the run green as moot when no open PR shares its head" {
     # Even with a red check on the head: there is no merge left to gate, and a
     # FAILURE left on a merged head reads as a gate escape.
-    stub_gh; replay "2026-10-04T01:56:45Z"; serve runs; serve status; serve_pr "$HEAD_SHA" closed
-    run_live
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"verdict moot: PR is closed"* ]]
-    [[ "$output" != *"::error"* ]]
-    jq -n --arg h "$HEAD_SHA" '{head: {sha: $h}, state: "closed", merged: true, labels: [], body: ""}' > "$STUB/pr.json"
-    rm -f "$STUB"/*.count
+    stub_gh; replay "2026-10-04T01:56:45Z"; serve runs; serve status; merged_pr
+    serve_assoc '[{number: 2286, state: "closed", head: {sha: $h}}]'
     run_live
     [ "$status" -eq 0 ]
     [[ "$output" == *"verdict moot: PR is merged"* ]]
+    [[ "$output" != *"::error"* ]]
+}
+
+@test "live: a PR closed without merging ends red, never a moot green" {
+    # Check runs belong to the commit: a green here would also be the aggregate
+    # of any other PR on this head, re-armed by a later label or body edit.
+    stub_gh; replay "2026-10-04T01:56:45Z"; serve runs; serve status; serve_pr "$HEAD_SHA" closed
+    serve_assoc '[]'
+    run_live
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"PR closed::PR #2286 is closed without a merge"* ]]
+    [[ "$output" != *"verdict moot"* ]]
+}
+
+@test "live: a merged PR whose head another open PR shares ends red" {
+    stub_gh; replay final "$GREEN_EDIT"; serve runs; serve status; merged_pr
+    serve_assoc '[{number: 2286, state: "closed", head: {sha: $h}},
+                  {number: 2290, state: "open", head: {sha: $h}},
+                  {number: 2291, state: "open", head: {sha: "2222222222222222222222222222222222222222"}}]'
+    run_live
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"head shared::PR #2286 is merged, but open PR(s) #2290 share head"* ]]
+    [[ "$output" != *"#2291"* ]]
+    [[ "$output" != *"verdict moot"* ]]
+}
+
+@test "live: a merged PR whose associated-PR lookup fails ends red (fail-closed)" {
+    stub_gh; replay final "$GREEN_EDIT"; serve runs; serve status; merged_pr
+    serve_assoc '[]'
+    : > "$STUB/assoc.1.fail"
+    run_live
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not be listed"* ]]
+    [[ "$output" != *"verdict moot"* ]]
 }
 
 @test "live: still pending when the budget is spent -> timeout is red" {

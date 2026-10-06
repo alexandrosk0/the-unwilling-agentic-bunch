@@ -64,10 +64,15 @@
 #     code-scanning result check, a label-triggered re-run);
 #   * PR head moved -> exit 1 (this run's verdict is void; the new head gets
 #     its own run);
-#   * PR no longer open (merged / closed) -> exit 0 with a "verdict moot"
-#     notice: a red here would leave a FAILURE check on nearly every merged
-#     head (a merge through safe-merge.sh does not wait for this check), which
-#     reads as a gate escape to anything auditing merged heads;
+#   * PR merged -> exit 0 with a "verdict moot" notice: a red here would leave
+#     a FAILURE check on nearly every merged head (a merge through
+#     safe-merge.sh does not wait for this check), which reads as a gate escape
+#     to anything auditing merged heads. Not when another OPEN PR has the same
+#     head SHA (or that cannot be confirmed): check runs belong to the commit,
+#     not the PR, so a green published here would read as THAT PR's aggregate
+#     too -> exit 1;
+#   * PR closed without merging -> exit 1, for the same reason: a later label
+#     or body edit on the closed PR must not turn a shared head green;
 #   * still pending at ACG_MAX_WAIT_SECONDS (default 10200 = 170 min) -> exit 1
 #     (a timeout is red, fail-closed; re-running the job or any label change
 #     clears it). The budget must outlast the slowest LEGITIMATE path, not the
@@ -89,8 +94,9 @@
 # project.config.json's set — set but empty disables the required-absent rule).
 # Test seams: ACG_SLEEP_BIN (default `sleep`), ACG_PER_PAGE (default 100).
 #
-# Exit: 0 success / verdict moot (PR no longer open) · 1 failure (red, timeout,
-#       superseded) · 2 usage / API error · 3 pending (fixture mode only).
+# Exit: 0 success / verdict moot (PR merged, head not shared) · 1 failure (red,
+#       timeout, superseded, closed unmerged) · 2 usage / API error · 3 pending
+#       (fixture mode only).
 # Tests: tests/bats/all_checks_green.bats.
 # ----------------------------------------------------------------------------
 set -uo pipefail
@@ -391,18 +397,44 @@ poll_wait() {
     "$SLEEP_BIN" "$wait"
 }
 
-# pr_superseded — end the run when the PR moved on. A PR that is no longer open
-# exits 0: there is no merge left to gate, and a red here would sit on the
-# merged head as a false gate escape. A moved head exits 1 (void; the new head
-# gets its own run).
+# other_open_prs_on_sha — print the numbers of the OPEN PRs other than $PR whose
+# head is $SHA (the commit's associated pulls). rc 1 when the lookup fails.
+other_open_prs_on_sha() {
+    local rc=0
+    rest_get assoc "repos/$REPO/commits/$SHA/pulls?per_page=100" || rc=$?
+    [ "$rc" -eq 0 ] || return 1
+    jq -r --arg sha "$SHA" --argjson pr "$PR" \
+        '.[] | select(.state == "open" and .number != $pr and .head.sha == $sha) | .number' \
+        "$WORK/cache/assoc.body"
+}
+
+# pr_superseded — end the run when the PR moved on. A merged PR exits 0: there
+# is no merge left to gate, and a red here would sit on the merged head as a
+# false gate escape. Check runs belong to the COMMIT, though, so that green is
+# also what any other PR with the same head reads: a merged PR whose head an
+# open PR shares (or where that cannot be confirmed) exits 1, and so does a PR
+# closed without merging, which has no merged head to protect. A moved head
+# exits 1 (void; the new head gets its own run).
 pr_superseded() {
-    local head state
+    local head state others
     head="$(jq -r '.head' "$WORK/pr.json")"
     state="$(jq -r '.state' "$WORK/pr.json")"
-    if [ "$state" != "open" ]; then
-        echo "::notice title=All checks green — verdict moot::verdict moot: PR #$PR is $state; there is no merge left to gate."
-        echo "all-checks-green: verdict moot: PR is $state."
+    if [ "$state" = "merged" ]; then
+        if ! others="$(other_open_prs_on_sha)"; then
+            echo "::error title=All checks green — head may be shared::PR #$PR is merged, but the open PRs on ${SHA:0:12} could not be listed; no green is published on a head another PR may share. Re-run the job."
+            exit 1
+        fi
+        if [ -n "$others" ]; then
+            echo "::error title=All checks green — head shared::PR #$PR is merged, but open PR(s) #${others//$'\n'/ #} share head ${SHA:0:12}; this check is theirs too, so no moot green is published."
+            exit 1
+        fi
+        echo "::notice title=All checks green — verdict moot::verdict moot: PR #$PR is merged; there is no merge left to gate."
+        echo "all-checks-green: verdict moot: PR is merged."
         exit 0
+    fi
+    if [ "$state" != "open" ]; then
+        echo "::error title=All checks green — PR closed::PR #$PR is $state without a merge; no green is published on head ${SHA:0:12}, which another PR may share. Reopening the PR re-runs this check."
+        exit 1
     fi
     if [ "$head" != "$SHA" ]; then
         echo "::error title=All checks green — superseded::PR #$PR head moved ${SHA:0:12} -> ${head:0:12}; this run's verdict is void (the new head gets its own run)."
