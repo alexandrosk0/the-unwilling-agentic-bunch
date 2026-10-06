@@ -187,6 +187,56 @@ allowed() {
     done
 }
 
+@test "deny: an arm nested deeper than the tokenizer follows (an unchecked level never passes)" {
+    local c='gh pr merge 5 --auto' i
+    for i in 1 2 3 4 5 6 7 8 9; do c="echo \$($c)"; done
+    bash_call "$c"
+    denied
+    # A deep nest with no arm at its core is still unverifiable, so still denied
+    # once it mentions auto (the fast path lets every other command through).
+    c='echo auto'
+    for i in 1 2 3 4 5 6 7 8 9; do c="echo \$($c)"; done
+    bash_call "$c"
+    denied
+}
+
+@test "deny: a function body defined with the function keyword" {
+    bash_call 'function f { gh pr merge 5 --auto; }; f'
+    denied
+    bash_call 'function f() { gh pr merge 5 --squash --auto; }'
+    denied
+}
+
+@test "deny: env -S / --split-string runs its string as the command" {
+    for c in 'env -S "gh pr merge 5 --auto"' \
+             'env -S"gh pr merge 5 --auto"' \
+             'env -u X --split-string="gh pr merge 5 --squash --auto"'; do
+        bash_call "$c"
+        denied
+    done
+    bash_call 'env -S "gh pr view 5" --json autoMergeRequest'
+    allowed
+}
+
+@test "deny: flock, watch and find -exec / -execdir run their command" {
+    for c in 'flock /tmp/l gh pr merge 5 --auto' \
+             'flock -w 10 /tmp/l gh pr merge 5 --auto' \
+             "flock /tmp/l -c 'gh pr merge 5 --auto'" \
+             'watch gh pr merge 5 --auto' \
+             "watch -n 30 'gh pr merge 5 --auto'" \
+             'find . -maxdepth 0 -exec gh pr merge 5 --auto \;' \
+             'find . -maxdepth 0 -execdir gh pr merge 5 --auto {} +'; do
+        bash_call "$c"
+        denied
+    done
+    for c in 'flock /tmp/l -c "echo gh pr merge 5 --auto"' \
+             "find . -name '*auto*' -exec ls {} \\;" \
+             'watch -n 5 gh pr checks 5'; do
+        bash_call "$c"
+        allowed
+    done
+}
+
 @test "deny: a gh api GraphQL enablePullRequestAutoMerge mutation" {
     bash_call "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
     denied

@@ -19,13 +19,17 @@
 #     double quotes and unquoted heredoc bodies), redirections — and split into
 #     simple commands on ; && || | & ( ) and newlines. Each simple command is
 #     stripped of leading keywords / wrappers (if then elif else do while until
-#     ! { time env VAR=val sudo nohup command exec xargs timeout <dur> nice …);
-#     it arms when argv[0] is `gh`, its first two positionals are `pr merge`
+#     ! { function <name> time env VAR=val sudo nohup command exec xargs timeout
+#     <dur> nice flock <file> …); `env -S '<cmd>'`, `flock <file> -c '<cmd>'`,
+#     `watch <cmd>` and `find … -exec <cmd> … ;|+` run their command too; it
+#     arms when argv[0] is `gh`, its first two positionals are `pr merge`
 #     (global flags such as `-R x` allowed anywhere) and a token is `--auto`.
 #     Quoted text is never a command position, so a commit message or a PR body
 #     that mentions the command passes. A heredoc body or `-c` string fed to a
 #     shell (`bash <<EOF`, `sh -s <<EOF`, `bash -c '…'`) and an `eval` string
 #     are executed, so they are checked too; any other heredoc body is text.
+#     Nesting deeper than the tokenizer follows (8 levels of `$(…)`, backticks,
+#     heredocs, `-c` / eval strings) is DENIED: an unchecked level never passes.
 #     `safe-merge.sh <pr>` itself never matches (its own `--auto` runs inside the
 #     script), and disarming (`--disable-auto`, `disable_pr_auto_merge`) is never
 #     blocked. The tokenizer runs in python3 (as capture-intent.sh's does); with
@@ -111,10 +115,12 @@ shopt -u nocasematch
 DENY_MSG="Blocked: a bare \`gh pr merge … --auto\` arms GitHub-native auto-merge."
 
 # ---------------------------------------------------------------- tokenizer
-# Exit 10 = the command arms auto-merge, 11 = it does not, anything else = the
-# tokenizer could not run (fall back to the regex below).
+# Exit 10 = the command arms auto-merge, 11 = it does not, 13 = nesting deeper
+# than the tokenizer follows (denied: an unchecked level never passes), anything
+# else = the tokenizer could not run (fall back to the regex below).
 read -r -d '' ARM_PY <<'PY'
 import re
+import shlex
 import sys
 
 MAX_DEPTH = 8
@@ -122,7 +128,7 @@ ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=")
 FD_WORD = re.compile(r"^(\d+|\{[A-Za-z_][A-Za-z0-9_]*\})$")
 # Reserved words that may precede a command in the same simple command.
 KEYWORDS = {"if", "then", "elif", "else", "fi", "do", "done", "while", "until",
-            "!", "{", "}", "coproc"}
+            "!", "{", "}", "coproc", "function"}
 # Wrappers that run their argument vector: name -> options that take a value.
 WRAPPERS = {
     "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
@@ -140,11 +146,20 @@ WRAPPERS = {
     "setsid": set(), "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
     "ionice": {"-c", "--class", "-n", "--classdata", "-p", "--pid"},
     "chronic": set(), "unbuffer": set(),
+    # flock <opts> <file> <cmd…> | <file> -c <cmd-string> — see skip_flock.
+    "flock": {"-w", "--wait", "--timeout", "-E", "--conflict-exit-code"},
 }
+# watch [opts] <cmd…> runs its words through `sh -c`; these options take a value.
+WATCH_VALUE_FLAGS = {"-n", "--interval", "-q", "--equexit"}
+FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "mksh", "ash", "fish"}
 # gh flags whose value is a separate word (so it is not read as a positional).
 GH_VALUE_FLAGS = {"-R", "--repo", "--hostname", "-b", "--body", "-F", "--body-file",
                   "-t", "--subject", "-A", "--author-email", "--match-head-commit"}
+
+
+class TooDeep(Exception):
+    """Nesting deeper than MAX_DEPTH: the guard cannot see inside, so it denies."""
 
 
 class Cmd(object):
@@ -306,8 +321,10 @@ class Parser(object):
                 lines.append(line)
             body = "\n".join(lines)
             cmd.stdin.append(body)
-            if expands and self.depth < MAX_DEPTH:
+            if expands:
                 # An unquoted delimiter: $(...) and backticks in the body run.
+                if self.depth >= MAX_DEPTH:
+                    raise TooDeep()
                 Parser(body, self.depth + 1, self.out).dq(0, None)
         return i
 
@@ -363,7 +380,7 @@ class Parser(object):
 
     def subst(self, i):
         if self.depth >= MAX_DEPTH:
-            return self.skip_parens(i, 1)
+            raise TooDeep()
         return Parser(self.s, self.depth + 1, self.out).run(i, stop_paren=True)
 
     def skip_parens(self, i, depth):
@@ -398,8 +415,9 @@ class Parser(object):
             else:
                 buf.append(s[j])
                 j += 1
-        if self.depth < MAX_DEPTH:
-            Parser("".join(buf), self.depth + 1, self.out).run(0)
+        if self.depth >= MAX_DEPTH:
+            raise TooDeep()
+        Parser("".join(buf), self.depth + 1, self.out).run(0)
         return min(j + 1, n)
 
 
@@ -408,7 +426,28 @@ def base(word):
     return b[:-4] if b.endswith(".exe") else b
 
 
-def skip_wrapper(name, w):
+def split_string(text):
+    """env -S splitting: whitespace-separated words with quotes and backslash
+    escapes (no command substitution — env never runs one)."""
+    try:
+        return shlex.split(text, posix=True)
+    except ValueError:
+        return text.split()
+
+
+def env_split(t, w, i):
+    """env -S / --split-string: return the split string's value and the index
+    after it, or None when <t> is not that option."""
+    if t in ("-S", "--split-string"):
+        return (w[i + 1] if i + 1 < len(w) else ""), i + 2
+    if t.startswith("--split-string="):
+        return t[len("--split-string="):], i + 1
+    if t.startswith("-S") and len(t) > 2:
+        return t[2:], i + 1
+    return None
+
+
+def skip_wrapper(name, w, payloads):
     takes, i = WRAPPERS[name], 0
     while i < len(w):
         t = w[i]
@@ -422,27 +461,69 @@ def skip_wrapper(name, w):
             break
         if name == "command" and t in ("-v", "-V"):
             return None                            # a lookup, nothing runs
+        if name == "env":
+            split = env_split(t, w, i)
+            if split is not None:
+                # The string is split into the command's leading words.
+                return split_string(split[0]) + w[split[1]:]
+        if name == "flock" and t in ("-c", "--command"):
+            payloads.append(w[i + 1] if i + 1 < len(w) else "")
+            return None
         i += 2 if t in takes else 1
     w = w[i:]
     if name == "timeout" and w:
         w = w[1:]                                  # the DURATION
+    if name == "flock" and w:
+        w = w[1:]                                  # the lock file / directory
+        if w and w[0] in ("-c", "--command"):
+            payloads.append(w[1] if len(w) > 1 else "")
+            return None
     return w
 
 
-def strip(words):
+def strip(words, payloads):
+    """Drop leading keywords, assignments and wrappers. Command strings a wrapper
+    runs through a shell are appended to <payloads>."""
     w = list(words)
     while w:
+        if w[0] == "function":
+            w = w[2:]                              # `function NAME { …`
+            continue
         if w[0] in KEYWORDS or ASSIGN.match(w[0]):
             w = w[1:]
             continue
         b = base(w[0])
         if b in WRAPPERS:
-            w = skip_wrapper(b, w[1:])
+            w = skip_wrapper(b, w[1:], payloads)
             if w is None:
                 return []
             continue
         break
     return w
+
+
+def watch_command(w):
+    """watch [opts] <cmd…>: the words it hands to `sh -c` (joined by spaces)."""
+    i = 1
+    while i < len(w) and w[i].startswith("-") and w[i] != "--":
+        i += 2 if w[i] in WATCH_VALUE_FLAGS else 1
+    if i < len(w) and w[i] == "--":
+        i += 1
+    return " ".join(w[i:])
+
+
+def find_execs(w):
+    """find … -exec <cmd…> ; | + — each -exec / -execdir / -ok / -okdir argv."""
+    subs, i = [], 1
+    while i < len(w):
+        if w[i] in FIND_EXEC:
+            j = i + 1
+            while j < len(w) and w[j] not in (";", "+"):
+                j += 1
+            subs.append(w[i + 1:j])
+            i = j
+        i += 1
+    return subs
 
 
 def is_arm(w):
@@ -492,22 +573,41 @@ def shell_payloads(w, cmd):
     return []
 
 
+def words_arm(words, cmd, depth):
+    if depth > MAX_DEPTH:
+        raise TooDeep()
+    payloads = []
+    w = strip(words, payloads)
+    for payload in payloads:
+        if arms(payload, depth + 1):
+            return True
+    if not w:
+        return False
+    if is_arm(w):
+        return True
+    b = base(w[0])
+    if b == "eval" and arms(" ".join(w[1:]), depth + 1):
+        return True
+    if b == "watch" and arms(watch_command(w), depth + 1):
+        return True
+    if b == "find":
+        for sub in find_execs(w):
+            if sub and words_arm(sub, Cmd(), depth + 1):
+                return True
+    for payload in shell_payloads(w, cmd):
+        if arms(payload, depth + 1):
+            return True
+    return False
+
+
 def arms(text, depth=0):
     if depth > MAX_DEPTH:
-        return False
+        raise TooDeep()
     out = []
     Parser(text, depth, out).run(0)
     for cmd in out:
-        w = strip(cmd.words)
-        if not w:
-            continue
-        if is_arm(w):
+        if words_arm(cmd.words, cmd, depth):
             return True
-        if base(w[0]) == "eval" and arms(" ".join(w[1:]), depth + 1):
-            return True
-        for payload in shell_payloads(w, cmd):
-            if arms(payload, depth + 1):
-                return True
     return False
 
 
@@ -516,7 +616,10 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "PowerShell":
         # PowerShell: backtick is the escape / line-continuation character.
         text = text.replace("`\r\n", " ").replace("`\n", " ").replace("`", "\\")
-    sys.exit(10 if arms(text) else 11)
+    try:
+        sys.exit(10 if arms(text) else 11)
+    except TooDeep:
+        sys.exit(13)
 
 
 try:
@@ -533,6 +636,7 @@ for py in python3 python; do
   case $? in
     10) deny "$DENY_MSG" ;;
     11) exit 0 ;;
+    13) deny "Blocked: the command nests substitutions / heredocs / shell strings deeper than this guard checks (8 levels), so an arm inside cannot be ruled out." ;;
   esac
 done
 
