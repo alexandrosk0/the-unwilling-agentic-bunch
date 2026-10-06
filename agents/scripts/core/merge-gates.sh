@@ -27,15 +27,27 @@
 # Plus: pullRequest.state == OPEN, reviewDecision in {APPROVED, null},
 # all connection pageInfo.hasNextPage == false.
 #
-# Rollup dedup: required CheckRuns with the same `.name` are deduped to the
-# entry with the latest `.startedAt` so stale FAILUREs from rerun jobs don't
-# falsely block. StatusContexts are deduped by `.context` (GitHub overwrites).
+# Rollup dedup: CheckRuns with the same `.name` are deduped to the newest entry
+# (newest check suite, then latest `.startedAt` — see 10-gate-filter.sh) so
+# stale FAILUREs from rerun jobs don't falsely block. StatusContexts are
+# deduped by `.context` (GitHub overwrites).
+# The rule cuts both ways: a rerun always carries the newest `.startedAt`, so a
+# rerun that FAILS displaces whatever stood before it — an older SUCCESS, or a
+# CANCELLED that blocked nothing — and the gate then blocks on the fresh red.
+# Latest-wins is still right; it just means a rerun is not free. In particular
+# `gh run rerun` replays the run's ORIGINAL event payload, so rerunning a check
+# whose subject is that payload (e.g. a PR-body-reading gate) can only re-fail —
+# and now blocks where it did not before (process 2026-09-07
+# rerunning-a-body-reading-gate-replays-a-frozen-payload).
 #
 # Per-PR label overrides (AGENTS.md § Merge gates § Per-PR overrides):
 #   tests-out-of-band → downgrades `Test-delta gate` FAIL → WARN
 #   perf-out-of-band  → downgrades `Perf PR-fast (...)` FAIL → WARN
 #   intent-out-of-band → downgrades `Intent section` FAIL → WARN
-#   plan-lock-out-of-band → downgrades `Plan-lock gate` FAIL → WARN
+#   plan-lock-out-of-band → downgrades `Plan-lock gate` FAIL → WARN. REQUIRES
+#                       a paired `plan-lock-disposition:<reason>` attestation
+#                       (label OR PR-body marker, the same shape as
+#                       cr-disposition) — the label ALONE is NOT honoured.
 #   cr-out-of-band    → downgrades a CodeRabbit block → WARN (CR gate only;
 #                       CI + user-comment gates still bind). REQUIRES a paired
 #                       `cr-disposition:<reason>` attestation (label OR PR-body
@@ -220,8 +232,9 @@ MERGE_GATES_CONFIG_FILE="${MERGE_GATES_CONFIG_FILE:-${PC_CONFIG_FILE:-$SCRIPT_DI
 # (NOT a glob) — mirrors agents/scripts/project/lint-rules.d/. The modules carry:
 #   00-common.sh      — the meant-to-block allow-list constant, the prompt-shim
 #                        lazy-source, and gh_pr_ready_idempotent (top-level).
-#   10-gate-filter.sh — the one giant `gh api graphql --jq` GATE_FILTER program
-#                        (the 37-field projection) as a template emitter.
+#   10-gate-filter.sh — the one giant GATE_FILTER jq program (the 42-field
+#                        projection) as a template emitter; run by standalone
+#                        `jq -f`, or by `gh api graphql --jq` when jq is absent.
 # The four gate-condition verdicts (CI / CodeRabbit / Bugbot / user-comments)
 # stay INLINE in poll_merge_gates: they share one tightly-coupled per-poll local
 # state (cr_pass, cr_open_blocks, streak counters, the nudge_coderabbit closure)
@@ -246,6 +259,171 @@ for _mg_mod in "$SCRIPT_DIR"/lib/script-freshness.sh \
 done
 unset _mg_mod
 
+# _mg_csv_has <", "-joined list> <name> — exact membership in a jq
+# `join(", ")` list (no check name contains ", ").
+_mg_csv_has() {
+    local rest="$1" item
+    while [ -n "$rest" ]; do
+        item="${rest%%, *}"
+        [ "$item" = "$2" ] && return 0
+        [ "$item" = "$rest" ] && break
+        rest="${rest#*, }"
+    done
+    return 1
+}
+
+# _mg_strip_jq_comment_lines <jq program> — the program without its full-line
+# `#` comments. They hold about half the gate filter's bytes and none of its
+# logic; dropping them keeps the jq-less `gh --jq` path (filter on argv) well
+# under the Windows 32,767-char exec cap as the filter grows. Only lines whose
+# first non-blank character is `#` go: the filter has no multi-line string
+# literal for such a line to sit inside, and trailing `# …` stays (harmless).
+_mg_strip_jq_comment_lines() {
+    local line out=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        out+="$line"$'\n'
+    done <<<"$1"
+    printf '%s' "$out"
+}
+
+# _mg_csv_drop <", "-joined list> <name> — the list without <name>.
+_mg_csv_drop() {
+    local rest="$1" item out=""
+    while [ -n "$rest" ]; do
+        item="${rest%%, *}"
+        if [ "$item" != "$2" ]; then out="${out:+$out, }$item"; fi
+        [ "$item" = "$rest" ] && break
+        rest="${rest#*, }"
+    done
+    printf '%s' "$out"
+}
+
+# _mg_lock_remote <owner> <repo> — the git remote of the checkout in the cwd
+# whose URL names <owner>/<repo> (the PR's BASE repository, where refs/locks/*
+# live), `origin` first. rc 1 when none does: in a fork clone `origin` is the
+# fork, whose lock table is empty, and reading it would call every red stale.
+_mg_lock_remote() {
+    local want r url
+    want="$(printf '%s/%s' "$1" "$2" | tr '[:upper:]' '[:lower:]')"
+    for r in origin $(git remote 2>/dev/null); do
+        url="$(git config --get "remote.${r}.url" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+        url="${url%/}"
+        url="${url%.git}"
+        case "$url" in
+            *[/:]"$want") printf '%s' "$r"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# _mg_planlock_red_cause <owner> <repo> <head sha> — why the head's latest
+# "Plan-lock gate" run went red, read from its annotations (each ::error the
+# gate prints becomes one): `collision` when it reported only write-set
+# overlaps, `infra` when any line is an infrastructure failure (lock table
+# undetermined, base ref unresolvable, gate library missing), `unknown` when
+# the run or its annotations cannot be read. Only a collision red can go
+# stale; an infra red persists across re-runs, so the override stays its escape.
+_mg_planlock_red_cause() {
+    local owner="$1" repo="$2" sha="$3" id msgs
+    if [ -z "$sha" ]; then echo unknown; return 0; fi
+    id="$(gh api "repos/${owner}/${repo}/commits/${sha}/check-runs?check_name=Plan-lock%20gate" \
+        --jq '.check_runs | sort_by(.started_at // "") | last | .id // empty' 2>/dev/null)" \
+        || { echo unknown; return 0; }
+    if [ -z "$id" ]; then echo unknown; return 0; fi
+    msgs="$(gh api "repos/${owner}/${repo}/check-runs/${id}/annotations" --jq '.[].message' 2>/dev/null)" \
+        || { echo unknown; return 0; }
+    # The vocabulary is plan-lock-gate.sh's own (PLAN_LOCK_GATE_INFRA_RE,
+    # sourced by _mg_planlock_recheck before it calls here).
+    if printf '%s\n' "$msgs" | grep -qiE "${PLAN_LOCK_GATE_INFRA_RE:-undetermined|unavailable|does not resolve|failed|missing}"; then
+        echo infra
+    elif printf '%s\n' "$msgs" | grep -q 'overlaps the write set of plan-lock'; then
+        echo collision
+    else
+        echo unknown
+    fi
+}
+
+# _mg_planlock_recheck <owner> <repo> <pr> <head ref> <head sha> — re-run the
+# Plan-lock gate's own decision (plan_lock_gate_decide, sourced from
+# plan-lock-gate.sh) against the CURRENT refs/locks table of the PR's base
+# repository and the PR's changed files. A "Plan-lock gate" verdict is frozen
+# at push time while the lock table it judged keeps moving (locks are released,
+# or age past the 14-day cutoff), so a collision red can go stale (tooling
+# 2026-10-04 stale-plan-lock-red-overridden-instead-of-rerun). Prints one token:
+#   clean     — no changed file overlaps another branch's live lock any more AND
+#               the red was a collision: it is stale (refuse the override)
+#   collides  — still overlaps, or the lock table is undetermined (the gate's
+#               own fail-closed answer)
+#   infra …   — the table is clean but the red was an infrastructure failure
+#               (or its cause is unreadable): a re-run would red again, so the
+#               override stands
+#   unknown … — the inputs or the lock state could not be gathered (no head
+#               ref, no diff, no remote for the base repo, refs/locks fetch
+#               failed, gate script missing)
+# Runs in a subshell: the gate script and the lock substrate set shell options
+# and define helpers that must not leak into a sourcing caller.
+_mg_planlock_recheck() {
+    local owner="$1" repo="$2" pr="$3" head_ref="$4" head_sha="${5:-}"
+    (
+        if [ -z "$owner" ] || [ -z "$repo" ] || [ -z "$head_ref" ]; then echo "unknown (no PR head ref)"; exit 0; fi
+        changed="$(gh pr diff "$pr" --repo "$owner/$repo" --name-only 2>/dev/null)" \
+            || { echo "unknown (PR diff unavailable)"; exit 0; }
+        [ -n "$changed" ] || { echo "unknown (PR diff empty)"; exit 0; }
+        # The lock table is read through the HOST checkout (locks-show.sh
+        # fetches refs/locks/* into the checkout it runs in), resolved the way
+        # plan-lock-gate.sh's own entry point resolves it — but from the remote
+        # that IS the PR's base repository, never an assumed `origin`, and
+        # fresh (no lock-table cache), so the answer is that repo's live table.
+        root="${PC_PROJECT_ROOT:-${PROJECT_ROOT:-$SCRIPT_DIR/../../..}}"
+        cd "$root" 2>/dev/null || { echo "unknown (no host checkout)"; exit 0; }
+        export LTC_PROJ="$PWD"
+        if [ -z "${LTC_ROWS_OVERRIDE:-}" ]; then
+            remote="$(_mg_lock_remote "$owner" "$repo")" \
+                || { echo "unknown (no git remote of this checkout points at ${owner}/${repo})"; exit 0; }
+            git fetch --quiet --prune "$remote" '+refs/locks/*:refs/locks/*' 2>/dev/null \
+                || { echo "unknown (refs/locks fetch from ${remote} failed)"; exit 0; }
+            export LOCK_REMOTE="$remote" LTC_TABLE_TTL=0
+        fi
+        # shellcheck source=agents/scripts/core/lock-table-cache.sh
+        . "$SCRIPT_DIR/lock-table-cache.sh" 2>/dev/null || { echo "unknown (lock-table-cache.sh unreadable)"; exit 0; }
+        # shellcheck source=agents/scripts/core/plan-lock-gate.sh
+        . "$SCRIPT_DIR/plan-lock-gate.sh" 2>/dev/null || { echo "unknown (plan-lock-gate.sh unreadable)"; exit 0; }
+        command -v plan_lock_gate_decide >/dev/null 2>&1 || { echo "unknown (plan_lock_gate_decide missing)"; exit 0; }
+        if ! printf '%s\n' "$changed" | plan_lock_gate_decide "$head_ref" >/dev/null 2>&1; then
+            echo collides
+            exit 0
+        fi
+        case "$(_mg_planlock_red_cause "$owner" "$repo" "$head_sha")" in
+            collision) echo clean ;;
+            infra)     echo "infra (the red is an infrastructure failure, not a collision)" ;;
+            *)         echo "infra (the red's cause could not be read from the run's annotations)" ;;
+        esac
+    )
+}
+
+# _mg_planlock_verdict_report <verdict> <owner> <repo> <head sha> — print the
+# operator line for a _mg_planlock_recheck verdict on stderr and return 0 when
+# the plan-lock-out-of-band downgrade must be REFUSED (a positively clean
+# re-check: the red is stale), 1 when it stands. Shared by poll_merge_gates and
+# safe-admin-merge.sh so the two merge paths refuse the same stale reds with
+# the same words.
+_mg_planlock_verdict_report() {
+    local verdict="$1" owner="$2" repo="$3" head_sha="$4"
+    case "$verdict" in
+        clean)
+            echo "BLOCK: Plan-lock gate: stale red — re-run, do not override. Re-evaluated against the current refs/locks table, none of this PR's changed files overlaps another branch's live lock any more (the colliding lock was released or aged past the cutoff since the gate ran), so plan-lock-out-of-band is refused. Re-run the gate: gh api \"repos/${owner}/${repo}/commits/${head_sha}/check-runs?check_name=Plan-lock%20gate\" --jq '.check_runs[0].details_url' — the run id is the number after /runs/ — then gh run rerun <that-id>." >&2
+            return 0 ;;
+        unknown*)
+            echo "WARN: could not re-evaluate the Plan-lock gate red against the current lock table — ${verdict#unknown }; the plan-lock-out-of-band downgrade stands as recorded." >&2
+            ;;
+        infra*)
+            echo "WARN: the current lock table shows no collision, but ${verdict#infra } — a re-run would not clear it, so the plan-lock-out-of-band downgrade stands. Fix the gate's infrastructure (refs/locks fetch / base ref)." >&2
+            ;;
+    esac
+    return 1
+}
+
 # ----------------------------------------------------------------------------
 # poll_merge_gates <owner> <repo> <pr_number>
 # ----------------------------------------------------------------------------
@@ -256,8 +434,10 @@ poll_merge_gates() {
     # Deps preflight scoped to function call — file is documented sourceable
     # (see header § Usage). Top-level `exit` would kill the caller's shell.
     command -v gh >/dev/null 2>&1 || { echo "gh required" >&2; return 2; }
-    # No standalone `jq` needed — the poll parses the GraphQL response via
-    # gh's bundled jq engine (`gh api --jq`). gh is the only hard dep.
+    # Standalone `jq` is a SOFT dep: when it is on PATH the poll pipes the raw
+    # GraphQL response through `jq -r -f <filter file>` (the gate filter never
+    # rides argv); when it is absent the poll falls back to gh's bundled jq
+    # engine (`gh api --jq`). gh is the only hard dep.
 
     # SKIP_MERGE_GATES=true at session init bypasses all gates. Documented in
     # AGENTS.md § Merge gates and docs/agent-rules/merge-gates.md § Override.
@@ -522,11 +702,14 @@ poll_merge_gates() {
     # as a directive marker. That asymmetry is why the flag letter matters here.
     #
     # Keeping the ~7.8 KB document off argv is not cosmetic: Windows caps a
-    # CreateProcess command line at 32,767 chars, and the spliced --jq filter
-    # alone is ~24.8 KB. Passing both put every Windows poll at ~32.7 KB, i.e.
+    # CreateProcess command line at 32,767 chars, and the spliced gate filter
+    # alone is ~25 KB. Passing both put every Windows poll at ~32.7 KB, i.e.
     # over the cap, so gh was never exec'd at all — `Argument list too long`,
     # three times, scored as GH_API_DOWN. Linux (ARG_MAX ~2 MB) never saw it.
-    # The budget assertion in tests/bats/merge_gates.bats holds the line.
+    # The filter leaves argv too whenever standalone jq is on PATH (written to a
+    # temp file, read with `jq -f` — no length ceiling at all); only the jq-less
+    # `gh --jq` fallback still carries it, and the budget assertion in
+    # tests/bats/merge_gates.bats holds the line for that path.
 
     # ----------------------------------------------------------------------
     # Required-context ground-truth — branch_protection.required_contexts from
@@ -608,13 +791,14 @@ poll_merge_gates() {
     local start gh_fails=0
     start=$(date +%s)
 
-    # Option B: parse the GraphQL response with gh's BUNDLED jq (`gh api --jq`)
-    # — no standalone `jq` binary required (gh is the only dep). One filter
-    # computes every gate field and emits them as a fixed-order, one-per-line
-    # stream (37 lines) that the poll loop reads with `mapfile`. The exact jq
-    # sub-expressions are the same ones the per-field `jq` calls used before;
-    # they're just composed into one program. ORCH_USER is spliced in as a
-    # string literal because `gh --jq` (unlike standalone jq) takes no --arg.
+    # One filter computes every gate field and emits them as a fixed-order,
+    # one-per-line stream (42 lines) that the poll loop reads with `mapfile`.
+    # It runs under standalone `jq -r -f <file>` when jq is on PATH, else under
+    # gh's bundled engine (`gh api --jq`) — see gate_jq_engine below. The exact
+    # jq sub-expressions are the same ones the per-field `jq` calls used
+    # before; they're just composed into one program. ORCH_USER is spliced in
+    # as a string literal because `gh --jq` (unlike standalone jq) takes no
+    # --arg, and both engines must run the identical program.
     # Field order (index): 0 state · 1 headSha · 2 overflow · 3 testsOob ·
     # 4 perfOob · 5 ciTotal · 6 ciFail · 7 ciPend · 8 ciWarnDowngraded ·
     # 9 dgNames · 10 crState · 11 crFirstLine · 12 crOpen · 13 crStatusState ·
@@ -633,9 +817,9 @@ poll_merge_gates() {
     # cursor[bot] inline-finding review threads — Bugbot gate #4) · 26 bbOob
     # (bugbot-out-of-band label) · 27 selfImpOnly (bool: PR diff entirely under
     # docs/self-improvement/** → auto-skip CR + Bugbot gates) ·
-    # 28 pureDocs (bool: PR diff strictly within the poller's pure-docs
-    # allow-list — docs/ / backlog/ / agents/scripts/ / *.md; the agent-layer
-    # gitlink and .gitmodules are deliberately code) ·
+    # 28 pureDocs (bool: PR diff strictly docs — docs/ / backlog/ / *.md; NOT
+    # agents/scripts/, the agent-layer gitlink or .gitmodules, which
+    # is-pure-docs-diff.sh admits for build cadence but CodeRabbit reviews) ·
     # 29 crRateLimited (bool: CR posted a rate-limit signal on a comment OR the
     # CodeRabbit StatusContext description — a TEMPORARY skip, not a terminal pass) ·
     # 30 crDisposition (bool: a `cr-disposition:`-prefixed label is present OR a
@@ -652,7 +836,7 @@ poll_merge_gates() {
     # may be empty) · 34 staleOverrideCount (their count).
     # The trailing fields must all be non-empty so the `data=$(gh …)` command
     # substitution (trailing-newline collapse) never strips one and deflates the
-    # 37-field count (tripping the fail-closed assertion). reqAbsentCount (22),
+    # 42-field count (tripping the fail-closed assertion). reqAbsentCount (22),
     # crReviewSkipped (23), bbState (24, ABSENT-default), bbOpen (25, numeric),
     # bbOob (26), selfImpOnly (27), pureDocs (28), crRateLimited (29),
     # crDisposition (30), the two numeric thread counts (31/32) and
@@ -662,8 +846,24 @@ poll_merge_gates() {
     # 35 dupMaskedNames (", "-joined check names where the duplicate-context
     # collapse discarded a BLOCKING context from a DIFFERENT check suite than the
     # one it kept — the shape that made PR #2071 unmergeable while every check
-    # read green; may be empty) · 36 dupMaskedCount (their count).
-    # GATE_FILTER — the 37-field jq projection (see field-order map above).
+    # read green; may be empty) · 36 dupMaskedCount (their count) ·
+    # 37 dependabotActionsBump (bool: Dependabot-authored PR on a
+    # dependabot/github_actions/* head — the one shape whose silent CR still
+    # passes after the grace window; non-empty, safe at the tail) ·
+    # 38 headRefName (the PR branch; may be empty, so never the last field —
+    # read by the stale-red Plan-lock re-check) ·
+    # 39 planLockOobRefused (bool: plan-lock-out-of-band is on a red
+    # "Plan-lock gate" but no plan-lock-disposition is recorded, so the
+    # downgrade was refused; non-empty, safe at the tail) ·
+    # 40 crRateLimitDocsPass (bool: the label-free pure-docs rate-limit
+    # auto-downgrade may adjudicate gate 2 — pure-docs diff, CR never reviewed
+    # the PR, no open CR thread, and the rate-limit signal is on the CURRENT
+    # head; the same predicate discounts the pending CR findings context from
+    # ci_pend; non-empty, safe at the tail) ·
+    # 41 crManualOnly (bool: the head CodeRabbit status is the OSS manual-trigger
+    # skip — "manual review required" / "available on request" — so a SUCCESS
+    # state is NOT a review; non-empty, safe at the tail).
+    # GATE_FILTER — the 42-field jq projection (see field-order map above).
     # Copied byte-for-byte from the _MG_GATE_FILTER_TEMPLATE global that
     # merge-gates.d/10-gate-filter.sh defines (single-quoted literal → no
     # command-substitution newline trim); placeholders spliced below as before.
@@ -679,16 +879,78 @@ poll_merge_gates() {
     # `test("…"; "i")` string literal — the regex has no jq/double-quote-special
     # chars, so a plain substitution is safe.
     GATE_FILTER="${GATE_FILTER//__BLOCK_ALLOWLIST_RE__/$MERGE_GATES_BLOCK_ALLOWLIST_RE}"
+    # Ship the program without its documentation comments (both engines run
+    # the identical stripped program; the source keeps every comment).
+    GATE_FILTER="$(_mg_strip_jq_comment_lines "$GATE_FILTER")"
+
+    # Filter engine (tooling 2026-08-19 merge-gates-gh-jq-filter-exceeds-windows-
+    # arg-cap). `gh --jq` has no file form, so routing the ~25 KB filter through
+    # gh puts it on argv, where it grows toward the Windows 32,767-char
+    # CreateProcess cap with every gate refinement. With standalone jq on PATH
+    # the filter goes to a temp file instead and gh only fetches the raw
+    # response — no ceiling at all. jq-less hosts (gh is the only hard dep on
+    # Windows) keep the `--jq` path, which the argv budget bats case guards.
+    # A jq on PATH must also be able to RUN the filter: jq 1.5 has no IN/1, so
+    # picking it would fail every poll and score the run GH_API_DOWN (rc 3).
+    # Probe once; an old or broken jq falls back to gh's bundled engine.
+    local gate_jq_engine=gh
+    if command -v jq >/dev/null 2>&1; then
+        if jq -n -e '1 | IN(1)' >/dev/null 2>&1; then
+            gate_jq_engine=jq
+        else
+            echo "INFO: standalone jq ($(jq --version 2>/dev/null || echo 'version unknown')) cannot run the gate filter (needs jq >= 1.6 for IN/1); using gh's bundled engine (gh --jq) instead." >&2
+        fi
+    fi
+
+    # Stale-red Plan-lock re-check cache: re-evaluated once per head, not every
+    # poll (it costs a PR-diff call and a refs/locks fetch).
+    local planlock_recheck_head="" planlock_recheck_verdict=""
 
     local p
     for ((p=0; p<MAX_POLLS; p++)); do
-        local data
-        if ! data=$(gh api graphql \
+        local data data_rc=0
+        if [ "$gate_jq_engine" = jq ]; then
+            # Subshell-scoped temp files + EXIT trap: cleaned up on every path
+            # out of the fetch, and the trap never leaks into a sourcing caller.
+            # gh's stderr is kept OFF the pipe (it must not reach jq's stdin)
+            # and PIPESTATUS splits the two failure sources so the outcome
+            # matches the `gh --jq` path exactly: a gh failure (network, auth,
+            # E2BIG) surfaces gh's own message with gh's exit status; a jq
+            # failure (the C2 malformed-response arms) surfaces jq's message
+            # with jq's status — both land in the gh-fail branch below, as
+            # they did when gh ran the filter itself.
+            data=$(
+                set +e
+                _mg_filter_file="" _mg_gh_err=""
+                trap 'rm -f "$_mg_filter_file" "$_mg_gh_err"' EXIT
+                if ! _mg_filter_file=$(mktemp) || ! _mg_gh_err=$(mktemp) \
+                   || ! printf '%s' "$GATE_FILTER" >"$_mg_filter_file"; then
+                    echo "merge-gates: could not stage the gate filter in a temp file"
+                    exit 1
+                fi
+                gh api graphql \
+                    -f owner="$owner" \
+                    -f repo="$repo" \
+                    -F pr="$prNumber" \
+                    -F query=@"$QUERY_FILE" 2>"$_mg_gh_err" \
+                    | jq -r -f "$_mg_filter_file" 2>&1
+                _mg_rc=("${PIPESTATUS[@]}")
+                if [ "${_mg_rc[0]}" -ne 0 ]; then
+                    cat "$_mg_gh_err"
+                    exit "${_mg_rc[0]}"
+                fi
+                cat "$_mg_gh_err" >&2
+                exit "${_mg_rc[1]}"
+            ) || data_rc=$?
+        else
+            data=$(gh api graphql \
                        -f owner="$owner" \
                        -f repo="$repo" \
                        -F pr="$prNumber" \
                        -F query=@"$QUERY_FILE" \
-                       --jq "$GATE_FILTER" 2>&1); then
+                       --jq "$GATE_FILTER" 2>&1) || data_rc=$?
+        fi
+        if [ "$data_rc" -ne 0 ]; then
             gh_fails=$((gh_fails+1))
             echo "Poll $((p+1)): gh failed ($gh_fails/3): $data"
             # E2BIG is a LOCAL exec failure, not a GitHub outage — the argv we
@@ -705,7 +967,11 @@ poll_merge_gates() {
             # prints ("Argument list too long" / "argument list too long").
             case "$data" in
                 *'rgument list too long'*)
-                    echo "GH_ARGV_TOO_LONG — the spliced --jq filter (${#GATE_FILTER} chars) exceeds this OS's exec argv limit (Windows: 32767). Shrink merge-gates.d/10-gate-filter.sh or move the filter off argv; this is NOT a GitHub outage."
+                    if [ "$gate_jq_engine" = jq ]; then
+                        echo "GH_ARGV_TOO_LONG — the gh command line exceeds this OS's exec argv limit (Windows: 32767). The gate filter is read from a file by standalone jq, so it is NOT on argv; look at the other gh arguments. This is NOT a GitHub outage."
+                    else
+                        echo "GH_ARGV_TOO_LONG — the spliced --jq filter (${#GATE_FILTER} chars) exceeds this OS's exec argv limit (Windows: 32767). Install standalone jq (the poll then reads the filter from a file) or shrink merge-gates.d/10-gate-filter.sh; this is NOT a GitHub outage."
+                    fi
                     return 3
                     ;;
             esac
@@ -727,20 +993,21 @@ poll_merge_gates() {
         fi
         gh_fails=0
 
-        # Parse the gh --jq field stream — 37 fixed-order lines (see GATE_FILTER
-        # field map above). gh --jq errors already routed through the gh-fail
-        # path above; this guards a truncated/partial body → fail closed (retry).
+        # Parse the filter's field stream — 42 fixed-order lines (see GATE_FILTER
+        # field map above). Filter errors (either engine) already routed through
+        # the gh-fail path above; this guards a truncated/partial body → fail
+        # closed (retry).
         local fields
         # Strip CR — Windows jq builds (and gh's bundled jq on Windows) emit
         # CRLF, which would leave a trailing \r on every field (e.g. pr_state
         # "OPEN\r" != "OPEN" → spurious return-4).
         data="${data//$'\r'/}"
         mapfile -t fields <<<"$data"
-        if [ "${#fields[@]}" -ne 37 ]; then
-            # Exactly 37 expected. Any other count (a field value with an embedded
+        if [ "${#fields[@]}" -ne 42 ]; then
+            # Exactly 42 expected. Any other count (a field value with an embedded
             # newline would inflate it, misaligning fields[n]) → fail closed (CR #511).
             gh_fails=$((gh_fails+1))
-            echo "Poll $((p+1)): gate filter returned ${#fields[@]} fields (expected 37); transient ($gh_fails/3)"
+            echo "Poll $((p+1)): gate filter returned ${#fields[@]} fields (expected 42); transient ($gh_fails/3)"
             if [ "$gh_fails" -ge 3 ]; then echo "GH_API_DOWN"; return 3; fi
             local elapsed_short=$(( $(date +%s) - start ))
             if [ "$elapsed_short" -ge "$TIMEOUT_SECONDS" ]; then echo "GATES_TIMEOUT"; return 2; fi
@@ -805,6 +1072,27 @@ poll_merge_gates() {
         local ci_warn_downgraded="${fields[8]:--1}"
         local dg_names="${fields[9]}"
 
+        # Stale-red Plan-lock guard (tooling 2026-10-04 stale-plan-lock-red-
+        # overridden-instead-of-rerun, item 1). The "Plan-lock gate" verdict is
+        # frozen at push time; the refs/locks table it judged is not. Before
+        # honouring a plan-lock-out-of-band downgrade, re-run the gate's own
+        # decision against the CURRENT table: if nothing collides any more, the
+        # red is stale and the right move is a re-run, not an override (#2213
+        # merged over a 12-day-stale red that a re-run would have cleared). Only
+        # a positively CLEAN re-check refuses; a collision, an undetermined
+        # table or unavailable inputs leave the downgrade standing, as before.
+        if [ "$ci_warn_downgraded" -gt 0 ] && _mg_csv_has "$dg_names" "Plan-lock gate"; then
+            if [ "$planlock_recheck_head" != "$head_sha" ]; then
+                planlock_recheck_head="$head_sha"
+                planlock_recheck_verdict="$(_mg_planlock_recheck "$owner" "$repo" "$prNumber" "${fields[38]}" "$head_sha")"
+            fi
+            if _mg_planlock_verdict_report "$planlock_recheck_verdict" "$owner" "$repo" "$head_sha"; then
+                ci_fail=$((ci_fail + 1))
+                ci_warn_downgraded=$((ci_warn_downgraded - 1))
+                dg_names="$(_mg_csv_drop "$dg_names" "Plan-lock gate")"
+            fi
+        fi
+
         # Surface every downgraded check on stderr so the operator sees what the
         # label hid. Mirrors the "Skip gates and merge anyway" LOG_WARN pattern.
         if [ "$ci_warn_downgraded" -gt 0 ]; then
@@ -820,6 +1108,16 @@ poll_merge_gates() {
         local stale_ov_count="${fields[34]:--1}"
         if [ "$stale_ov_count" -gt 0 ]; then
             echo "WARN: out-of-band label applied AFTER the latest run of ${stale_ov_count} failing check(s) completed — downgrade refused (stale-override guard): ${stale_ov_names}. Waiting for the post-label re-run (the labeled trigger starts one). If none is coming — label applied by GITHUB_TOKEN automation (does not trigger workflows), an Actions outage, or a renamed check — re-run the workflow manually (gh run rerun <run-id> / gh workflow run) or push a commit; re-applying the label only moves the label-time later and cannot help." >&2
+        fi
+
+        # plan-lock-out-of-band disposition trail (process 2026-09-12
+        # plan-lock-out-of-band-waives-the-whole-gate-with-no-disposition-trail).
+        # The label alone no longer downgrades a red "Plan-lock gate": like
+        # cr-out-of-band it needs a recorded reason, or nothing says which lock
+        # was crossed or why (GitHub strips the label post-merge, so the reason
+        # is otherwise unrecoverable — #2160). Field 39; the red stays in ci_fail.
+        if [ "${fields[39]:-false}" = "true" ]; then
+            echo "WARN: plan-lock-out-of-band present but NOT honoured — a plan-lock-out-of-band downgrade also requires a 'plan-lock-disposition:<reason>' label or PR-body marker naming the lock slug(s) the Plan-lock gate reported and why crossing them is safe. Add one to merge past the 'Plan-lock gate' red; if the red is stale (the lock was released or aged out), re-run the gate instead." >&2
         fi
 
         # Duplicate-context divergence (backlog merge-gate-duplicate-check-name-drift).
@@ -927,9 +1225,9 @@ poll_merge_gates() {
         # path-ignore (docs/agent-rules/merge-gates.md § Bugbot gate).
         local self_imp_only="${fields[27]:-false}"
 
-        # pure_docs — true iff the PR diff is strictly within the poller's
-        # pure-docs allow-list (docs/ / backlog/ / agents/scripts/ / *.md; the
-        # agent-layer gitlink and .gitmodules are deliberately code). Field 28. Drives the rate-limit auto-downgrade (deliverable 1):
+        # pure_docs — true iff the PR diff is strictly docs (docs/ / backlog/ /
+        # *.md — not agents/scripts/, the agent-layer gitlink or .gitmodules, see
+        # the $pureDocs comment in 10-gate-filter.sh). Field 28. Drives the rate-limit auto-downgrade (deliverable 1):
         # a CR rate-limit skip on a pure-docs PR is harmless to fast-pass.
         # Empty/parse-miss → false (fail-safe = NOT pure-docs → treated as code).
         local pure_docs="${fields[28]:-false}"
@@ -944,6 +1242,19 @@ poll_merge_gates() {
         # ALONGSIDE cr-out-of-band to waive ANY CR block (PR-3): cr-out-of-band
         # alone is NOT honoured — the disposition records why CR review was waived.
         local cr_disposition="${fields[30]:-false}"
+        # cr_rl_docs_pass — field 40: the pure-docs rate-limit auto-downgrade is
+        # allowed (pure-docs diff, CR never reviewed the PR, no open CR thread,
+        # rate-limit signal on the CURRENT head). Empty/parse-miss → false.
+        local cr_rl_docs_pass="${fields[40]:-false}"
+        # cr_manual_only — field 41: the head CodeRabbit status is the OSS
+        # manual-trigger skip, so its SUCCESS state is not a review and must
+        # never ride the status-only grace-then-pass. Empty/parse-miss → false.
+        local cr_manual_only="${fields[41]:-false}"
+        # dependabot_actions_bump — Dependabot-authored PR on a
+        # dependabot/github_actions/* head (field 37). CR never reviews bot PRs,
+        # so this is the one shape whose silent CR keeps the grace-then-pass
+        # (dependabot-auto-merge.yml relies on it). Empty/parse-miss → false.
+        local dependabot_actions_bump="${fields[37]:-false}"
 
         # UNFILTERED unresolved-non-outdated review-thread counts (fields 31/32:
         # total, user-authored). The user-comment gate deliberately excludes bot
@@ -983,6 +1294,14 @@ poll_merge_gates() {
         # cr-out-of-band downgrade + nudge-suppression checks below, regardless of
         # which case branch runs.
         local cr_size_skip_block=false
+        # Set true only by the NONE branch when CR rate-limited a CODE PR (see
+        # the rate-limit arm there). Hoisted for the same reason as
+        # cr_size_skip_block: the cr-out-of-band downgrade below reads it.
+        local cr_rate_limit_block=false
+        # Set true only by the NONE branch when the CR grace window expired on a
+        # silent head (no review, no SUCCESS status) — the terminal block the
+        # cr-out-of-band + cr-disposition downgrade below may waive.
+        local cr_grace_expired_block=false
         case "$cr_state" in
             APPROVED)
                 # Approval on the current head is always a pass, regardless of body shape.
@@ -1077,6 +1396,24 @@ poll_merge_gates() {
                     cr_size_skip_block=true
                     cr_state_print="NONE+size-skip (CR skipped review — too many files)"
                     echo "BLOCK: CodeRabbit skipped review — too many files (exceeds CR file limit); split the PR (coderabbit review --dir <path> / --base) or apply the 'cr-out-of-band' label to merge without CR review." >&2
+                elif [ "$cr_rate_limited" = "true" ] && [ "$pure_docs" != "true" ]; then
+                    # CR rate-limited a CODE PR and has no review object on any
+                    # commit: the rate-limit notice is CR stating, in its own
+                    # words, that it did NOT review this head. Decided HERE,
+                    # ahead of the status-SUCCESS / grace-expired arms below —
+                    # those are the generic fail-open for a SILENT CR and must
+                    # never see a head CR has explicitly declined (CR stamps
+                    # "Review rate limited" on a SUCCESS StatusContext, which the
+                    # status-only grace arm would otherwise pass). Block
+                    # (PAUSE/RETRY) until CR recovers and re-reviews; the
+                    # cr-out-of-band + cr-disposition downgrade below is the
+                    # escape. A pure-docs PR falls through: the rate-limit
+                    # handling after this case auto-downgrades it (tooling
+                    # 2026-08-16 cr-gate-greens-on-rate-limited-review, item 2).
+                    cr_pass=false
+                    cr_rate_limit_block=true
+                    cr_state_print="NONE+rate-limit CODE-PR-pause (block; pending CR re-review)"
+                    echo "BLOCK: CodeRabbit rate-limited on a CODE PR — pausing for CR to re-review on quota recovery. To merge before then, apply BOTH 'cr-out-of-band' AND a 'cr-disposition:<reason>' label (the disposition attests you consciously merged past an incomplete review). PR-2 cr-rate-limit-code-pr-auto-pause." >&2
                 elif [ "$cr_installed" != true ]; then
                     # Repo doesn't have CodeRabbit installed — NONE is the steady state.
                     cr_pass=true
@@ -1110,6 +1447,20 @@ poll_merge_gates() {
                     # StatusContext placeholder still fired SUCCESS.
                     cr_pass=true
                     cr_state_print="NONE+status-SUCCESS+inline-evidence (${cr_thread_comments_on_head} CR comment(s) on head)"
+                elif [ "$cr_status_state" = "SUCCESS" ] && [ "$p" -ge "$CR_GRACE_POLLS" ] \
+                     && [ "$cr_manual_only" = true ] && [ "$dependabot_actions_bump" != true ]; then
+                    # The SUCCESS is the OSS manual-trigger skip ("Review skipped:
+                    # manual review required for this OSS repository" / "Review
+                    # available on request"): CR states it did NOT review and
+                    # will not until a human asks. Not a status-only review
+                    # config — the grace window ran out on a head nobody
+                    # reviewed, so this is the grace-expired block, waivable the
+                    # same way (cr-out-of-band + cr-disposition). A Dependabot
+                    # github-actions bump keeps its pass (CR never reviews bots).
+                    cr_pass=false
+                    cr_grace_expired_block=true
+                    cr_state_print="NONE+manual-review-required (CR skipped head — block)"
+                    echo "BLOCK: CodeRabbit status on head ${head_sha:0:8} is the OSS manual-trigger skip ('manual review required' / 'available on request') — CR did not review this head, and a SUCCESS state is not a review. Trigger one as a human: bash scripts/dev/trigger-coderabbit-review.sh ${prNumber}. To merge without CR review, apply BOTH 'cr-out-of-band' AND 'cr-disposition:cr-auto-review-disabled' (label or PR-body marker)." >&2
                 elif [ "$cr_status_state" = "SUCCESS" ] && [ "$p" -ge "$CR_GRACE_POLLS" ]; then
                     # Status-SUCCESS but zero inline evidence on current head. Two
                     # possible causes: (a) a status-only CR config (rare; CR's
@@ -1128,17 +1479,35 @@ poll_merge_gates() {
                     cr_state_print="NONE+status-SUCCESS-waiting-for-inline (poll $((p+1))/$CR_GRACE_POLLS)"
                     # First-poll tip: if this SUCCESS is the OSS manual-trigger
                     # skip (repos <10 stars), the operator needs a human ask —
-                    # bot nudges are ignored. Wording is conditional so a slow
+                    # bot nudges have not been seen to start one. Wording is conditional so a slow
                     # auto-review on a starred repo is not mis-diagnosed.
                     if [ "$p" -eq 0 ]; then
                         echo "INFO: CodeRabbit status=SUCCESS with no inline review yet. If CR said 'manual review required' / 'Review available on request' (repos <10 stars), run: bash scripts/dev/trigger-coderabbit-review.sh ${prNumber} — or waive with cr-out-of-band + cr-disposition:cr-auto-review-disabled. See merge-gates.md § CodeRabbit OSS manual-trigger." >&2
                     fi
-                elif [ "$p" -ge "$CR_GRACE_POLLS" ]; then
-                    # Grace window elapsed; CR never started. Log + fall through to pass
-                    # so the loop is never wedged by a stuck integration.
-                    echo "WARN: CodeRabbit grace window ($CR_GRACE_POLLS polls) expired without a review or SUCCESS status; treating NONE as pass." >&2
+                elif [ "$p" -ge "$CR_GRACE_POLLS" ] && [ "$dependabot_actions_bump" = true ]; then
+                    # Dependabot github-actions SHA bump: CR never reviews bot PRs,
+                    # so silence is the expected steady state, not a stuck
+                    # integration. Keeps the grace-then-pass this shape has always
+                    # had (dependabot-auto-merge.yml routes these through
+                    # safe-merge.sh and relies on it); build/test/lint still bind.
+                    echo "WARN: CodeRabbit grace window ($CR_GRACE_POLLS polls) expired without a review or SUCCESS status on a Dependabot github-actions bump; treating NONE as pass (CR does not review bot PRs)." >&2
                     cr_pass=true
-                    cr_state_print="NONE+grace-expired"
+                    cr_state_print="NONE+grace-expired (Dependabot github-actions bump — pass)"
+                elif [ "$p" -ge "$CR_GRACE_POLLS" ]; then
+                    # Grace window elapsed with no review, no SUCCESS CodeRabbit
+                    # status and no skip/rate-limit notice: TERMINAL block. A stuck
+                    # integration, a never-installed reviewer and a quota-exhausted
+                    # one are indistinguishable from here, and silence is not a
+                    # review — 27 PRs merged green on exactly this shape (tooling
+                    # 2026-08-16 cr-gate-greens-with-no-cr-status-on-head, item 2).
+                    # Not a wedge: trigger a review, or attest the silent head with
+                    # cr-out-of-band + cr-disposition, which the downgrade below
+                    # honours for this block the same way it does for the size-skip
+                    # and rate-limit blocks.
+                    cr_pass=false
+                    cr_grace_expired_block=true
+                    cr_state_print="NONE+grace-expired (CR silent on head — block)"
+                    echo "BLOCK: CodeRabbit grace window ($CR_GRACE_POLLS polls) expired with no review and no SUCCESS CodeRabbit status on head ${head_sha:0:8} — silence is not a review. Trigger one: bash scripts/dev/trigger-coderabbit-review.sh ${prNumber} (or post '@coderabbitai review' yourself — bot-posted triggers are ignored). To merge without CR review, apply BOTH 'cr-out-of-band' AND a 'cr-disposition:<reason>' label or PR-body marker recording why." >&2
                 else
                     cr_state_print="NONE+pending (poll $((p+1))/$CR_GRACE_POLLS)"
                 fi
@@ -1163,8 +1532,12 @@ poll_merge_gates() {
                 # genuinely silent CR, not one already working. Without this, an
                 # auto-commit that moves the head (e.g. a bot INDEX-autosync) drew a
                 # second `@coderabbitai review` on top of CR's own auto-review.
+                # Also suppressed when cr_rate_limit_block: a re-trigger while a
+                # rate-limit notice is active RESETS CR's countdown (merge-gates.md
+                # § CodeRabbit rate-limit playbook rule 1).
                 if [ "$cr_pass" = false ] && [ "$cr_installed" = true ] && \
-                   [ "$cr_size_skip_block" != true ] && [ "$cr_context_present" != 1 ] && \
+                   [ "$cr_size_skip_block" != true ] && [ "$cr_rate_limit_block" != true ] && \
+                   [ "$cr_context_present" != 1 ] && \
                    [ "$NONE_NUDGE_POLLS" -gt 0 ]; then
                     # Streak-gated (NOT first-poll): let auto_review post first.
                     if [ "$none_head" = "$head_sha" ]; then
@@ -1435,7 +1808,8 @@ poll_merge_gates() {
         #     is never compiled, so a deferred CR review on a docs-only diff is
         #     harmless (deliverable 1: cr-review-skipped-pure-docs-auto-downgrade).
         #   • CODE PR       → block this poll (PAUSE/RETRY): the merge-gate keeps
-        #     polling so CR recovers + re-reviews within the grace window.
+        #     polling so CR recovers + re-reviews. Decided inside the NONE arm
+        #     above (cr_rate_limit_block), ahead of the generic grace branches.
         #     cr-out-of-band ALONE will NOT waive this; the operator must ALSO
         #     attest an explicit `cr-disposition:` label (enforced in the
         #     cr-out-of-band downgrade below). (deliverable 2:
@@ -1443,22 +1817,25 @@ poll_merge_gates() {
         # $cr_rate_limit_block scopes the disposition requirement to exactly this
         # case so a normal cr-out-of-band on a non-rate-limited block is unaffected.
         # Runs BEFORE the Poll line so cr_state_print reflects the rate-limit verdict.
-        local cr_rate_limit_block=false
         if [ "$cr_rate_limited" = "true" ]; then
-            if [ "$pure_docs" = "true" ]; then
+            if [ "$cr_rl_docs_pass" = "true" ]; then
                 cr_pass=true
                 cr_open_blocks=false
                 cr_state_print="${cr_state_print} +rate-limit pure-docs-auto-downgrade (WARN)"
-                echo "WARN: CodeRabbit rate-limited on a pure-docs PR (diff within docs/ / backlog/ / agents/scripts/ / *.md) — CR gate auto-downgraded to WARN (no label needed; markdown is never compiled). PR-2 cr-review-skipped-pure-docs-auto-downgrade." >&2
-            elif [ "$cr_state" = "NONE" ]; then
-                # CODE PR with NO current-head CR verdict: the rate-limit skip is
-                # the only CR signal for this head, so block (PAUSE/RETRY) until CR
-                # recovers + re-reviews within the grace window.
-                cr_pass=false
-                cr_rate_limit_block=true
-                cr_state_print="${cr_state_print} +rate-limit CODE-PR-pause (block; pending CR re-review)"
-                echo "BLOCK: CodeRabbit rate-limited on a CODE PR — pausing for CR to re-review on quota recovery. To merge before then, apply BOTH 'cr-out-of-band' AND a 'cr-disposition:<reason>' label (the disposition attests you consciously merged past an incomplete review). PR-2 cr-rate-limit-code-pr-auto-pause." >&2
-            else
+                echo "WARN: CodeRabbit rate-limited on a pure-docs PR (diff within docs/ / backlog/ / *.md) — CR gate auto-downgraded to WARN (no label needed; markdown is never compiled). PR-2 cr-review-skipped-pure-docs-auto-downgrade." >&2
+            elif [ "$pure_docs" = "true" ]; then
+                # Pure-docs, but the auto-downgrade's other conditions fail
+                # (field 40): the rate-limit signal is NOT what decides this
+                # head, so the CR verdict computed above stands.
+                local rl_why="the rate-limit notice is not tied to head ${head_sha:0:8} (no CodeRabbit status on the head says so, and no notice names its SHA)"
+                if [ "$cr_state" != "NONE" ]; then
+                    rl_why="CodeRabbit has reviewed this PR — its ${cr_state} verdict decides, not a rate-limit notice"
+                elif [ "$cr_open" -gt 0 ]; then
+                    rl_why="${cr_open} unresolved CodeRabbit thread(s) are open"
+                fi
+                cr_state_print="${cr_state_print} +rate-limit pure-docs (no auto-downgrade)"
+                echo "INFO: CodeRabbit rate-limit signal on a pure-docs PR NOT auto-downgraded: ${rl_why}." >&2
+            elif [ "$cr_state" != "NONE" ]; then
                 # CODE PR that ALSO has a real current-head CR verdict
                 # (APPROVED / COMMENTED / CHANGES_REQUESTED / STALE*): a rate-limit
                 # comment is STALE — it survives from a PRIOR push and must NOT
@@ -1486,6 +1863,12 @@ poll_merge_gates() {
         # dismiss the gate — otherwise a bogus attestation on a CR-untouched PR
         # bypasses review entirely (the original merge-pipeline-04 hole, residual
         # after PR-3 added the disposition requirement).
+        # One exception: the terminal grace-expired block (cr_grace_expired_block).
+        # By then the head has waited the full grace window, and attesting the
+        # silent head with cr-out-of-band + cr-disposition is the sanctioned way
+        # past it (tooling 2026-08-16 cr-gate-greens-with-no-cr-status-on-head,
+        # item 2) — before that block existed the same head passed with no label
+        # at all. Within the window the never-ran guard still refuses.
         local cr_ran=false
         case "$cr_state" in
             APPROVED|COMMENTED|CHANGES_REQUESTED|STALE*) cr_ran=true ;;
@@ -1495,12 +1878,15 @@ poll_merge_gates() {
            || [ "$cr_size_skip_block" = true ]; then
             cr_ran=true
         fi
+        local cr_waivable="$cr_ran"
+        [ "$cr_grace_expired_block" = true ] && cr_waivable=true
 
         # cr-out-of-band label: when present, downgrade a CR block to a WARN
         # (pass) — mirrors the tests/perf-out-of-band CI-downgrade pattern but
         # scoped to the CR gate ONLY. Covers both CR-gate signals: the state
         # verdict (cr_pass=false: CHANGES_REQUESTED, COMMENTED+actionable>0,
-        # DISMISSED, STALE_WITH_FINDINGS, STALE_UNKNOWN, NONE-after-grace) and
+        # DISMISSED, STALE_WITH_FINDINGS, STALE_UNKNOWN, the NONE size-skip /
+        # rate-limit / grace-expired blocks) and
         # unresolved CR-authored review threads (cr_open_blocks). The
         # user-comment gate is NOT touched. CI is untouched EXCEPT the
         # CR-findings StatusContext/CheckRun (`CR findings*` / `CR finding
@@ -1525,7 +1911,7 @@ poll_merge_gates() {
                 else
                     echo "WARN: cr-out-of-band present but NOT honoured — a cr-out-of-band downgrade also requires a 'cr-disposition:<reason>' label or PR-body marker recording why CR review was waived. Add one to merge past the CR block (${cr_state_print}). PR-3 cr-out-of-band-disposition-trail." >&2
                 fi
-            elif [ "$cr_ran" != true ]; then
+            elif [ "$cr_waivable" != true ]; then
                 # merge-pipeline-04 residual: disposition present, but CR never ran on
                 # this head (no review, no CR context, no SUCCESS status, no terminal
                 # "Review skipped", no size-skip, no rate-limit skip). A disposition
@@ -1541,6 +1927,8 @@ poll_merge_gates() {
                 elif [ "$cr_rate_limit_block" = true ]; then
                     # cr-out-of-band + cr-disposition both present → honoured.
                     echo "WARN: cr-out-of-band + cr-disposition label downgraded CR rate-limit block (${cr_state_print}) to WARN" >&2
+                elif [ "$cr_grace_expired_block" = true ]; then
+                    echo "WARN: cr-out-of-band + cr-disposition — CodeRabbit silent past the grace window on head ${head_sha:0:8}; merging without CR review on the recorded disposition" >&2
                 else
                     echo "WARN: cr-out-of-band + cr-disposition label downgraded CR block (${cr_state_print}) to WARN" >&2
                 fi
@@ -1624,6 +2012,10 @@ poll_merge_gates() {
             # prefix like GATE_CARRY; the watcher parses it on the merged path only.
             local cr_override_flag=0
             [ "$cr_overridden" = true ] && cr_override_flag=1
+            # GATE_HEAD — the head SHA this passing poll evaluated, so a merge
+            # actor can bind its merge to it (safe-merge.sh arms with
+            # --match-head-commit and refuses a head that moved since).
+            printf 'GATE_HEAD %s\n' "$head_sha"
             printf 'GATE_SNAPSHOT cr_override=%s downgraded=%s\n' \
                 "$cr_override_flag" "${dg_names:-}"
             echo "GATES_PASSED"
