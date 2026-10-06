@@ -262,6 +262,24 @@ release() {
     [[ "$output" == *"nothing to release"* ]]
 }
 
+@test "--slug on an absent lock stays a no-op when git warns on stderr during the lookup" {
+    # git ls-remote can succeed AND print to stderr (an http redirect, a
+    # credential-helper notice). That text is not a listed ref.
+    local real_git
+    real_git="$(command -v git)"
+    mkdir -p "$SANDBOX/gitshim"
+    cat > "$SANDBOX/gitshim/git" <<SHIM
+#!/usr/bin/env bash
+if [ "\$1" = "ls-remote" ]; then echo "warning: redirecting to https://example.com/repo.git/" >&2; fi
+exec "$real_git" "\$@"
+SHIM
+    chmod +x "$SANDBOX/gitshim/git"
+    PATH="$SANDBOX/gitshim:$PATH" release --slug no-such-lock
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"nothing to release"* ]]
+    [[ "$output" != *"Could not fetch"* ]]
+}
+
 @test "--slug against an unreachable remote exits 3 (not 'nothing to release')" {
     # A failing fetch is "absent" only when the remote answered with no such
     # ref; ls-remote failing (network/auth/bad URL) is an error.

@@ -191,11 +191,17 @@ if [ "$mode" = "slug" ]; then
         # A failed fetch is "absent" only when the remote ANSWERED and listed no
         # such ref. An unreachable remote (network, auth, bad URL) is an error,
         # never a silent "nothing to release" success.
-        if ! ls_out="$(git ls-remote "$remote" "$ref" 2>&1)"; then
+        # stderr is kept apart: a warning git prints on a SUCCESSFUL lookup (a
+        # redirect, a credential-helper notice) is not a listed ref, and folded
+        # into the output it read as "present" and failed the release.
+        ls_err="$(mktemp)" || { echo "::error::mktemp failed; nothing was released."; exit 3; }
+        if ! ls_out="$(git ls-remote "$remote" "$ref" 2>"$ls_err")"; then
             echo "::error::Could not reach ${remote} to look up ${ref} (git ls-remote failed); nothing was released:"
-            printf '%s\n' "$ls_out"
+            cat "$ls_err"
+            rm -f "$ls_err"
             exit 3
         fi
+        rm -f "$ls_err"
         if [ -z "$ls_out" ]; then
             echo "::notice::${ref} is not present on ${remote}; nothing to release."
             exit 0
