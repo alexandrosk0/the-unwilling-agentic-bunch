@@ -478,9 +478,11 @@ _cr_waiver_blockers() {
 @test "a cr-disposition reason must not be blank or the playbook placeholder, as label or body" {
     # A real reason honours the waiver, whether it is a label or a PR-body marker.
     run _cr_waiver_blockers '["cr-out-of-band","cr-disposition:rate-limit-acked"]' ''
-    [ "$status" -eq 0 ] && [ -z "$output" ]
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
     run _cr_waiver_blockers '["cr-out-of-band"]' $'Waiver.\ncr-disposition: rate-limit-acked\n'
-    [ "$status" -eq 0 ] && [ -z "$output" ]
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
     # The placeholder, a blank suffix or a bare prefix does not.
     local label
     for label in 'cr-disposition:<reason>' 'cr-disposition: ' 'cr-disposition:'; do
