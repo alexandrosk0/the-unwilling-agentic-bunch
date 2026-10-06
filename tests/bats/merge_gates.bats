@@ -347,7 +347,7 @@ set_fixture() {
     [ "$status" -eq 1 ]
     # Bare `echo GATES_PASSED` emit must be ABSENT — whole-line match so the BLOCK
     # message's own "Refusing GATES_PASSED" text doesn't false-trip this.
-    ! grep -qx 'GATES_PASSED' <<<"$output"
+    [ "$(grep -cx 'GATES_PASSED' <<<"$output")" -eq 0 ]
     [[ "$output" == *"differs from origin/develop"* ]]
     [[ "$output" == *"Refusing GATES_PASSED"* ]]
 }
@@ -398,7 +398,7 @@ set_fixture() {
     run poll_merge_gates org repo 1
     [ "$status" -eq 1 ]
     # Whole-line match — the BLOCK message contains "refusing GATES_PASSED".
-    ! grep -qx 'GATES_PASSED' <<<"$output"
+    [ "$(grep -cx 'GATES_PASSED' <<<"$output")" -eq 0 ]
     [[ "$output" == *"freshness unverifiable"* ]]
 }
 
@@ -409,7 +409,7 @@ set_fixture() {
     export MERGE_GATES_FRESHNESS=blcok
     run poll_merge_gates org repo 1
     [ "$status" -eq 3 ]
-    ! grep -qx 'GATES_PASSED' <<<"$output"
+    [ "$(grep -cx 'GATES_PASSED' <<<"$output")" -eq 0 ]
     [[ "$output" == *"must be one of off|warn|block"* ]]
 }
 
@@ -2980,7 +2980,7 @@ CFG
     set_fixture "$f"
     run poll_merge_gates org repo 1
     [ "$status" -eq 1 ]
-    ! grep -qx 'GATES_PASSED' <<<"$output"
+    [ "$(grep -cx 'GATES_PASSED' <<<"$output")" -eq 0 ]
     [[ "$output" == *"mergeStateStatus=DIRTY"* ]]
     [[ "$output" != *"required-missing"* ]]
     [[ "$output" != *"CONFLICTED"* ]]
