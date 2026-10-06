@@ -30,17 +30,23 @@
 #       a commented one may be uncommented.
 #   pbe_write <repo> <pr> <old-file> <new-file>
 #       pbe_dropped_markers guard, a re-read of the live body (it must still
-#       equal <old-file>), then PATCH the body.
+#       equal <old-file>, trailing newlines aside), then PATCH the body.
 #       rc 0 written · 1 refused (a marker was lost; nothing sent) · 2 gh
 #       missing / API failure · 3 the body changed since <old-file> was read
 #       (a concurrent edit; nothing sent — re-fetch, re-derive, retry).
 #
 # Run directly — the marker-guarded replacement for `gh pr edit --body-file`
 # (Intent-gate remediation, any whole-body rewrite):
-#   bash agents/scripts/core/lib/pr-body-edit.sh <pr> <new-body-file>
+#   bash agents/scripts/core/lib/pr-body-edit.sh [--base <base-body-file>] <pr> <new-body-file>
+#   --base names the body the caller read and derived <new-body-file> from; the
+#   live body must still equal it, so an edit made at ANY point after that read
+#   is caught. Without --base the CLI can only compare against a body it reads
+#   itself just before writing, which misses an edit made between the caller's
+#   read and this run (it says so on stderr). In-process callers (pbe_write,
+#   record-review-verdict.sh --sync-pr) always pass the body they derived from.
 #   REPO=<owner/name> overrides the repo gh resolves from the checkout.
 #   Exit: 0 written · 1 refused · 2 usage / gh / API failure · 3 the body
-#   was edited concurrently (nothing sent; re-run against the new body).
+#   was edited concurrently (nothing sent; re-read, re-derive, re-run).
 #
 # gh is the only GitHub client (stubbable on PATH in bats); python does the
 # text work and the JSON encoding. Sourcing defines functions only.
@@ -154,7 +160,9 @@ pbe_write() {
         rm -f "$now"
         return 2
     fi
-    if ! cmp -s "$old" "$now"; then
+    # Trailing newlines do not count: a base saved from `gh … --jq .body` carries
+    # the one gh appends, and an edit that only adds or drops them is harmless.
+    if ! cmp -s "$old" "$now" && [ "$(cat "$old")" != "$(cat "$now")" ]; then
         rm -f "$now"
         echo "pr-body-edit: ${repo}#${pr} body changed since it was read (a concurrent edit) — NOT overwriting it; re-read and retry." >&2
         return 3
@@ -176,19 +184,36 @@ pbe_write() {
 
 if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
     set -uo pipefail
+    _pbe_usage="usage: bash agents/scripts/core/lib/pr-body-edit.sh [--base <base-body-file>] <pr> <new-body-file>"
+    _pbe_base=""
+    case "${1:-}" in
+        --base) [ "$#" -ge 2 ] || { echo "$_pbe_usage" >&2; exit 2; }; _pbe_base="$2"; shift 2 ;;
+        --base=*) _pbe_base="${1#--base=}"; shift ;;
+    esac
     if [ "$#" -ne 2 ]; then
-        echo "usage: bash agents/scripts/core/lib/pr-body-edit.sh <pr> <new-body-file>" >&2
+        echo "$_pbe_usage" >&2
         exit 2
     fi
     case "$1" in
         '' | 0* | *[!0-9]*) echo "pr-body-edit: PR number must be a positive integer, got '$1'" >&2; exit 2 ;;
     esac
     [ -f "$2" ] || { echo "pr-body-edit: new body file not found: $2" >&2; exit 2; }
+    if [ -n "$_pbe_base" ] && [ ! -f "$_pbe_base" ]; then
+        echo "pr-body-edit: base body file not found: $_pbe_base" >&2
+        exit 2
+    fi
     # shellcheck source=agents/scripts/core/lib/resolve-repo.sh
     . "$_PBE_DIR/resolve-repo.sh"
     _pbe_repo="$(resolve_repo)" || { echo "pr-body-edit: cannot resolve owner/name (run from the repo with gh authed, or set REPO=owner/name)" >&2; exit 2; }
     _pbe_old="$(mktemp)" || exit 2
-    pbe_fetch "$_pbe_repo" "$1" "$_pbe_old" || { rm -f "$_pbe_old"; exit 2; }
+    if [ -n "$_pbe_base" ]; then
+        # The body the caller derived its rewrite from: pbe_write's re-read must
+        # still equal it, so every edit since the caller's read is caught.
+        cp "$_pbe_base" "$_pbe_old" || { rm -f "$_pbe_old"; exit 2; }
+    else
+        echo "pr-body-edit: no --base — only an edit landing during this run is detected, not one made since you read the body; pass --base <the body you started from>." >&2
+        pbe_fetch "$_pbe_repo" "$1" "$_pbe_old" || { rm -f "$_pbe_old"; exit 2; }
+    fi
     _pbe_rc=0
     pbe_write "$_pbe_repo" "$1" "$_pbe_old" "$2" || _pbe_rc=$?
     rm -f "$_pbe_old"

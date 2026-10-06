@@ -214,6 +214,44 @@ patched_body() {
     [ ! -e "$GH_PATCHED" ]
 }
 
+@test "pr-body-edit.sh --base catches an edit made after the caller read the body (exit 3, no PATCH)" {
+    # The caller read "Original." and derived its rewrite from it; the body was
+    # edited before the CLI ran, so every GET the CLI makes sees the edit. Only a
+    # comparison against the caller's own base can catch that.
+    printf '## Intent\n\nOriginal.' > "$TMP/base.md"
+    printf '## Intent\n\nSomeone else edited this.\n' > "$GH_BODY"
+    printf '## Intent\n\nMy rewrite.\n' > "$TMP/new.md"
+    run bash -c 'PATH="$STUB_BIN:$PATH" bash "$PBE" --base "$1" 42 "$2"' _ "$TMP/base.md" "$TMP/new.md"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"changed since it was read"* ]]
+    [ ! -e "$GH_PATCHED" ]
+}
+
+@test "pr-body-edit.sh --base= writes when the live body still equals the base" {
+    # Saved the way `gh pr view --json body --jq .body > base.md` saves it: with
+    # the one trailing newline gh appends, which does not count as an edit.
+    printf '## Intent\n\nOriginal.\n\nlock-slug: keep-me\n' > "$TMP/base.md"
+    printf '## Intent\n\nOriginal.\n\nlock-slug: keep-me\n' > "$GH_BODY"
+    printf '## Intent\n\nMy rewrite.\n\nlock-slug: keep-me\n' > "$TMP/new.md"
+    run bash -c 'PATH="$STUB_BIN:$PATH" bash "$PBE" --base="$1" 42 "$2"' _ "$TMP/base.md" "$TMP/new.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"no --base"* ]]
+    run patched_body
+    [[ "$output" == *'My rewrite.'* ]]
+}
+
+@test "pr-body-edit.sh without --base says what it cannot detect; a missing base file is a usage error" {
+    printf '## Intent\n\nOriginal.\n' > "$GH_BODY"
+    printf '## Intent\n\nMy rewrite.\n' > "$TMP/new.md"
+    run bash -c 'PATH="$STUB_BIN:$PATH" bash "$PBE" 42 "$1"' _ "$TMP/new.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no --base"* ]]
+    rm -f "$GH_PATCHED"
+    run bash -c 'PATH="$STUB_BIN:$PATH" bash "$PBE" --base "$1" 42 "$2"' _ "$TMP/absent.md" "$TMP/new.md"
+    [ "$status" -eq 2 ]
+    [ ! -e "$GH_PATCHED" ]
+}
+
 @test "--sync-pr re-reads once after a concurrent edit and keeps that edit" {
     printf '## Intent\n\nOriginal.\n' > "$GH_BODY"
     # GET 1 = sync read, GET 2 = pre-PATCH re-read: the body moved on. The
