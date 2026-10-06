@@ -679,8 +679,16 @@ setup_cursor() {
     echo "         Then re-run: bash agents/scripts/core/setup-harness.sh cursor" >&2
     exit 1
   fi
-  copy_template "docs/harness/cursor/rules/agents.mdc" ".cursor/rules/agents.mdc"
-  echo "Done. .cursor/rules/agents.mdc points Cursor at AGENTS.md + agents/."
+  # Rendered, not copied: the rule names layer paths, which sit under the host's
+  # agent-layer/ mount after the flip. The two hashes are the template versions
+  # shipped before it was rendered; a verbatim copy of either is upgraded.
+  # shellcheck source=agents/scripts/core/lib/render-template.sh
+  . "$(_layer_src "agents/scripts/core/lib/render-template.sh")"
+  render_template "$(_layer_src "docs/harness/cursor/rules/agents.mdc")" ".cursor/rules/agents.mdc" \
+    "$(layer_prefix "$ROOT" "$PWD")" \
+    aa39cf6af4cbdf411401cb3a69bf3599f4d55ba93a4207a35e7a8e9c5f584deb \
+    169a9870065a35576de3199191e4b7763b5a4eed181baaad357ec948f24ed843
+  echo "Done. .cursor/rules/agents.mdc points Cursor at AGENTS.md and the agent layer's agents/."
 }
 
 # Required-tools pre-check — fires before the harness-specific setup so a
