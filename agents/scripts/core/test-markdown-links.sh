@@ -628,7 +628,12 @@ if SCOPE == "baseline":
 # scope (it only ever sees markdown a change actually touched), so consulting the
 # baseline there would double-grandfather and let a NEW break slip through on a file
 # that happens to carry an old one.
-baseline = read_baseline() if SCOPE == "all" else set()
+# Except in a standalone agent layer (no Source/: the layer repo checked out on its
+# own). There the baseline holds links into the host's tree, which cannot resolve
+# without a host, so "touching a file means fixing its links" would fail every
+# layer PR that edits such a file. A new break with a new href still fails.
+STANDALONE_LAYER = not os.path.isdir(os.path.join(REPO_ROOT, "Source"))
+baseline = read_baseline() if (SCOPE == "all" or STANDALONE_LAYER) else set()
 reportable = [v for v in violations if (v[0], v[2]) not in baseline]
 grandfathered = len(violations) - len(reportable)
 
