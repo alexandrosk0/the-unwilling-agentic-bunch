@@ -7,10 +7,11 @@ alwaysApply: true
 See `AGENTS.md` at the repo root for project rules, agent delegation table,
 semantic-codebase-search policy, and the harness adapter mapping.
 
-Individual agent definitions live at `agents/core/*.md` and `agents/project/*.md`.
+Individual agent definitions live at `{{AGENT_LAYER}}agents/core/*.md` and, for a
+project's own subsystem agents, `agents/project/*.md`.
 
 Shared skills and the token-tracking hook contract live under
-`agents/_shared/`.
+`{{AGENT_LAYER}}agents/_shared/`.
 
-Harness setup steps for any other harness (Claude Code, Codex) live under
-`docs/harness/`.
+Harness setup steps for any other harness (Claude Code, Codex, pi) live under
+`{{AGENT_LAYER}}docs/harness/`.
