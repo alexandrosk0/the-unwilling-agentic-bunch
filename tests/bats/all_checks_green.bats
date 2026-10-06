@@ -356,7 +356,8 @@ GREEN_EDIT='setrun("Bucket-E UI tests (Mesa headless GL)"; "success") | setstatu
 # answers 403 with X-RateLimit-Remaining 0; $STUB/rl, when present, is sent as
 # X-RateLimit-Remaining ($STUB/reset as X-RateLimit-Reset). The sleep stub
 # (ACG_SLEEP_BIN="$STUB/bin/sleeplog") logs each sleep to $STUB/sleeps and then
-# promotes $STUB/rl.after-sleep to $STUB/rl (a rate-limit reset arriving).
+# promotes $STUB/rl.after-sleep to $STUB/rl (a rate-limit reset arriving), and
+# advances the fake clock when fake_clock installed one.
 stub_gh() {
     STUB="$BATS_TEST_TMPDIR/stub"
     mkdir -p "$STUB/bin"
@@ -414,6 +415,7 @@ GH
 #!/usr/bin/env bash
 echo "$1" >> "$STUB/sleeps"
 if [ -f "$STUB/rl.after-sleep" ]; then mv "$STUB/rl.after-sleep" "$STUB/rl"; fi
+if [ -f "$STUB/now" ]; then echo $(( $(cat "$STUB/now") + $1 )) > "$STUB/now"; fi
 SLEEP
     chmod +x "$STUB/bin/gh" "$STUB/bin/sleeplog"
     export STUB
@@ -436,6 +438,20 @@ serve_pr() { # <head-sha> [state]
 # (GET .../commits/<sha>/pulls); $h is bound to $HEAD_SHA.
 serve_assoc() {
     jq -n --arg h "$HEAD_SHA" "$1" > "$STUB/assoc.json"
+}
+
+# fake_clock — a `date` on the stub PATH whose `date +%s` reads $STUB/now, which
+# the sleeplog stub advances by each sleep, so the wait budget can run out
+# inside a test. Every other `date` call goes to the real binary.
+fake_clock() {
+    local real
+    real="$(command -v date)"
+    date +%s > "$STUB/now"
+    cat > "$STUB/bin/date" <<CLOCK
+#!/usr/bin/env bash
+if [ "\$*" = "+%s" ] && [ -f "\$STUB/now" ]; then cat "\$STUB/now"; else exec "$real" "\$@"; fi
+CLOCK
+    chmod +x "$STUB/bin/date"
 }
 
 HEAD_SHA="dfa2e0ce6c52711d0825e5aa772818785050887f"
@@ -553,6 +569,20 @@ merged_pr() {
     [ "$status" -eq 1 ]
     [[ "$output" == *"timed out"* ]]
     [[ "$output" == *"PENDING     CodeQL analyze (c-cpp) (in_progress)"* ]]
+}
+
+@test "live: no sleep runs past the wait budget; API errors at the deadline report the pending set" {
+    # The API-error backoff (2 x poll, up to 300 s) used to ignore the deadline:
+    # nine failures could run ~27 min past the budget, beyond the job's
+    # timeout-minutes, so the runner killed the job before the script reported.
+    stub_gh; replay "2026-10-04T01:43:54Z"; serve runs; serve status; serve_pr "$HEAD_SHA"
+    fake_clock
+    for i in 2 3 4 5 6; do : > "$STUB/runs.$i.fail"; done
+    run_live ACG_SLEEP_BIN="$STUB/bin/sleeplog" ACG_MAX_WAIT_SECONDS=100 ACG_POLL_SECONDS=90
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"timed out::the GitHub API failed"* ]]
+    [[ "$output" == *"PENDING     CodeQL analyze (c-cpp) (in_progress)"* ]]
+    [ "$(awk '{ t += $1 } END { print t }' "$STUB/sleeps")" -le 100 ]
 }
 
 @test "live: transient API errors are retried; persistent ones fail closed (exit 2)" {

@@ -81,7 +81,10 @@
 #     a runner — 170 min covers either with queue slack. The workflow's
 #     timeout-minutes sits above budget + the longest post-deadline sleep, so
 #     the script, not the runner, reports the pending set (bats pins it);
-#   * ACG_MAX_API_FAILURES (default 10) consecutive API failures -> exit 2.
+#   * ACG_MAX_API_FAILURES (default 10) consecutive API failures -> exit 2;
+#     failures still running when the budget is spent end as a timeout (exit 1,
+#     with the last judged pending set). No sleep — poll, backoff, rate-limit
+#     pause — runs past the budget; only the settle re-poll gets its grace.
 # The PR (head, state, labels, body) is re-read every ACG_PR_REFRESH_POLLS
 # (default 5) polls and always before a terminal verdict.
 #
@@ -377,24 +380,44 @@ fetch_pr() {
     mv "$WORK/pr.json.new" "$WORK/pr.json"
 }
 
+# nap <seconds> [deadline] — sleep, but never past <deadline> (default: the wait
+# budget's DEADLINE; at least 1 s, so a loop past it still yields). Every sleep
+# goes through here, so the script — not the runner's timeout-minutes — is what
+# reports a spent budget, with the pending set.
+nap() {
+    local want="$1" left
+    left=$(( ${2:-$DEADLINE} - $(date +%s) ))
+    [ "$left" -ge 1 ] || left=1
+    [ "$want" -le "$left" ] || want="$left"
+    "$SLEEP_BIN" "$want"
+}
+
+# timeout_red <why> — the wait budget is spent: report the last judged set (what
+# a re-run would wait on) and end red. A timeout is red (fail-closed).
+timeout_red() {
+    if [ -n "${v:-}" ]; then
+        report "$v"
+    else
+        echo "all-checks-green: no poll was judged before the budget ran out."
+    fi
+    echo "::error title=All checks green — timed out::$1 and the ${MAX_WAIT}s wait budget is spent — a timeout is red (fail-closed). Re-run the job."
+    exit 1
+}
+
 # poll_wait — sleep before the next poll, sized by the REST budget left: the
-# base interval; x4 below RL_LOW; below RL_STOP, until the rate-limit reset
-# (never past the wait budget — the deadline check then reports the timeout).
+# base interval; x4 below RL_LOW; below RL_STOP, until the rate-limit reset.
+# Never past the wait budget — the deadline check then reports the timeout.
 poll_wait() {
-    local wait="$POLL" now left
+    local wait="$POLL"
     if [ -n "$RL_REMAINING" ] && [ "$RL_REMAINING" -lt "$RL_STOP" ]; then
-        now="$(date +%s)"
-        wait=$(( ${RL_RESET:-0} - now + 5 ))
+        wait=$(( ${RL_RESET:-0} - $(date +%s) + 5 ))
         [ "$wait" -ge "$POLL" ] || wait="$POLL"
-        left=$(( DEADLINE - now ))
-        [ "$left" -ge 1 ] || left=1
-        [ "$wait" -le "$left" ] || wait="$left"
-        echo "::warning title=All checks green — REST budget low::GITHUB_TOKEN has $RL_REMAINING REST calls left; pausing polls ${wait}s until the rate-limit reset (this check stays pending meanwhile)."
+        echo "::warning title=All checks green — REST budget low::GITHUB_TOKEN has $RL_REMAINING REST calls left; pausing polls up to ${wait}s until the rate-limit reset (this check stays pending meanwhile)."
     elif [ -n "$RL_REMAINING" ] && [ "$RL_REMAINING" -lt "$RL_LOW" ]; then
         wait=$(( POLL * 4 ))
         echo "all-checks-green: REST budget low ($RL_REMAINING calls left) — poll interval widened to ${wait}s."
     fi
-    "$SLEEP_BIN" "$wait"
+    nap "$wait"
 }
 
 # other_open_prs_on_sha — print the numbers of the OPEN PRs other than $PR whose
@@ -468,8 +491,7 @@ while :; do
         # Rate-limited: not an API failure — wait for the reset, within budget.
         RL_REMAINING=0
         if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-            echo "::error title=All checks green — timed out::GITHUB_TOKEN REST budget exhausted and the ${MAX_WAIT}s wait budget is spent. Re-run the job."
-            exit 1
+            timeout_red "GITHUB_TOKEN REST budget exhausted"
         fi
         echo "all-checks-green: poll $poll — rate-limited by GitHub."
         poll_wait
@@ -481,8 +503,11 @@ while :; do
             echo "::error title=All checks green — GitHub API unavailable::$api_fail consecutive API failures; failing closed. Re-run the job."
             exit 2
         fi
+        if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+            timeout_red "the GitHub API failed $api_fail time(s) in a row"
+        fi
         echo "all-checks-green: poll $poll — GitHub API error ($api_fail/$MAX_API_FAIL): $(head -n 1 "$WORK/raw.err" 2>/dev/null || :) — backing off."
-        "$SLEEP_BIN" $(( POLL * 2 > 300 ? 300 : POLL * 2 ))
+        nap $(( POLL * 2 > 300 ? 300 : POLL * 2 ))
         continue
     fi
     api_fail=0
@@ -491,8 +516,11 @@ while :; do
     # A terminal verdict is always judged on a fresh PR read (head, labels, body).
     if [ "$verdict" != "pending" ] && [ "$pr_fresh" -eq 0 ]; then
         if ! fetch_pr; then
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+                timeout_red "the PR could not be re-read for a terminal verdict"
+            fi
             echo "all-checks-green: poll $poll — PR read failed, re-polling."
-            "$SLEEP_BIN" "$POLL"
+            nap "$POLL"
             continue
         fi
         pr_superseded
@@ -522,7 +550,7 @@ while :; do
                 echo "::error title=All checks green — timed out::budget ${MAX_WAIT}s spent before the green set settled. Re-run the job."
                 exit 1
             fi
-            "$SLEEP_BIN" "$SETTLE"
+            nap "$SETTLE" $(( DEADLINE + 2 * SETTLE ))
             continue
             ;;
     esac
