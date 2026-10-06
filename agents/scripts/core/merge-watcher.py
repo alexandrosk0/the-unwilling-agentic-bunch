@@ -1819,7 +1819,10 @@ def _cr_none_grace_cycles_pure_docs() -> int:
 # Mirror of agents/scripts/core/is-pure-docs-diff.sh's allow-list (kept in sync
 # by tests/bats/merge_watcher.bats § pure-docs-allowlist-parity). A path is
 # docs-class if it is under docs/, backlog/, agents/scripts/, OR ends in .md
-# anywhere (markdown is never compiled → never needs a build/review).
+# anywhere (markdown is never compiled → never needs a build/review). The
+# agent-layer gitlink and .gitmodules, which that script also accepts for the
+# local build cadence, are deliberately left out: a .gitmodules change can
+# repoint the mount's URL, so a bump PR gets the code-PR CodeRabbit wait.
 _PURE_DOCS_ALLOW = re.compile(r"^(docs/|backlog/|agents/scripts/|.*\.md$)")
 
 

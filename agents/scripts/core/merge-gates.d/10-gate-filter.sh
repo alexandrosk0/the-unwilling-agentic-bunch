@@ -226,10 +226,13 @@ _MG_GATE_FILTER_TEMPLATE='
        (contains("skip review by coderabbit.ai")
         or test("##[[:space:]]*Review skipped"; "i"))
        and (ascii_downcase | contains("too many files")))) as $crskip
-# pureDocs — the PR diff is strictly within the is-pure-docs-diff.sh allow-list
-# (docs/ , backlog/ , agents/scripts/ , or any *.md ANYWHERE). Mirrors that
-# script over the PR file list so the poller can apply the IDENTICAL pure-docs
-# verdict without a local checkout. Used by the rate-limit auto-downgrade
+# pureDocs — the PR diff is strictly within the pure-docs allow-list
+# (docs/ , backlog/ , agents/scripts/ , or any *.md ANYWHERE). Mirrors
+# is-pure-docs-diff.sh over the PR file list so the poller needs no local
+# checkout, EXCEPT that it deliberately omits the agent-layer gitlink and
+# .gitmodules: that script accepts them only for the local build cadence, and a
+# .gitmodules change can repoint the URL of the mount, so a bump PR stays a code PR
+# here (merge-gates.md § Bump-PR gate profile). Used by the rate-limit auto-downgrade
 # (deliverable 1): a rate-limit skip on a pure-docs PR is harmless to fast-pass
 # (markdown is never compiled), while a rate-limit skip on a CODE PR must pause /
 # require an explicit disposition (deliverable 2). Also gates the comment-based

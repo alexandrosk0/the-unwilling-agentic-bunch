@@ -3,7 +3,7 @@
 # (`the-unwilling-agentic-bunch`) from a fresh Smatchet clone, via git-filter-repo.
 #
 # Plan: docs/plans/agent-surface-extraction-repo.md — Phase B rows 8, 8a-8g.
-# Companion detail: docs/plans/active/agent-surface-extraction-repo/phase-b-c.md.
+# Companion detail: docs/plans/shipped/agent-surface-extraction-repo/phase-b-c.md.
 #
 # NOT named test-*.sh ON PURPOSE. scripts/dev/test-all.sh discovers tests by the
 # test-*.sh glob and would auto-enrol this into CI — a destructive cross-repo
