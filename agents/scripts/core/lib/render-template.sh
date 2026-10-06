@@ -8,69 +8,121 @@
 # submodule. A verbatim copy would point a mounted host at host-root paths that
 # do not exist there (`agents/core/` instead of `agent-layer/agents/core/`).
 #
+# Portable to bash 3.2 (stock macOS): no ${var//pat/rep} with a quoted
+# replacement, whose quotes bash <= 4.2 keeps as literal characters.
+#
 # Tests: tests/bats/setup_harness_render_template.bats.
+
+# _rt_under <dir> <root> — print <dir>'s path below <root> plus `/`; fail when
+# <dir> is not inside <root>.
+_rt_under() {
+    case "$1" in
+        "$2"/*) printf '%s/' "${1#"$2"/}" ;;
+        *) return 1 ;;
+    esac
+}
 
 # layer_prefix <layer-root> <host-root>
 # Print the {{AGENT_LAYER}} value: nothing when the two roots are the same
 # directory, the layer's path relative to the host plus `/` when the layer sits
 # inside the host, and the layer's absolute path plus `/` otherwise. Logical
-# paths (`pwd`, not `pwd -P`), so a mount reached through a symlink still
-# renders as the relative `agent-layer/` a reader of the rule would use.
+# paths first, so a mount reached through a symlink renders as the relative
+# `agent-layer/` a reader would use; physical paths second, because git reports
+# the superproject physically while the layer root may arrive logically (macOS
+# /tmp -> /private/tmp).
 layer_prefix() {
-    local layer host
+    local layer host layer_p host_p
     layer="$(cd "$1" 2>/dev/null && pwd)" || { printf '%s/' "$1"; return 0; }
-    host="$(cd "$2" 2>/dev/null && pwd)" || host=""
-    if [ "$layer" = "$host" ]; then
-        return 0
-    fi
-    if [ -z "$host" ]; then
-        printf '%s/' "$layer"
-        return 0
-    fi
-    case "$layer" in
-        "$host"/*) printf '%s/' "${layer#"$host"/}" ;;
-        *) printf '%s/' "$layer" ;;
-    esac
+    host="$(cd "$2" 2>/dev/null && pwd)" || { printf '%s/' "$layer"; return 0; }
+    [ "$layer" = "$host" ] && return 0
+    _rt_under "$layer" "$host" && return 0
+    layer_p="$(cd "$1" && pwd -P)"
+    host_p="$(cd "$2" && pwd -P)"
+    [ "$layer_p" = "$host_p" ] && return 0
+    _rt_under "$layer_p" "$host_p" && return 0
+    printf '%s/' "$layer"
 }
 
 # file_sha256 <file>
-# Print the file's sha256, or nothing when neither sha256sum nor shasum exists
-# (render_template then treats every existing destination as a local edit).
+# Print the file's sha256, or nothing (status 0) when the file is unreadable or
+# neither sha256sum nor shasum exists; render_template then treats an existing
+# destination as a local edit.
 file_sha256() {
+    local out=""
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | cut -c1-64
+        out="$(sha256sum "$1" 2>/dev/null)" || out=""
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | cut -c1-64
+        out="$(shasum -a 256 "$1" 2>/dev/null)" || out=""
     fi
+    printf '%s' "${out%% *}"
+}
+
+# render_placeholder <text> <placeholder> <replacement> — print <text> with every
+# <placeholder> replaced. Split-and-join on literal (quoted) patterns, so the
+# replacement is never interpreted (`&`, quotes, backslashes stay as written).
+render_placeholder() {
+    local rest="$1" ph="$2" rep="$3" out=""
+    while [[ "$rest" == *"$ph"* ]]; do
+        out="$out${rest%%"$ph"*}$rep"
+        rest="${rest#*"$ph"}"
+    done
+    printf '%s' "$out$rest"
+}
+
+# _rt_stamp_path <dst> — where render_template records the sha256 of what it
+# last wrote to <dst>: a dotfile beside it (`.cursor/rules/.agents.mdc.sha256`),
+# outside the `*.mdc` set Cursor loads.
+_rt_stamp_path() {
+    printf '%s/.%s.sha256' "$(dirname "$1")" "$(basename "$1")"
 }
 
 # render_template <src> <dst> <prefix> [superseded-sha256 ...]
-# Write <src> to <dst> with every {{AGENT_LAYER}} replaced by <prefix>.
+# Write <src> to <dst> with every {{AGENT_LAYER}} replaced by <prefix>, and
+# stamp the sha256 of what was written.
 # copy_template's never-clobber contract holds: an existing <dst> that differs
-# from the rendering is a local edit and is left alone. The one exception is a
-# byte-for-byte copy of a template version setup-harness.sh shipped earlier (its
-# sha256 is passed in), which is not a local edit, so it is upgraded.
+# from the rendering is a local edit and is left alone. It is not a local edit,
+# and is upgraded, when it still matches the stamp (this script wrote it and
+# nobody changed it since) or a listed sha256 (a copy of a template version
+# shipped before rendering and stamping existed).
 render_template() {
-    local src="$1" dst="$2" prefix="$3" rendered sha legacy
+    local src="$1" dst="$2" prefix="$3" rendered stamp sha known legacy
     shift 3
     rendered="$(cat "$src")" || return 1
-    # The quoted replacement keeps a `&` in the prefix literal under bash 5.2's
-    # patsub_replacement.
-    rendered="${rendered//'{{AGENT_LAYER}}'/"$prefix"}"
+    rendered="$(render_placeholder "$rendered" '{{AGENT_LAYER}}' "$prefix")"
+    stamp="$(_rt_stamp_path "$dst")"
     mkdir -p "$(dirname "$dst")"
-    if [ -e "$dst" ]; then
-        [ "$(cat "$dst")" = "$rendered" ] && return 0
+    if [ -e "$dst" ] && [ ! -f "$dst" ]; then
+        echo "  skip-copy  $dst (exists but is not a regular file)"
+        return 0
+    fi
+    if [ -f "$dst" ]; then
+        if [ "$(cat "$dst")" = "$rendered" ]; then
+            [ -f "$stamp" ] || file_sha256 "$dst" > "$stamp"
+            return 0
+        fi
         sha="$(file_sha256 "$dst")"
-        for legacy in "$@"; do
-            if [ -n "$sha" ] && [ "$sha" = "$legacy" ]; then
-                printf '%s\n' "$rendered" > "$dst"
-                echo "  upgrade    $dst (a superseded copy of the template)"
-                return 0
+        known=""
+        if [ -n "$sha" ]; then
+            if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$sha" ]; then
+                known="stamp"
+            else
+                for legacy in "$@"; do
+                    if [ "$sha" = "$legacy" ]; then
+                        known="legacy"
+                    fi
+                done
             fi
-        done
-        echo "  skip-copy  $dst (user-modified — not overwriting)"
+        fi
+        if [ -z "$known" ]; then
+            echo "  skip-copy  $dst (user-modified — not overwriting)"
+            return 0
+        fi
+        printf '%s\n' "$rendered" > "$dst"
+        file_sha256 "$dst" > "$stamp"
+        echo "  upgrade    $dst (unmodified since setup wrote it)"
         return 0
     fi
     printf '%s\n' "$rendered" > "$dst"
+    file_sha256 "$dst" > "$stamp"
     echo "  render     $dst"
 }

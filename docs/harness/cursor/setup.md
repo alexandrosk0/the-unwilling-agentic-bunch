@@ -27,7 +27,9 @@ The template is rendered, not copied. `{{AGENT_LAYER}}` becomes the agent layer'
 
 ## Refreshing after a `git pull`
 
-Re-run `bash agents/scripts/core/setup-harness.sh cursor`. The script renders the template only if you haven't locally modified `.cursor/rules/agents.mdc`; an unmodified copy of an earlier shipped template counts as unmodified and is upgraded.
+Re-run `bash agents/scripts/core/setup-harness.sh cursor`. The script renders the template only if you haven't locally modified `.cursor/rules/agents.mdc`.
+
+It tells the two apart with a stamp: each time it writes the rule, it records the file's sha256 in `.cursor/rules/.agents.mdc.sha256` (a dotfile, outside the `*.mdc` set Cursor loads). A rule that still matches its stamp is unmodified and is re-rendered; one that no longer matches is a local edit and is left alone. A verbatim copy of a template version shipped before rendering existed has no stamp, so the script also recognises those versions by their sha256 and upgrades them. Deleting the stamp makes the script treat a rule that differs from the current rendering as a local edit.
 
 ## Removing the adapter
 
