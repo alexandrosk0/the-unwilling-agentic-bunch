@@ -1919,6 +1919,39 @@ planlock_waived_fixture() {
     rm -f "$f"
 }
 
+@test "Plan-lock re-check: a collision whose path / slug holds an infra word is still a collision (override refused)" {
+    # The red's cause is read from the gate's own lines: "failed" / "missing"
+    # inside a path or slug of a collision line is not an infrastructure red.
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    : > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/failed-merges.md"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="plan-lock-gate: 'docs/failed-merges.md' overlaps the write set of plan-lock 'missing-tests', held by a different branch."
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"stale red — re-run"* ]]
+    [[ "$output" != *"infrastructure failure"* ]]
+    rm -f "$f"
+}
+
+@test "Plan-lock re-check: a non-gate annotation (runner / checkout warning) never makes a collision infra" {
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    : > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="$(printf '%s\n%s' \
+        "Fetching the submodules failed once and was retried; the checkout is missing nothing." \
+        "$PLANLOCK_COLLISION_ANN")"
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"stale red — re-run"* ]]
+    rm -f "$f"
+}
+
 @test "Plan-lock re-check: an unreadable red cause keeps the override (WARN, never refuse unverified)" {
     local f rows="$BATS_TEST_TMPDIR/lock-rows"
     : > "$rows"

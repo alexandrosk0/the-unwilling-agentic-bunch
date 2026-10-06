@@ -324,6 +324,10 @@ _mg_lock_remote() {
 # undetermined, base ref unresolvable, gate library missing), `unknown` when
 # the run or its annotations cannot be read. Only a collision red can go
 # stale; an infra red persists across re-runs, so the override stays its escape.
+# Only the gate's OWN ::error lines classify (failure level, message starting
+# `plan-lock-gate:`), one line at a time, collision phrase first: a runner or
+# checkout warning, or a path / slug in a collision line that happens to
+# contain "failed" or "missing", must not turn a collision into infra.
 _mg_planlock_red_cause() {
     local owner="$1" repo="$2" sha="$3" id msgs
     if [ -z "$sha" ]; then echo unknown; return 0; fi
@@ -331,17 +335,23 @@ _mg_planlock_red_cause() {
         --jq '.check_runs | sort_by(.started_at // "") | last | .id // empty' 2>/dev/null)" \
         || { echo unknown; return 0; }
     if [ -z "$id" ]; then echo unknown; return 0; fi
-    msgs="$(gh api "repos/${owner}/${repo}/check-runs/${id}/annotations" --jq '.[].message' 2>/dev/null)" \
+    msgs="$(gh api "repos/${owner}/${repo}/check-runs/${id}/annotations" \
+        --jq '.[] | select((.annotation_level // "failure") == "failure") | .message' 2>/dev/null)" \
         || { echo unknown; return 0; }
     # The vocabulary is plan-lock-gate.sh's own (PLAN_LOCK_GATE_INFRA_RE,
     # sourced by _mg_planlock_recheck before it calls here).
-    if printf '%s\n' "$msgs" | grep -qiE "${PLAN_LOCK_GATE_INFRA_RE:-undetermined|unavailable|does not resolve|failed|missing}"; then
-        echo infra
-    elif printf '%s\n' "$msgs" | grep -q 'overlaps the write set of plan-lock'; then
-        echo collision
-    else
-        echo unknown
-    fi
+    local infra_re="${PLAN_LOCK_GATE_INFRA_RE:-undetermined|unavailable|does not resolve|failed|missing}"
+    local line cause=unknown
+    while IFS= read -r line; do
+        case "$line" in plan-lock-gate:*) ;; *) continue ;; esac
+        if [[ "$line" == *"overlaps the write set of plan-lock"* ]]; then
+            cause=collision
+        elif printf '%s\n' "$line" | grep -qiE "$infra_re"; then
+            echo infra
+            return 0
+        fi
+    done <<< "$msgs"
+    echo "$cause"
 }
 
 # _mg_planlock_recheck <owner> <repo> <pr> <head ref> <head sha> — re-run the
