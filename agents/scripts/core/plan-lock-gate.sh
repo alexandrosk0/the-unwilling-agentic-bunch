@@ -15,10 +15,24 @@
 # branch is unattributable -> non-blocking. Reuses the ONE shared coverage
 # primitive (lock-table-cache.sh), so a path Layer B blocks, this blocks too.
 #
-# Unbypassable except the `plan-lock-out-of-band` label (registered in
-# merge-gates.sh's CI-downgrade path). See plan-lock-enforcement.md items 5-7.
+# Unbypassable except the `plan-lock-out-of-band` label PLUS a
+# `plan-lock-disposition:<reason>` label or PR-body line naming the lock slug(s)
+# crossed and why (registered in merge-gates.sh's CI-downgrade path; the label
+# alone is not honoured). The merge gate refuses that override for a STALE
+# collision red (no live overlap left — re-run instead); an infrastructure red
+# (lock table undetermined, base ref unresolvable) keeps it as the escape. It
+# tells the two apart from this script's ::error annotations with
+# PLAN_LOCK_GATE_INFRA_RE below. See plan-lock-enforcement.md items 5-7.
 
 set -uo pipefail
+
+# PLAN_LOCK_GATE_INFRA_RE — words every INFRASTRUCTURE ::error line below
+# carries and the collision line never does (grep -E, case-insensitive).
+# merge-gates.sh matches the failing run's annotations against it to tell a
+# stale-able collision red from an infra red; plan_lock_gate.bats pins both
+# halves, so a reworded message cannot silently move a red between the classes.
+# shellcheck disable=SC2034  # read by merge-gates.sh, which sources this file
+PLAN_LOCK_GATE_INFRA_RE='undetermined|unavailable|does not resolve|failed|missing|not sourced|not inside a git'
 
 # Decide on a changed-file list read from stdin (one repo-relative path/line).
 # return 0 = clean, 1 = collision (one ::error per colliding file). Requires
@@ -41,13 +55,13 @@ plan_lock_gate_decide() { # $1 = head ref (this PR's branch)
         # Layer C is the fail-closed hard net: unlike Layers A/B (advisory,
         # fail-open), an unverifiable lock state here must red, not silently
         # pass — a net that can't evaluate its input must fail loud.
-        echo "::error file=$f::plan-lock-gate: lock table unavailable/undetermined (rc=$rc) while evaluating '$f'; the fail-closed gate refuses to pass on an unverifiable lock state. Fix the refs/locks fetch, or apply the 'plan-lock-out-of-band' label."
+        echo "::error file=$f::plan-lock-gate: lock table unavailable/undetermined (rc=$rc) while evaluating '$f'; the fail-closed gate refuses to pass on an unverifiable lock state. Fix the refs/locks fetch and re-run this gate. If it keeps failing, the override stays the escape (the merge gate never treats an infrastructure red as stale): the 'plan-lock-out-of-band' label PLUS a 'plan-lock-disposition:<reason>' label or PR-body line saying why."
         hit=1
         continue
         ;;
     esac
     if [ -n "$slug" ]; then
-      echo "::error file=$f::plan-lock-gate: '$f' overlaps the write set of plan-lock '$slug', held by a different branch. File or extend a lock (agents/scripts/core/lock-claim-update.sh <slug> <write-set-file>) or coordinate. Override: apply the 'plan-lock-out-of-band' label."
+      echo "::error file=$f::plan-lock-gate: '$f' overlaps the write set of plan-lock '$slug', held by a different branch. File or extend a lock (agents/scripts/core/lock-claim-update.sh <slug> <write-set-file>) or coordinate. Override: apply the 'plan-lock-out-of-band' label PLUS a 'plan-lock-disposition:<reason>' label or PR-body line naming '$slug' and why crossing it is safe (the label alone is not honoured). If '$slug' is later released or ages past the 14-day cutoff, re-run this gate instead: the merge gate refuses to override a collision red that no longer collides."
       hit=1
     fi
   done
@@ -98,10 +112,10 @@ _plan_lock_gate_main() {
   # Fail-CLOSED on an unresolvable base: a hard net that can't compute its
   # changed set must red LOUD, never silently green on an empty set (the
   # dead-net failure class — NOT the perf-pr-fast `|| true` mask). The
-  # plan-lock-out-of-band label is the escape if a transient infra blip wedges
-  # a legit PR.
+  # plan-lock-out-of-band label + a plan-lock-disposition is the escape if a
+  # transient infra blip wedges a legit PR.
   if ! git rev-parse --verify --quiet "origin/${base}^{commit}" >/dev/null 2>&1; then
-    echo "::error::plan-lock-gate: origin/${base} does not resolve (shallow checkout or a missing 'git fetch origin ${base}'). Refusing to evaluate an EMPTY changed-set — fix the base fetch, or apply 'plan-lock-out-of-band'."
+    echo "::error::plan-lock-gate: origin/${base} does not resolve (shallow checkout or a missing 'git fetch origin ${base}'). Refusing to evaluate an EMPTY changed-set — fix the base fetch and re-run. If it keeps failing, the override stays the escape (the merge gate never treats an infrastructure red as stale): 'plan-lock-out-of-band' PLUS a 'plan-lock-disposition:<reason>' label or PR-body line."
     exit 1
   fi
   if ! changed="$(git diff --name-only "origin/${base}...HEAD" 2>/dev/null)"; then

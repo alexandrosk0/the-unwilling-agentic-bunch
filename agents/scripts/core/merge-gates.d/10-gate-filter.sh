@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # agents/scripts/core/merge-gates.d/10-gate-filter.sh
 # ----------------------------------------------------------------------------
-# The one `gh api graphql --jq` GATE_FILTER program — the 35-field projection
+# The one GATE_FILTER jq program — the field projection run by standalone
+# `jq -f` (or by `gh api graphql --jq` when jq is absent)
 # that turns the GraphQL response into the fixed-order field stream the poll
 # loop reads with `mapfile`. Relocated VERBATIM from merge-gates.sh (the former
 # in-function `GATE_FILTER='...'` literal) into a single-quoted global so the
@@ -12,8 +13,36 @@
 # `local GATE_FILTER` comment. No logic change — pure relocation (bats is the net).
 # ----------------------------------------------------------------------------
 
+# _MG_JQ_DISPOSITION_DEF — the ONE reader for every override disposition trail
+# (cr-disposition, plan-lock-disposition): a `<prefix>:<reason>` label, or a
+# `<prefix>:<reason>` marker LINE in the PR body. Prepended to the gate filter
+# below and to safe-admin-merge.sh's jq programs, so the poller and the admin
+# path accept exactly the same attestations. A marker counts only when:
+#   * it starts its line (leading whitespace and a `-`/`*`/`+` list bullet are
+#     tolerated) — prose or a quoted error text that merely mentions the prefix
+#     does not attest anything;
+#   * it sits outside an HTML comment (a template placeholder never counts);
+#   * its reason is non-empty and not a `<...>` placeholder: pasting the gate's
+#     own error text (`plan-lock-disposition:<reason>`) is not a reason.
+# Labels follow the same reason rule. (NB: no apostrophes in these
+# single-quoted jq strings.)
 # shellcheck disable=SC2016  # single-quoted jq literal — $-refs are jq vars, not bash
-_MG_GATE_FILTER_TEMPLATE='
+_MG_JQ_DISPOSITION_DEF='
+def disposition($labels; $body; $prefix):
+  def _reason_filled:
+    gsub("^[[:space:]]+|[[:space:]]+$"; "") as $r
+    | ($r | length) > 0 and ($r | test("^<[^>]*>") | not);
+  ("^[[:space:]]*([-*+][[:space:]]+)?" + $prefix + ":") as $lead
+  | ($labels | any(startswith($prefix + ":")
+                   and (.[(($prefix | length) + 1):] | _reason_filled)))
+    or (($body // "")
+        | gsub("<!--[\\s\\S]*?-->"; "") | gsub("<!--[\\s\\S]*$"; "")
+        | [splits("\r?\n")]
+        | any(test($lead; "i") and (sub($lead; ""; "i") | _reason_filled)));
+'
+
+# shellcheck disable=SC2016  # single-quoted jq literal — $-refs are jq vars, not bash
+_MG_GATE_FILTER_TEMPLATE="$_MG_JQ_DISPOSITION_DEF"'
 .data.repository.pullRequest as $pr
 | ($pr.headRefOid // "") as $sha
 | ([$pr.labels.nodes[]?.name]) as $labels
@@ -30,6 +59,11 @@ _MG_GATE_FILTER_TEMPLATE='
 | (($changedPaths | length) > 0
    and ($filesOverflow | not)
    and ($changedPaths | all(startswith("docs/self-improvement/")))) as $selfImpOnly
+# dependabotActionsBump — Dependabot author AND a dependabot/github_actions/*
+# head (the cr-finding-gate action scope): the one silent-CR shape that still
+# passes at grace expiry, since CR never reviews bot PRs.
+| (((($pr.author.login) // "") | IN("dependabot", "dependabot[bot]"))
+   and ((($pr.headRefName) // "") | startswith("dependabot/github_actions/"))) as $dependabotActionsBump
 | ($labels | any(. == "tests-out-of-band")) as $tests
 | ($labels | any(. == "perf-out-of-band")) as $perf
 | ($labels | any(. == "intent-out-of-band")) as $intent
@@ -70,11 +104,13 @@ _MG_GATE_FILTER_TEMPLATE='
 # generalising the PR-2 cr-rate-limit-code-pr-auto-pause requirement to EVERY
 # cr-out-of-band downgrade): it proves the operator consciously waived CR review
 # with a recorded reason rather than reflexively slapping a generic override on.
-# Body match: `cr-disposition:` followed by any non-empty reason on the line
-# (regex tolerates leading whitespace / list markers). (NB: no apostrophes in
-# this single-quoted jq filter string.)
-| (($labels | any(startswith("cr-disposition:")))
-   or (($pr.body // "") | test("cr-disposition:[[:space:]]*[^[:space:]]"; "i"))) as $crdisposition
+# Body match: a `cr-disposition:<reason>` line outside an HTML comment with a
+# filled-in reason — the shared disposition() reader (_MG_JQ_DISPOSITION_DEF).
+# (NB: no apostrophes in this single-quoted jq filter string.)
+| disposition($labels; $pr.body; "cr-disposition") as $crdisposition
+# planlockdisposition — the same trail, required by plan-lock-out-of-band
+# (process 2026-09-12): the label ALONE no longer downgrades a red Plan-lock gate.
+| disposition($labels; $pr.body; "plan-lock-disposition") as $planlockdisposition
 | ($labels | any(. == "bugbot-out-of-band")) as $bb
 # Dedup key is (check-suite createdAt, startedAt), NOT startedAt alone. A rerun
 # stays in one check suite, so old-FAILURE/new-SUCCESS ties on the first key and
@@ -94,7 +130,10 @@ _MG_GATE_FILTER_TEMPLATE='
                    else ["StatusContext", (.context // "")] end),
               _r: (.checkSuite.createdAt // "")})
    | group_by(._k) | map(sort_by([._r, (.startedAt // "")]) | .[-1])
-   | map(del(._k, ._r))) as $ctx
+   | map(del(._k, ._r))) as $ctxAll
+# The All-checks-green aggregate re-derives THIS verdict for native auto-merge;
+# counting it would only add a stale red (it never re-runs itself), so skip it.
+| ([$ctxAll[] | select(.__typename != "CheckRun" or .name != "All checks green (block-on-any-red)")]) as $ctx
 # $dupMasked — check NAMES where the dedup above discarded a BLOCKING context
 # from a DIFFERENT check suite than the one it kept. With the suite-aware key the
 # kept context matches what GitHub evaluates, so this is not a gate failure; it is
@@ -110,8 +149,11 @@ _MG_GATE_FILTER_TEMPLATE='
 # uses below (required, or name-matched and not advisory-named). An advisory
 # check cannot fail the gate and cannot produce a 405, so naming one here would
 # be a warning about something that can never bite.
+# The aggregate is dropped here too, as in $ctx above: every newer event cancels
+# its older run, and the resulting re-run warning would name a check this gate
+# never reads.
 | ((($pr.commits.nodes[0].commit.statusCheckRollup.contexts.nodes) // [])
-   | map(select(.__typename == "CheckRun"))
+   | map(select(.__typename == "CheckRun" and .name != "All checks green (block-on-any-red)"))
    | map(. + {_n: (.name // ""), _s: (.checkSuite.createdAt // "")})
    | group_by(._n)
    | map(select(length > 1))
@@ -141,7 +183,7 @@ _MG_GATE_FILTER_TEMPLATE='
           | (test("__BLOCK_ALLOWLIST_RE__"; "i")
              and (ascii_downcase | contains("advisory") | not))))]) as $blocking
 | (__REQUIRED_CONTEXTS__) as $reqNames
-| ([$ctx[] | (if .__typename == "CheckRun" then (.name // "") else (.context // "") end)]) as $ctxNames
+| ([$ctxAll[] | (if .__typename == "CheckRun" then (.name // "") else (.context // "") end)]) as $ctxNames
 | ([$reqNames[] | select(. as $n | ($ctxNames | any(. == $n)) | not)]) as $reqAbsent
 | ([$ctx[] | select(
       ((.__typename == "CheckRun" and .status == "COMPLETED" and ((.conclusion // "") | IN("FAILURE","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE"))) or
@@ -172,7 +214,8 @@ _MG_GATE_FILTER_TEMPLATE='
 # post-label evaluation. "" label-time = no timeline data = legacy behaviour;
 # ISO-8601 Z strings compare correctly as strings. A run with NEITHER
 # timestamp and a known label-time fails closed (no downgrade).
-# intent/plan-lock: no conjunct (see the $labelEvents comment above).
+# intent/plan-lock: no freshness conjunct (see the $labelEvents comment above);
+# plan-lock needs $planlockdisposition instead.
 # $labelReactiveRed binds the name-predicate-only set once so $staleOverride
 # below is derived by SUBTRACTION — the freshness rule exists in exactly one
 # place and the two sets can never drift out of complement.
@@ -183,7 +226,7 @@ _MG_GATE_FILTER_TEMPLATE='
       ($tests and .__typename == "CheckRun" and .name == "Test-delta gate" and ((.completedAt // .startedAt // "") >= $testsAt)) or
       ($perf  and .__typename == "CheckRun" and ((.name // "") | startswith("Perf PR-fast")) and ((.completedAt // .startedAt // "") >= $perfAt)) or
       ($intent and .__typename == "CheckRun" and .name == "Intent section") or
-      ($planlock and .__typename == "CheckRun" and .name == "Plan-lock gate") or
+      ($planlock and $planlockdisposition and .__typename == "CheckRun" and .name == "Plan-lock gate") or
       # cr-out-of-band + disposition also discounts the CR finding gate
       # StatusContext / CheckRun ("CR findings..." / "CR finding gate") —
       # otherwise the waiver that exists to clear a stuck CR check leaves
@@ -226,22 +269,22 @@ _MG_GATE_FILTER_TEMPLATE='
        (contains("skip review by coderabbit.ai")
         or test("##[[:space:]]*Review skipped"; "i"))
        and (ascii_downcase | contains("too many files")))) as $crskip
-# pureDocs — the PR diff is strictly within the pure-docs allow-list
-# (docs/ , backlog/ , agents/scripts/ , or any *.md ANYWHERE). Mirrors
-# is-pure-docs-diff.sh over the PR file list so the poller needs no local
-# checkout, EXCEPT that it deliberately omits the agent-layer gitlink and
-# .gitmodules: that script accepts them only for the local build cadence, and a
-# .gitmodules change can repoint the URL of the mount, so a bump PR stays a code PR
-# here (merge-gates.md § Bump-PR gate profile). Used by the rate-limit auto-downgrade
-# (deliverable 1): a rate-limit skip on a pure-docs PR is harmless to fast-pass
-# (markdown is never compiled), while a rate-limit skip on a CODE PR must pause /
-# require an explicit disposition (deliverable 2). Also gates the comment-based
-# arm of $crreviewskipped below (bound here, above it, for that reason).
-# Fail-safe FALSE on an empty file list, a >100-file page (cannot see every
-# path), or absent files.
+# pureDocs — the PR diff is strictly docs/ , backlog/ , or any *.md ANYWHERE.
+# NARROWER than is-pure-docs-diff.sh, which admits agents/scripts/ and the
+# agent-layer gitlink + .gitmodules for the local build cadence only: gate shell
+# is executable and CR reviews it (tooling 2026-08-16
+# cr-gate-greens-on-rate-limited-review), and a .gitmodules change can repoint
+# the URL of the mount, so a bump PR stays a code PR here (merge-gates.md § Bump-PR
+# gate profile). Used by the rate-limit auto-downgrade (deliverable 1): a
+# rate-limit skip on a pure-docs PR is harmless to fast-pass (markdown is never
+# compiled), while a rate-limit skip on a CODE PR must pause / require an
+# explicit disposition (deliverable 2). Also gates the comment-based arm of
+# $crreviewskipped below (bound here, above it, for that reason). Fail-safe
+# FALSE on an empty file list, a >100-file page (cannot see every path), or
+# absent files.
 | (($changedPaths | length) > 0
    and ($filesOverflow | not)
-   and ($changedPaths | all(test("^(docs/|backlog/|agents/scripts/|.*[.]md$)")))) as $pureDocs
+   and ($changedPaths | all(test("^(docs/|backlog/|.*[.]md$)")))) as $pureDocs
 # crReviewSkipped — the GENERIC terminal "Review skipped" (docs-only /
 # path-filtered / trivial diff per .coderabbit.yaml), read from EITHER surface:
 #  (a) the "CodeRabbit" StatusContext is SUCCESS and its description says
@@ -296,11 +339,41 @@ _MG_GATE_FILTER_TEMPLATE='
 # (CR surfaces the rate-limit on either surface). Regex tolerates "rate limit",
 # "rate-limited", "rate limited", and the common "try again later" phrasing.
 # (NB: no apostrophes in this single-quoted jq filter string.)
-| (($crcommentbodies
-    + [$pr.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?
-       | select(.__typename == "StatusContext" and .context == "CodeRabbit")
-       | (.description // "")])
+| ([$pr.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?
+    | select(.__typename == "StatusContext" and .context == "CodeRabbit")
+    | (.description // "")]) as $crstatusdescs
+| (($crcommentbodies + $crstatusdescs)
    | any(test("rate.?limit"; "i") or test("try again later"; "i"))) as $crratelimited
+# crRateLimitDocsPass — may the label-free pure-docs rate-limit auto-downgrade
+# adjudicate gate 2 (and discount the pending CR findings context from ci_pend)?
+# $crratelimited above is read from EVERY CR comment ever posted, so on its own
+# it lets a notice from a long-gone head wave through a head CR has reviewed
+# WITH findings. All four must hold:
+#   * the diff is pure-docs;
+#   * CR has never reviewed the PR ($crall empty) — a real review verdict, on
+#     any commit, is adjudicated by the review arms, never by a rate-limit note;
+#   * no unresolved CR thread is open (an open finding is not waived by quota);
+#   * the rate-limit signal is on the CURRENT head: the head commit own
+#     "CodeRabbit" StatusContext says so (head-scoped by construction), or a CR
+#     comment carrying the notice names the head SHA (CR lists the commit range
+#     it was asked to review). A notice that names no SHA is not provably about
+#     this head — comments persist across pushes — so it does not count.
+| ([$pr.reviewThreads.nodes[] | select(.isResolved == false and .isOutdated == false
+    and any(.comments.nodes[]; .author.login == "coderabbitai" or .author.login == "coderabbitai[bot]"))]
+   | length) as $cropen
+| (($sha | length) >= 6
+   and (($crstatusdescs | any(test("rate.?limit"; "i") or test("try again later"; "i")))
+        or ($crcommentbodies
+            | any((test("rate.?limit"; "i") or test("try again later"; "i"))
+                  and test("(^|[^0-9a-f])" + $sha[0:7]; "i"))))) as $crratelimitedhead
+| ($pureDocs and (($crall | length) == 0) and ($cropen == 0) and $crratelimitedhead) as $crratelimitdocspass
+# crManualOnly — the head "CodeRabbit" status is the OSS manual-trigger state
+# ("Review skipped: manual review required for this OSS repository" / "Review
+# available on request"): CR posted SUCCESS without reviewing and will not
+# review until a human asks. Read by the NONE arm so the status-only
+# grace-then-pass never passes such a head.
+| ($crstatusdescs
+   | any(test("manual review required"; "i") or test("available on request"; "i"))) as $crmanualonly
 # Bugbot (cursor[bot]) — mirrors the $crall/$crstate machinery. $bball = all
 # reviews authored by cursor[bot] (its summary review, always state COMMENTED).
 # $bbterminal = TRUE when a cursor[bot] CONVERSATION (issue) comment body carries
@@ -344,9 +417,11 @@ _MG_GATE_FILTER_TEMPLATE='
           (.__typename == "CheckRun" and .status != "COMPLETED") or
           (.__typename == "StatusContext" and ((.state // "") | IN("PENDING","EXPECTED")))
         )
-        # When cr-out-of-band + disposition is live, the CR findings context is
-        # the same signal as gate 2 — do not let it hold ci_pend (tooling 2026-08-18).
-        and (($cr and $crdisposition and (
+        # Once gate 2 is adjudicated to WARN — cr-out-of-band + disposition
+        # (tooling 2026-08-18) or the pure-docs rate-limit auto-downgrade
+        # (tooling 2026-08-16, gated by $crratelimitdocspass) — the CR findings
+        # context is the same signal; it must not hold ci_pend.
+        and (((($cr and $crdisposition) or $crratelimitdocspass) and (
                (.__typename == "StatusContext" and ((.context // "") | test("^CR findings"; "i")))
                or (.__typename == "CheckRun" and ((.name // "") | test("^CR finding"; "i")))
              )) | not))] | length),
@@ -354,8 +429,7 @@ _MG_GATE_FILTER_TEMPLATE='
     ([$downgraded[] | if .__typename == "CheckRun" then (.name // "") else (.context // "") end] | join(", ")),
     $crstate,
     (($crbody | split("\n"))[0] // ""),
-    ([$pr.reviewThreads.nodes[] | select(.isResolved == false and .isOutdated == false
-        and any(.comments.nodes[]; .author.login == "coderabbitai" or .author.login == "coderabbitai[bot]"))] | length),
+    $cropen,
     ([$pr.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?
       | if (.__typename == "StatusContext" and .context == "CodeRabbit") then .state
         elif (.__typename == "CheckRun"
@@ -394,6 +468,16 @@ _MG_GATE_FILTER_TEMPLATE='
     ([$staleOverride[].name] | join(", ")),
     ($staleOverride | length),
     ($dupMasked | join(", ")),
-    ($dupMasked | length)
+    ($dupMasked | length),
+    ($dependabotActionsBump | tostring),
+    # headRefName (may be empty, so never the LAST field)
+    ($pr.headRefName // ""),
+    # planLockOobRefused — label on a red Plan-lock gate, no disposition
+    (($planlock and ($planlockdisposition | not)
+      and ($failing | any(.__typename == "CheckRun" and .name == "Plan-lock gate"))) | tostring),
+    # crRateLimitDocsPass — the pure-docs rate-limit auto-downgrade may fire
+    ($crratelimitdocspass | tostring),
+    # crManualOnly — head CodeRabbit status is the OSS manual-trigger skip
+    ($crmanualonly | tostring)
   )
 '

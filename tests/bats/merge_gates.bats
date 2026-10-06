@@ -56,9 +56,17 @@ setup() {
 #   MERGE_GATES_STUB_VIEW_ISDRAFT  — value returned for `gh pr view --json isDraft`
 #                                   (default: false; "true" / "false" / "" )
 #   MERGE_GATES_STUB_VIEW_EXIT     — exit code for `gh pr view` (default 0)
+#   MERGE_GATES_STUB_ARGV_FILE     — append every `gh api graphql` argv element
+#                                   here, one per line (argv-shape assertions)
+#   MERGE_GATES_STUB_JQ            — jq binary the `--jq` emulation runs
+#                                   (default: jq on PATH; a no-jq PATH test
+#                                   passes an absolute path)
 case "$1" in
     api)
         if [ "$2" = "graphql" ]; then
+            if [ -n "${MERGE_GATES_STUB_ARGV_FILE:-}" ]; then
+                printf '%s\n' "$@" >> "$MERGE_GATES_STUB_ARGV_FILE"
+            fi
             if [ -n "${MERGE_GATES_STUB_GH_FAIL:-}" ]; then
                 echo "$MERGE_GATES_STUB_GH_FAIL" >&2
                 exit 1
@@ -74,7 +82,7 @@ case "$1" in
                 _prev="$_a"
             done
             if [ -n "$_filter" ]; then
-                jq -r "$_filter" "$fixture"; exit $?
+                "${MERGE_GATES_STUB_JQ:-jq}" -r "$_filter" "$fixture"; exit $?
             fi
             cat "$fixture"
             exit 0
@@ -136,6 +144,21 @@ case "$1" in
                 fi
                 echo "gh: stub pulls error" >&2; exit 1
                 ;;
+            */commits/*/check-runs*)
+                # Stale-red Plan-lock re-check, step 1: the head's latest
+                # "Plan-lock gate" run id (the --jq output).
+                #   MERGE_GATES_STUB_PLANLOCK_RUN_ID — id to emit (default 4242)
+                echo "${MERGE_GATES_STUB_PLANLOCK_RUN_ID:-4242}"; exit 0
+                ;;
+            */check-runs/*/annotations)
+                # Step 2: that run's annotation messages, one per line.
+                #   MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS — the messages; unset
+                #   → error (the red's cause is unreadable)
+                if [ -n "${MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS+x}" ]; then
+                    printf '%s\n' "$MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS"; exit 0
+                fi
+                echo "gh: stub annotations error" >&2; exit 1
+                ;;
             */branches/*/protection)
                 # Step 2: protection read for the base from step 1. Appends the
                 # requested path to a file so a test can assert WHICH branch
@@ -172,6 +195,18 @@ case "$1" in
                 exit "${MERGE_GATES_STUB_VIEW_EXIT}"
             fi
             echo "${MERGE_GATES_STUB_VIEW_ISDRAFT:-false}"
+            exit 0
+        fi
+        if [ "$2" = "diff" ]; then
+            # gh pr diff <pr> --repo <o/r> --name-only — the stale-red Plan-lock
+            # re-check's changed-file list.
+            #   MERGE_GATES_STUB_PR_DIFF — newline-separated paths (unset/empty →
+            #                              no output); "fail" → error exit
+            if [ "${MERGE_GATES_STUB_PR_DIFF:-}" = "fail" ]; then
+                echo "stub-gh: pr diff failure" >&2
+                exit 1
+            fi
+            [ -n "${MERGE_GATES_STUB_PR_DIFF:-}" ] && printf '%s\n' "$MERGE_GATES_STUB_PR_DIFF"
             exit 0
         fi
         if [ "$2" = "comment" ]; then
@@ -214,6 +249,8 @@ teardown() {
     unset MERGE_GATES_FRESHNESS MERGE_GATES_FRESH_RUN_BLOB MERGE_GATES_FRESH_DEV_BLOB
     unset MERGE_GATES_OUTAGE_POLLS MERGE_GATES_STUB_RUNS_CREATED MERGE_GATES_STUB_HEAD_RUNS
     unset MERGE_GATES_PRIOR_OUTAGE_HEAD MERGE_GATES_PRIOR_OUTAGE_STREAK MERGE_GATES_PRIOR_OUTAGE_SINCE
+    unset MERGE_GATES_STUB_ARGV_FILE MERGE_GATES_STUB_JQ MERGE_GATES_STUB_PR_DIFF LTC_ROWS_OVERRIDE
+    unset MERGE_GATES_STUB_PLANLOCK_RUN_ID MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS
 }
 
 # ---------- helpers ----------
@@ -248,6 +285,15 @@ set_fixture() {
     [[ "$output" == *"GATE_SNAPSHOT cr_override=0 downgraded="* ]]
     # No CI check name and no cr_override=1 leaked into the line.
     [[ "$output" != *"GATE_SNAPSHOT cr_override=1"* ]]
+}
+
+@test "PASS path names the head it gated (GATE_HEAD <headRefOid>) for merge binding" {
+    # safe-merge.sh arms --match-head-commit with this SHA and refuses a head
+    # that moved after the poll.
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    grep -qx 'GATE_HEAD abc123' <<<"$output"
 }
 
 @test "CI conclusion FAILURE -> return 1" {
@@ -301,7 +347,7 @@ set_fixture() {
     [ "$status" -eq 1 ]
     # Bare `echo GATES_PASSED` emit must be ABSENT — whole-line match so the BLOCK
     # message's own "Refusing GATES_PASSED" text doesn't false-trip this.
-    ! grep -qx 'GATES_PASSED' <<<"$output"
+    [ "$(grep -cx 'GATES_PASSED' <<<"$output")" -eq 0 ]
     [[ "$output" == *"differs from origin/develop"* ]]
     [[ "$output" == *"Refusing GATES_PASSED"* ]]
 }
@@ -352,7 +398,7 @@ set_fixture() {
     run poll_merge_gates org repo 1
     [ "$status" -eq 1 ]
     # Whole-line match — the BLOCK message contains "refusing GATES_PASSED".
-    ! grep -qx 'GATES_PASSED' <<<"$output"
+    [ "$(grep -cx 'GATES_PASSED' <<<"$output")" -eq 0 ]
     [[ "$output" == *"freshness unverifiable"* ]]
 }
 
@@ -363,7 +409,7 @@ set_fixture() {
     export MERGE_GATES_FRESHNESS=blcok
     run poll_merge_gates org repo 1
     [ "$status" -eq 3 ]
-    ! grep -qx 'GATES_PASSED' <<<"$output"
+    [ "$(grep -cx 'GATES_PASSED' <<<"$output")" -eq 0 ]
     [[ "$output" == *"must be one of off|warn|block"* ]]
 }
 
@@ -767,16 +813,111 @@ set_fixture() {
     unset MERGE_GATES_CR_INSTALLED
 }
 
-@test "CR installed + NONE + grace expired (GRACE_POLLS=0) -> pass with warn" {
-    # GRACE_POLLS=0 → poll index 0 ≥ 0 immediately → fall through to pass.
+@test "CR installed + NONE + grace expired (GRACE_POLLS=0) -> terminal BLOCK naming the trigger + the label escape" {
+    # tooling 2026-08-16 cr-gate-greens-with-no-cr-status-on-head item 2: the
+    # grace window used to fall through to PASS on a head CR never touched (no
+    # review, no status, no comment) — 27 PRs merged green that way. Expiry is
+    # now terminal: block, and say how to get out (trigger a review, or attest
+    # the silent head with cr-out-of-band + cr-disposition).
     export MERGE_GATES_CR_INSTALLED=true
     export MERGE_GATES_CR_GRACE_POLLS=0
     set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
     run poll_merge_gates org repo 1
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
     [[ "$output" == *"NONE+grace-expired"* ]]
-    [[ "$output" == *"CodeRabbit grace window"* ]]
+    [[ "$output" == *"BLOCK: CodeRabbit grace window"* ]]
+    [[ "$output" == *"scripts/dev/trigger-coderabbit-review.sh 1"* ]]
+    [[ "$output" == *"cr-out-of-band"* ]]
+    [[ "$output" == *"cr-disposition"* ]]
+    unset MERGE_GATES_CR_INSTALLED MERGE_GATES_CR_GRACE_POLLS
+}
+
+@test "CR grace-expired block + cr-out-of-band + cr-disposition -> downgraded like size-skip/rate-limit (cr_override=1)" {
+    # The silent-head block is waivable the way the size-skip and rate-limit
+    # blocks are, even though CR never ran: past the grace window the attested
+    # label pair is the sanctioned escape (and the override is recorded).
+    local f
+    f="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.labels" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[{"name":"cr-out-of-band"},{"name":"cr-disposition:cr-never-reported"}]}')"
+    export MERGE_GATES_CR_INSTALLED=true
+    export MERGE_GATES_CR_GRACE_POLLS=0
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
     [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"cr-out-of-band + cr-disposition — CodeRabbit silent past the grace window"* ]]
+    [[ "$output" == *"GATE_SNAPSHOT cr_override=1"* ]]
+    [[ "$output" != *"never ran on head"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED MERGE_GATES_CR_GRACE_POLLS
+}
+
+@test "CR grace-expired block + cr-out-of-band ALONE -> still BLOCKS (disposition required)" {
+    local f
+    f="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.labels" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[{"name":"cr-out-of-band"}]}')"
+    export MERGE_GATES_CR_INSTALLED=true
+    export MERGE_GATES_CR_GRACE_POLLS=0
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"cr-out-of-band present but NOT honoured"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED MERGE_GATES_CR_GRACE_POLLS
+}
+
+@test "CR grace expired on a Dependabot github-actions bump -> still passes (bot PRs are never CR-reviewed)" {
+    # dependabot-auto-merge.yml routes these through safe-merge.sh and relies on
+    # the grace-then-pass; CR never reviews bot PRs. Scope matches the
+    # cr-finding-gate action: GitHub-authenticated author AND the
+    # dependabot/github_actions/* head ref.
+    local f1 f
+    f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.author" '{"login":"dependabot"}')"
+    f="$(fixture_override "$f1" \
+        "data.repository.pullRequest.headRefName" '"dependabot/github_actions/actions/checkout-7.0.2"')"
+    export MERGE_GATES_CR_INSTALLED=true
+    export MERGE_GATES_CR_GRACE_POLLS=0
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"NONE+grace-expired (Dependabot github-actions bump — pass)"* ]]
+    rm -f "$f1" "$f"
+    unset MERGE_GATES_CR_INSTALLED MERGE_GATES_CR_GRACE_POLLS
+}
+
+@test "CR grace expired on a dependabot/github_actions/* branch NOT authored by Dependabot -> BLOCK (branch name alone is forgeable)" {
+    local f
+    f="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.headRefName" '"dependabot/github_actions/totally-a-bump"')"
+    export MERGE_GATES_CR_INSTALLED=true
+    export MERGE_GATES_CR_GRACE_POLLS=0
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"NONE+grace-expired (CR silent on head — block)"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED MERGE_GATES_CR_GRACE_POLLS
+}
+
+@test "CR grace expired on a self-improvement-only diff -> still passes (deliberate exemption unchanged)" {
+    local f
+    f="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.files" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[{"path":"docs/self-improvement/categories/tooling/2026-10-04-x.md"}]}')"
+    export MERGE_GATES_CR_INSTALLED=true
+    export MERGE_GATES_CR_GRACE_POLLS=0
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"self-improvement doc PR — CR gate auto-skipped"* ]]
+    rm -f "$f"
     unset MERGE_GATES_CR_INSTALLED MERGE_GATES_CR_GRACE_POLLS
 }
 
@@ -944,6 +1085,61 @@ set_fixture() {
     [[ "$output" != *"NONE+review-skipped"* ]]
     rm -f "$f"
     unset MERGE_GATES_CR_INSTALLED
+}
+
+# The OSS manual-trigger status is CR saying it did NOT review; once the grace
+# window is out it must block like a silent head (grace-expired), never take
+# the status-only "assume status-only" pass.
+manual_status_fixture() {
+    # Usage: manual_status_fixture <CodeRabbit StatusContext description> [<labels JSON>]
+    local f1 out
+    f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
+        "[{\"__typename\":\"CheckRun\",\"name\":\"build\",\"conclusion\":\"SUCCESS\",\"status\":\"COMPLETED\",\"isRequired\":true},{\"__typename\":\"StatusContext\",\"context\":\"CodeRabbit\",\"state\":\"SUCCESS\",\"description\":\"$1\",\"isRequired\":false}]")"
+    out="$(fixture_override "$f1" "data.repository.pullRequest.labels.nodes" "${2:-[]}")"
+    rm -f "$f1"
+    echo "$out"
+}
+
+@test "CR status 'manual review required' + grace expired -> BLOCK (never the status-only pass)" {
+    local f
+    f="$(manual_status_fixture "Review skipped: manual review required for this OSS repository")"
+    export MERGE_GATES_CR_INSTALLED=true MERGE_GATES_CR_GRACE_POLLS=0
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"NONE+manual-review-required"* ]]
+    [[ "$output" != *"assume status-only"* ]]
+    [[ "$output" == *"trigger-coderabbit-review.sh"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED MERGE_GATES_CR_GRACE_POLLS
+}
+
+@test "CR status 'Review available on request' + grace expired -> BLOCK too" {
+    local f
+    f="$(manual_status_fixture "Review available on request")"
+    export MERGE_GATES_CR_INSTALLED=true MERGE_GATES_CR_GRACE_POLLS=0
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"NONE+manual-review-required"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED MERGE_GATES_CR_GRACE_POLLS
+}
+
+@test "CR manual-review-required block + cr-out-of-band + cr-disposition -> waived (cr_override=1)" {
+    local f
+    f="$(manual_status_fixture "Review skipped: manual review required for this OSS repository" \
+        '[{"name":"cr-out-of-band"},{"name":"cr-disposition:cr-auto-review-disabled"}]')"
+    export MERGE_GATES_CR_INSTALLED=true MERGE_GATES_CR_GRACE_POLLS=0
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"GATE_SNAPSHOT cr_override=1"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED MERGE_GATES_CR_GRACE_POLLS
 }
 
 @test "CR status description 'Review skipped: rate limited' -> NOT a terminal pass (rate-limit machinery binds instead)" {
@@ -1476,20 +1672,386 @@ set_fixture() {
     rm -f "$f"
 }
 
-@test "plan-lock-out-of-band label downgrades Plan-lock gate FAILURE -> WARN, gates pass" {
-    local f1 f2
+@test "non-required 'TSan Linux subset (Clang)' FAILURE blocks (name-vs-intent: not advisory unless the NAME says so)" {
+    # infra 2026-08-16 tsan-lane-advisory-label-drift, option (b): the TSan lane
+    # is not a required context, but it is not advisory either — only an
+    # `advisory` token in the check NAME exempts a lane. Prose calling a lane
+    # advisory changes nothing; this pins the mechanism the docs now describe.
+    local f
+    f="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
+        '[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","isRequired":true},{"__typename":"CheckRun","name":"TSan Linux subset (Clang)","status":"COMPLETED","conclusion":"FAILURE","isRequired":false}]')"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"1 fail"* ]]
+    rm -f "$f"
+}
+
+@test "the All-checks-green aggregate never blocks the poller (red or pending)" {
+    # The aggregate re-derives block-on-any-red for GitHub's native auto-merge and
+    # never re-runs itself: a red aggregate left behind after the real red was
+    # re-run green would wedge every poll, and a pending one makes the poller wait
+    # on a job that is itself waiting on the poller's own inputs. The poller
+    # computes the verdict directly, so it skips the aggregate by name.
+    local f
+    f="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
+        '[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","isRequired":true},{"__typename":"CheckRun","name":"All checks green (block-on-any-red)","status":"COMPLETED","conclusion":"FAILURE","isRequired":false}]')"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    rm -f "$f"
+
+    f="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
+        '[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","isRequired":true},{"__typename":"CheckRun","name":"All checks green (block-on-any-red)","status":"IN_PROGRESS","conclusion":null,"isRequired":false}]')"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    rm -f "$f"
+}
+
+plan_lock_red_fixture() {
+    # Usage: plan_lock_red_fixture <labels.nodes JSON> [<PR body>]
+    # Pass fixture whose sole failure is a red non-required "Plan-lock gate".
+    local f1 f2 out
     f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
         "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
         '[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","isRequired":true},{"__typename":"CheckRun","name":"Plan-lock gate","status":"COMPLETED","conclusion":"FAILURE","isRequired":false}]')"
-    f2="$(fixture_override "$f1" \
-        "data.repository.pullRequest.labels.nodes" '[{"name":"plan-lock-out-of-band"}]')"
-    set_fixture "$f2"
+    f2="$(fixture_override "$f1" "data.repository.pullRequest.labels.nodes" "$1")"
+    out="$(fixture_override "$f2" "data.repository.pullRequest.body" "$(jq -n --arg b "${2:-}" '$b')")"
+    rm -f "$f1" "$f2"
+    echo "$out"
+}
+
+@test "plan-lock-out-of-band ALONE does NOT downgrade a red Plan-lock gate (disposition required)" {
+    # process 2026-09-12 plan-lock-out-of-band-waives-the-whole-gate-with-no-
+    # disposition-trail: the #2160 shape — a bare label waived the gate with no
+    # record of which lock was crossed or why. Mirrors cr-out-of-band, which has
+    # required a cr-disposition since PR-3.
+    local f
+    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"}]')"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"1 fail"* ]]
+    [[ "$output" == *"0 warn-downgraded"* ]]
+    [[ "$output" == *"plan-lock-out-of-band present but NOT honoured"* ]]
+    [[ "$output" == *"plan-lock-disposition:<reason>"* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock-out-of-band + plan-lock-disposition label downgrades Plan-lock gate FAILURE -> WARN, gates pass" {
+    local f
+    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:docs-index-coordinated"}]')"
+    set_fixture "$f"
     run poll_merge_gates org repo 1
     [ "$status" -eq 0 ]
     [[ "$output" == *"GATES_PASSED"* ]]
     [[ "$output" == *"1 warn-downgraded"* ]]
     [[ "$output" == *"downgraded=Plan-lock gate"* ]]
-    rm -f "$f1" "$f2"
+    [[ "$output" != *"NOT honoured"* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock-out-of-band + plan-lock-disposition PR-body marker downgrades too (same shape as cr-disposition)" {
+    local f
+    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"}]' \
+        $'## Intent\nx\n\nplan-lock-disposition: crossed gate-selftest-msys-execbit (lock orphaned by its merged PR)\n')"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"downgraded=Plan-lock gate"* ]]
+    rm -f "$f"
+}
+
+# The disposition reader (_MG_JQ_DISPOSITION_DEF) accepts only a filled-in
+# marker LINE outside an HTML comment: the gate's own error text, a template
+# placeholder or a comment-hidden marker attests nothing.
+@test "plan-lock disposition: the gate's own '<reason>' error text pasted in the body does NOT count" {
+    local f
+    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"}]' \
+        $'## Intent\nx\n\nWARN: requires a \'plan-lock-disposition:<reason>\' label or PR-body marker\nplan-lock-disposition:<reason>\n')"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"plan-lock-out-of-band present but NOT honoured"* ]]
+    [[ "$output" == *"0 warn-downgraded"* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock disposition: a marker inside an HTML comment does NOT count" {
+    local f
+    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"}]' \
+        $'## Intent\nx\n\n<!--\nplan-lock-disposition: crossed the docs index lock\n-->\n')"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"plan-lock-out-of-band present but NOT honoured"* ]]
+    rm -f "$f"
+}
+
+@test "cr disposition: a marker mid-line or in a quote block does NOT count; a bulleted line does" {
+    local f1 f2 f3
+    f1="$(fixture_override "$FIXTURES_DIR/merge_gates_cr_size_skip.json" \
+        "data.repository.pullRequest.labels" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[{"name":"cr-out-of-band"}]}')"
+    f2="$(fixture_override "$f1" "data.repository.pullRequest.body" \
+        '"See the gate text: add a cr-disposition: over-limit-acked marker.\n> cr-disposition: quoted-reply"')"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f2"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"cr-out-of-band present but NOT honoured"* ]]
+    f3="$(fixture_override "$f1" "data.repository.pullRequest.body" \
+        '"Reorg.\n  - cr-disposition: over-CR-file-limit-acked"')"
+    set_fixture "$f3"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    rm -f "$f1" "$f2" "$f3"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
+@test "disposition reader: a bold key, a numbered item or a marker after an unterminated comment is not read" {
+    # Pins the marker shape merge-gates.md documents for both trails.
+    # shellcheck source=/dev/null
+    . "$SCRIPTS_DIR/merge-gates.d/10-gate-filter.sh"
+    reads() { jq -n --arg b "$1" "$_MG_JQ_DISPOSITION_DEF"' disposition([]; $b; "cr-disposition")'; }
+    [ "$(reads '- cr-disposition: acked')" = true ]
+    [ "$(reads $'<!-- closed -->\ncr-disposition: acked')" = true ]
+    [ "$(reads '**cr-disposition**: acked')" = false ]
+    [ "$(reads '1. cr-disposition: acked')" = false ]
+    [ "$(reads '> cr-disposition: acked')" = false ]
+    [ "$(reads $'<!-- never closed\ncr-disposition: acked')" = false ]
+}
+
+# Stale-red re-check (tooling 2026-10-04 stale-plan-lock-red-overridden-instead-
+# of-rerun, item 1): before honouring plan-lock-out-of-band + disposition, the
+# poller re-runs plan_lock_gate_decide against the CURRENT lock table. The gh
+# stub serves the PR diff; LTC_ROWS_OVERRIDE injects the lock table
+# (branch<TAB>epoch<TAB>slug<TAB>path) so no refs/locks fetch happens. Only a
+# COLLISION red can be stale: the gh stub serves the red run's annotations
+# (PLANLOCK_COLLISION_ANN is the gate's collision ::error line).
+
+PLANLOCK_COLLISION_ANN="plan-lock-gate: 'docs/plans/INDEX.md' overlaps the write set of plan-lock 'gate-selftest-msys-execbit', held by a different branch."
+
+planlock_waived_fixture() {
+    plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:coordinated"}]'
+}
+
+@test "stale Plan-lock red (colliding lock now past the 14-day cutoff) -> override REFUSED, 'stale red -  re-run'" {
+    # The #2213 replay: the lock that reddened the gate has aged out, so the
+    # gate would pass on a re-run — the override must not be what clears it.
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/other-branch\t%s\tgate-selftest-msys-execbit\tdocs/plans/INDEX.md\n' \
+        "$(( $(date -u +%s) - 20 * 24 * 3600 ))" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="$PLANLOCK_COLLISION_ANN"
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"stale red — re-run"* ]]
+    [[ "$output" == *"gh run rerun"* ]]
+    [[ "$output" == *"1 fail"* ]]
+    [[ "$output" == *"0 warn-downgraded"* ]]
+    rm -f "$f"
+}
+
+@test "live Plan-lock collision on re-check -> override + disposition still honoured" {
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/other-branch\t%s\tsanitizer-nightly-run-tests\tdocs/plans/INDEX.md\n' \
+        "$(date -u +%s)" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"downgraded=Plan-lock gate"* ]]
+    [[ "$output" != *"stale red"* ]]
+    rm -f "$f"
+}
+
+@test "Plan-lock re-check: a lock held by THIS PR's own branch does not count as a live collision" {
+    # The gate never blocks a branch on its own lock, so a red whose only
+    # overlap is the PR's own lock is stale too.
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'feature/pass\t%s\tmy-own-lock\tdocs/plans/INDEX.md\n' "$(date -u +%s)" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="$PLANLOCK_COLLISION_ANN"
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"stale red — re-run"* ]]
+    rm -f "$f"
+}
+
+@test "Plan-lock re-check inputs unavailable (PR diff fails) -> WARN, override + disposition stands" {
+    # Never refuse on unverified evidence: only a positively clean re-check
+    # turns the override down.
+    local f
+    export MERGE_GATES_STUB_PR_DIFF="fail"
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"could not re-evaluate the Plan-lock gate red"* ]]
+    rm -f "$f"
+}
+
+@test "Plan-lock re-check: a clean table under an INFRA red keeps the override (a re-run would red again)" {
+    # The gate also reds when it cannot read the lock table or resolve the
+    # base ref, and names the override as the escape; a clean re-check says
+    # nothing about such a red, so it must not be refused as stale.
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    : > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="plan-lock-gate: lock table unavailable/undetermined (rc=2) while evaluating 'docs/plans/INDEX.md'; the fail-closed gate refuses to pass on an unverifiable lock state."
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"infrastructure failure, not a collision"* ]]
+    [[ "$output" != *"stale red"* ]]
+    rm -f "$f"
+}
+
+@test "Plan-lock re-check: a collision whose path / slug holds an infra word is still a collision (override refused)" {
+    # The red's cause is read from the gate's own lines: "failed" / "missing"
+    # inside a path or slug of a collision line is not an infrastructure red.
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    : > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/failed-merges.md"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="plan-lock-gate: 'docs/failed-merges.md' overlaps the write set of plan-lock 'missing-tests', held by a different branch."
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"stale red — re-run"* ]]
+    [[ "$output" != *"infrastructure failure"* ]]
+    rm -f "$f"
+}
+
+@test "Plan-lock re-check: a non-gate annotation (runner / checkout warning) never makes a collision infra" {
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    : > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="$(printf '%s\n%s' \
+        "Fetching the submodules failed once and was retried; the checkout is missing nothing." \
+        "$PLANLOCK_COLLISION_ANN")"
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"stale red — re-run"* ]]
+    rm -f "$f"
+}
+
+@test "Plan-lock re-check: an unreadable red cause keeps the override (WARN, never refuse unverified)" {
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    : > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"cause could not be read"* ]]
+    rm -f "$f"
+}
+
+# planlock_fork_sandbox — a host clone whose `origin` is a FORK (no locks) and
+# whose `upstream` is the base repository org/Smatchet, holding a LIVE lock on
+# docs/plans/INDEX.md claimed by another branch (the real lock-claim.sh).
+# Prints the clone path, for PC_PROJECT_ROOT.
+planlock_fork_sandbox() {
+    local t="$BATS_TEST_TMPDIR/pl"
+    mkdir -p "$t/org" "$t/someone"
+    git init -q --bare "$t/org/Smatchet.git"
+    git init -q --bare "$t/someone/Smatchet.git"
+    git init -q "$t/clone"
+    # The clone's own identity: lock-claim.sh's commit-tree needs one, and a CI
+    # runner has no global user.email to fall back on.
+    git -C "$t/clone" config user.email t@t
+    git -C "$t/clone" config user.name t
+    git -C "$t/clone" commit -q --allow-empty -m seed
+    git -C "$t/clone" remote add origin "$t/someone/Smatchet.git"
+    git -C "$t/clone" remote add upstream "$t/org/Smatchet.git"
+    printf 'docs/plans/INDEX.md\n' > "$t/ws"
+    (cd "$t/clone" && unset SMATCHET_LOCK_BACKEND SMATCHET_AGENT_VCS \
+        && LOCK_REMOTE=upstream LOCK_BRANCH=claude/other-branch AGENT_ID=bats \
+           SMATCHET_LOCK_BYPASS_REPO_CHECK=1 bash "$SCRIPTS_DIR/lock-claim.sh" live-lock "$t/ws") >/dev/null 2>&1
+    # Fail here, by name: a lock that never landed would otherwise surface later
+    # as an unrelated "stale red" refusal.
+    [ -n "$(git -C "$t/org/Smatchet.git" for-each-ref refs/locks/live-lock)" ] || {
+        echo "planlock_fork_sandbox: lock-claim.sh landed no refs/locks/live-lock on the base repo" >&2
+        return 1
+    }
+    printf '%s' "$t/clone"
+}
+
+@test "Plan-lock re-check reads the BASE repo's locks, not a fork origin's (live collision -> override stands)" {
+    # From a fork clone `origin` holds no locks; reading it called every red
+    # stale and refused a legitimate override. The base repo (org/Smatchet,
+    # the poll's owner/repo) still holds a live overlapping lock.
+    local f clone
+    clone="$(planlock_fork_sandbox)"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="$PLANLOCK_COLLISION_ANN"
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    PC_PROJECT_ROOT="$clone" run poll_merge_gates org Smatchet 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"downgraded=Plan-lock gate"* ]]
+    [[ "$output" != *"stale red"* ]]
+    # It stood because the re-check SAW the live lock — not by falling back.
+    [[ "$output" != *"could not re-evaluate"* ]]
+    [[ "$output" != *"shows no collision"* ]]
+    rm -f "$f"
+}
+
+@test "Plan-lock re-check with no remote for the base repo -> WARN, override stands (lock state undetermined)" {
+    local f clone
+    clone="$(planlock_fork_sandbox)"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="$PLANLOCK_COLLISION_ANN"
+    f="$(planlock_waived_fixture)"
+    set_fixture "$f"
+    PC_PROJECT_ROOT="$clone" run poll_merge_gates elsewhere Smatchet 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"no git remote of this checkout points at elsewhere/Smatchet"* ]]
+    rm -f "$f"
+}
+
+@test "a cr-disposition does NOT satisfy the plan-lock disposition trail (trails are per-override)" {
+    local f
+    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"},{"name":"cr-disposition:follow-up-pr"}]')"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"plan-lock-out-of-band present but NOT honoured"* ]]
+    rm -f "$f"
 }
 
 @test "Plan-lock gate as a StatusContext blocks but is NOT downgradable (locks in CheckRun)" {
@@ -1502,7 +2064,7 @@ set_fixture() {
         "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
         '[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","isRequired":true},{"__typename":"StatusContext","context":"Plan-lock gate","state":"FAILURE"}]')"
     f2="$(fixture_override "$f1" \
-        "data.repository.pullRequest.labels.nodes" '[{"name":"plan-lock-out-of-band"}]')"
+        "data.repository.pullRequest.labels.nodes" '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:acked"}]')"
     set_fixture "$f2"
     run poll_merge_gates org repo 1
     [ "$status" -eq 1 ]
@@ -2044,11 +2606,17 @@ set_fixture() {
     # no '## Review skipped' heading. The old loose contains-AND-contains check
     # false-positived this as a size-skip and hard-blocked a clean PR. The
     # tightened detection (HTML marker OR structural heading) must NOT fire here;
-    # with CI/user/reviewDecision all green this is a clean CR pass.
-    local f
-    f="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+    # with CI/user/reviewDecision all green this is a clean CR pass. The head
+    # carries the CodeRabbit SUCCESS status a real summary run posts alongside
+    # the comment — the pass path is the status arm, since a head with NO CR
+    # status now blocks at grace expiry (cr-gate-greens-with-no-cr-status-on-head).
+    local f1 f
+    f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
         "data.repository.pullRequest.comments.nodes" \
         '[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"body":"<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\nNo actionable comments were generated. 🎉\n\nAdds crReviewSkipped when StatusContext is SUCCESS with \"Review skipped\" in description (excluding the \"Too many files\" size-skip variant)."}]')"
+    f="$(fixture_override "$f1" \
+        "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
+        '[{"__typename":"CheckRun","name":"build","conclusion":"SUCCESS","status":"COMPLETED","isRequired":true},{"__typename":"StatusContext","context":"CodeRabbit","state":"SUCCESS","description":"Review completed","isRequired":false}]')"
     export MERGE_GATES_CR_INSTALLED=true
     export MERGE_GATES_CR_GRACE_POLLS=0
     set_fixture "$f"
@@ -2056,7 +2624,7 @@ set_fixture() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"GATES_PASSED"* ]]
     [[ "$output" != *"size-skip"* ]]
-    rm -f "$f"
+    rm -f "$f1" "$f"
     unset MERGE_GATES_CR_INSTALLED MERGE_GATES_CR_GRACE_POLLS
 }
 
@@ -2467,7 +3035,7 @@ CFG
     set_fixture "$f"
     run poll_merge_gates org repo 1
     [ "$status" -eq 1 ]
-    ! grep -qx 'GATES_PASSED' <<<"$output"
+    [ "$(grep -cx 'GATES_PASSED' <<<"$output")" -eq 0 ]
     [[ "$output" == *"mergeStateStatus=DIRTY"* ]]
     [[ "$output" != *"required-missing"* ]]
     [[ "$output" != *"CONFLICTED"* ]]
@@ -3309,8 +3877,8 @@ blocked_with_bot_threads() {
 }
 
 @test "Bugbot (9) field-count guard fires on a mis-sized tuple (fail-closed canary)" {
-    # An embedded newline in a tuple field inflates the field count past 37; the
-    # -ne 37 fail-closed assertion must catch it (the tuple-order regression guard
+    # An embedded newline in a tuple field inflates the field count past 42; the
+    # -ne 42 fail-closed assertion must catch it (the tuple-order regression guard
     # that the appended Bugbot + selfImpOnly + pureDocs/crRateLimited/crDisposition
     # + thread-count + stale-override + dup-masked fields rely on).
     local f
@@ -3320,7 +3888,7 @@ blocked_with_bot_threads() {
     set_fixture "$f"
     run poll_merge_gates org repo 1
     [ "$status" -ne 0 ]
-    [[ "$output" == *"expected 37"* ]]
+    [[ "$output" == *"expected 42"* ]]
     [[ "$output" != *"GATES_PASSED"* ]]
     rm -f "$f"
 }
@@ -3494,10 +4062,12 @@ blocked_with_bot_threads() {
 # comment + a files list (pure-docs vs code) via chained fixture_override.
 
 @test "CR rate-limit + pure-docs PR PASS (auto-downgrade, no label)" {
+    # The notice names the head SHA (CR lists the commit range it was asked to
+    # review), which is what ties a comment-borne rate-limit to THIS head.
     local f1 f2
     f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
         "data.repository.pullRequest.comments.nodes" \
-        '[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"body":"> Review skipped\n\nCodeRabbit hit its rate limit. Please try again later."}]')"
+        '[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"body":"> Review skipped\n\nCodeRabbit hit its rate limit. Please try again later.\n\nReviewing files that changed from the base of the PR and between 0f0f0f0 and abc123."}]')"
     f2="$(fixture_override "$f1" \
         "data.repository.pullRequest.files" \
         '{"pageInfo":{"hasNextPage":false},"nodes":[{"path":"docs/agent-rules/merge-gates.md"},{"path":"AGENTS.md"}]}')"
@@ -3509,6 +4079,76 @@ blocked_with_bot_threads() {
     [[ "$output" == *"rate-limited on a pure-docs PR"* ]]
     [[ "$output" == *"pure-docs-auto-downgrade"* ]]
     rm -f "$f1" "$f2"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
+@test "CR rate-limit + pure-docs: a notice naming no head SHA does NOT auto-downgrade" {
+    # Comments persist across pushes, so a notice that names no commit is not
+    # provably about this head; the NONE arm decides (pending within grace).
+    local f1 f2
+    f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.comments.nodes" \
+        '[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"body":"> Review skipped\n\nCodeRabbit hit its rate limit. Please try again later."}]')"
+    f2="$(fixture_override "$f1" \
+        "data.repository.pullRequest.files" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[{"path":"AGENTS.md"}]}')"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f2"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" != *"pure-docs-auto-downgrade"* ]]
+    [[ "$output" == *"not tied to head"* ]]
+    rm -f "$f1" "$f2"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
+@test "CR rate-limit + pure-docs + prior-head findings + open CR thread + pending CR findings -> BLOCK (the H1 probe)" {
+    # A docs-only PR (AGENTS.md) whose prior head drew 3 actionable CR findings,
+    # one CR thread still open, the CR findings aggregator pending, and a
+    # rate-limit notice from an earlier push. The rate-limit flag must neither
+    # waive the STALE_WITH_FINDINGS verdict nor discount the pending context.
+    local f1 f2 f3 f4 f5
+    f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.files" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[{"path":"AGENTS.md"}]}')"
+    f2="$(fixture_override "$f1" "data.repository.pullRequest.reviews" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"state":"COMMENTED","submittedAt":"2026-10-01T10:00:00Z","commit":{"oid":"prior111"},"body":"**Actionable comments posted: 3**"}]}')"
+    f3="$(fixture_override "$f2" "data.repository.pullRequest.reviewThreads.nodes" \
+        '[{"isResolved":false,"isOutdated":false,"comments":{"pageInfo":{"hasNextPage":false},"nodes":[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"commit":{"oid":"prior111"}}]}}]')"
+    f4="$(fixture_override "$f3" "data.repository.pullRequest.comments.nodes" \
+        '[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"body":"## Review limit reached\n\nCodeRabbit is rate limited. Next review available in: 38 minutes."}]')"
+    f5="$(fixture_override "$f4" \
+        "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
+        '[{"__typename":"CheckRun","name":"build","conclusion":"SUCCESS","status":"COMPLETED","isRequired":true},{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"PENDING","isRequired":false}]')"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f5"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"STALE_WITH_FINDINGS"* ]]
+    [[ "$output" == *"1 pending"* ]]
+    [[ "$output" != *"pure-docs-auto-downgrade"* ]]
+    rm -f "$f1" "$f2" "$f3" "$f4" "$f5"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
+@test "CR rate-limit + pure-docs + never reviewed + head-tied notice but an OPEN CR thread -> no auto-downgrade" {
+    local f1 f2 f3
+    f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.files" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[{"path":"docs/x.md"}]}')"
+    f2="$(fixture_override "$f1" "data.repository.pullRequest.comments.nodes" \
+        '[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"body":"CodeRabbit is rate limited. Reviewing changes between 0f0f0f0 and abc123."}]')"
+    f3="$(fixture_override "$f2" "data.repository.pullRequest.reviewThreads.nodes" \
+        '[{"isResolved":false,"isOutdated":false,"comments":{"pageInfo":{"hasNextPage":false},"nodes":[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"commit":{"oid":"abc123"}}]}}]')"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f3"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"unresolved CodeRabbit thread(s) are open"* ]]
+    rm -f "$f1" "$f2" "$f3"
     unset MERGE_GATES_CR_INSTALLED
 }
 
@@ -3593,6 +4233,39 @@ blocked_with_bot_threads() {
     unset MERGE_GATES_CR_INSTALLED
 }
 
+@test "CR rate-limit + prior-commit clean review + docs-only delta (the #2070 shape) -> GATES_PASSED as STALE_CLEAN" {
+    # process 2026-08-18 cr-rate-limit-pause-classifies-whole-pr-not-unreviewed-
+    # delta: CR reviewed an earlier commit in full (0 actionable); the head is
+    # one later commit touching only a markdown file, and CR's quota ran out
+    # before it could re-review. The whole-PR diff is CODE (config + gate shell +
+    # bats), so a whole-PR pure-docs classifier must not be what decides this:
+    # the prior review object makes cr_state STALE (not NONE), STALE_CLEAN
+    # passes, and the rate-limit notice is annotated as non-blocking. #2070
+    # needed a cr-out-of-band + cr-disposition waiver for exactly this head.
+    local f1 f2 f3
+    f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.reviews" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"state":"COMMENTED","submittedAt":"2026-08-18T13:01:47Z","commit":{"oid":"a31fc8cc"},"body":"**Actionable comments posted: 0**\n\nNo actionable comments were generated."}]}')"
+    f2="$(fixture_override "$f1" \
+        "data.repository.pullRequest.comments.nodes" \
+        '[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"body":"> [!WARNING]\n> ## Review limit reached\n>\n> CodeRabbit is rate limited. Next review available in: 38 minutes."}]')"
+    f3="$(fixture_override "$f2" \
+        "data.repository.pullRequest.files" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[{"path":"project.config.json"},{"path":"project.config.schema.json"},{"path":"agents/scripts/core/setup-branch-protection.sh"},{"path":"tests/bats/setup_branch_protection.bats"},{"path":"docs/agent-rules/merge-gates.md"}]}')"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f3"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"CodeRabbit: STALE_CLEAN"* ]]
+    [[ "$output" == *"rate-limit stale-on-prior-push"* ]]
+    [[ "$output" != *"CODE-PR-pause"* ]]
+    # No waiver was needed, so none is recorded as load-bearing.
+    [[ "$output" == *"GATE_SNAPSHOT cr_override=0"* ]]
+    rm -f "$f1" "$f2" "$f3"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
 @test "CR rate-limit + CODE PR + cr-out-of-band ALONE still BLOCKS (needs cr-disposition)" {
     local f1 f2 f3
     f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
@@ -3644,7 +4317,7 @@ blocked_with_bot_threads() {
     local f1 f2
     f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
         "data.repository.pullRequest.comments.nodes" \
-        '[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"body":"CodeRabbit is currently rate-limited; review deferred."}]')"
+        '[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"body":"CodeRabbit is currently rate-limited; review deferred (commits 0f0f0f0..abc123)."}]')"
     f2="$(fixture_override "$f1" \
         "data.repository.pullRequest.files" \
         '{"pageInfo":{"hasNextPage":false},"nodes":[{"path":"README.md"}]}')"
@@ -3676,19 +4349,161 @@ blocked_with_bot_threads() {
 }
 
 # ----------------------------------------------------------------------------
+# tooling 2026-08-16 cr-gate-greens-on-rate-limited-review, items 2-4: the
+# rate-limit verdict is decided INSIDE the CR NONE arm, ahead of the generic
+# status-SUCCESS / grace-expired fail-open branches; agents/scripts/ is not
+# pure-docs for the CR question; and the CodeRabbit StatusContext description
+# vocabulary is pinned per string so a reworded CR status cannot silently move
+# a head from block to pass.
+# ----------------------------------------------------------------------------
+
+cr_status_fixture() {
+    # Usage: cr_status_fixture <CodeRabbit StatusContext description> <changed path>
+    # Pass fixture + a SUCCESS "CodeRabbit" StatusContext carrying the given
+    # description + a one-file diff. No CR review object -> cr_state NONE.
+    local f1 out
+    f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
+        "[{\"__typename\":\"CheckRun\",\"name\":\"build\",\"conclusion\":\"SUCCESS\",\"status\":\"COMPLETED\",\"isRequired\":true},{\"__typename\":\"StatusContext\",\"context\":\"CodeRabbit\",\"state\":\"SUCCESS\",\"description\":\"$1\",\"isRequired\":false}]")"
+    out="$(fixture_override "$f1" \
+        "data.repository.pullRequest.files" \
+        "{\"pageInfo\":{\"hasNextPage\":false},\"nodes\":[{\"path\":\"$2\"}]}")"
+    rm -f "$f1"
+    echo "$out"
+}
+
+@test "CR 'Review rate limited' SUCCESS status + CODE PR + grace expired -> BLOCK in the NONE arm (never the status-only pass)" {
+    # CR's own wording on its StatusContext: SUCCESS + "Review rate limited".
+    # With the grace window already expired the status-only arm would pass this
+    # head ("assume status-only"); the hoisted rate-limit arm must win first.
+    local f
+    f="$(cr_status_fixture "Review rate limited" "Source/Core/src/Foo.cpp")"
+    export MERGE_GATES_CR_INSTALLED=true
+    export MERGE_GATES_CR_GRACE_POLLS=0
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"CodeRabbit: NONE+rate-limit CODE-PR-pause"* ]]
+    [[ "$output" == *"rate-limited on a CODE PR"* ]]
+    [[ "$output" != *"no-inline-evidence"* ]]
+    [[ "$output" != *"grace-expired"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED MERGE_GATES_CR_GRACE_POLLS
+}
+
+@test "CR rate-limit + agents/scripts/ diff is NOT pure-docs -> BLOCK (no auto-downgrade for gate shell)" {
+    # agents/scripts/ is executable gate shell that CodeRabbit reviews; the
+    # pure-docs auto-downgrade must not wave a rate-limited gate change through.
+    local f
+    f="$(cr_status_fixture "Review rate limited" "agents/scripts/core/merge-gates.sh")"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"CODE-PR-pause"* ]]
+    [[ "$output" != *"pure-docs-auto-downgrade"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
+cr_findings_pending_ratelimit_fixture() {
+    # Usage: cr_findings_pending_ratelimit_fixture <changed path>
+    # CodeRabbit says "Review rate limited" (SUCCESS status) and the
+    # cr-finding-gate aggregator sits PENDING — the #2071/#2077/#2081 shape.
+    local f1 out
+    f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
+        '[{"__typename":"CheckRun","name":"build","conclusion":"SUCCESS","status":"COMPLETED","isRequired":true},{"__typename":"StatusContext","context":"CodeRabbit","state":"SUCCESS","description":"Review rate limited","isRequired":false},{"__typename":"StatusContext","context":"CR findings (0 actionable)","state":"PENDING","isRequired":false}]')"
+    out="$(fixture_override "$f1" \
+        "data.repository.pullRequest.files" \
+        "{\"pageInfo\":{\"hasNextPage\":false},\"nodes\":[{\"path\":\"$1\"}]}")"
+    rm -f "$f1"
+    echo "$out"
+}
+
+@test "pending 'CR findings' context + pure-docs + rate-limited -> GATES_PASSED (auto-downgrade also clears the CI-bucket twin)" {
+    # tooling 2026-08-16 cr-findings-pending-statuscontext-wedges-merge-gates:
+    # the label-free pure-docs rate-limit auto-downgrade adjudicates gate 2 to
+    # WARN, but the aggregator it reads stays PENDING forever (CR cannot produce
+    # a review node) and block-on-any-red counted it in ci_pend — so every poll
+    # read "1 pending" until someone merged outside the gate.
+    local f
+    f="$(cr_findings_pending_ratelimit_fixture "docs/agent-rules/merge-gates.md")"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"0 pending"* ]]
+    [[ "$output" == *"pure-docs-auto-downgrade"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
+@test "pending 'CR findings' context + CODE PR + rate-limited -> still blocks (pending counted, no auto-downgrade)" {
+    local f
+    f="$(cr_findings_pending_ratelimit_fixture "Source/Core/src/Foo.cpp")"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"1 pending"* ]]
+    [[ "$output" == *"CODE-PR-pause"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
+@test "CR status vocabulary: bare 'Review skipped' on a CODE PR -> terminal pass, rate-limit machinery inert" {
+    local f
+    f="$(cr_status_fixture "Review skipped" "Source/Core/src/Foo.cpp")"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"NONE+review-skipped"* ]]
+    [[ "$output" != *"rate-limit"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
+@test "CR status vocabulary: an unknown description -> neither terminal pass nor rate-limit; status grace binds" {
+    # A CR status string the gate has never seen must not be read as a review:
+    # no terminal "Review skipped" pass, no rate-limit verdict — it waits in the
+    # ordinary status-SUCCESS grace like any un-reviewed head.
+    local f
+    f="$(cr_status_fixture "Review deferred: queue saturated" "Source/Core/src/Foo.cpp")"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"NONE+status-SUCCESS-waiting-for-inline"* ]]
+    [[ "$output" != *"review-skipped"* ]]
+    [[ "$output" != *"rate-limit"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
+# ----------------------------------------------------------------------------
 # argv budget — the Windows CreateProcess command-line cap (32,767 chars).
 #
-# The poll hands gh two large blobs. The GraphQL document now rides `-F
-# query=@file` (read by gh, never on argv), but the spliced `--jq` filter has
-# no file form and MUST cross the process boundary as one argument. When
+# The poll hands gh two large blobs. The GraphQL document rides `-F
+# query=@file` (read by gh, never on argv). The spliced filter leaves argv too
+# whenever standalone jq is on PATH: it is written to a temp file and the raw
+# response is piped through `jq -r -f` (tooling 2026-08-19). Only the jq-less
+# fallback still passes it as `--jq <filter>`, which has no file form. When
 # filter + document were both on argv the total reached ~32.7 KB and Windows
 # refused to exec gh at all — `Argument list too long`, three polls in a row,
 # reported as GH_API_DOWN. Linux (ARG_MAX ~2 MB) never reproduced it, so it
 # shipped green and broke every Windows merge on develop.
 #
 # These assertions are the preventing gate: they fail on the PR that grows the
-# filter past the budget, on any platform, instead of on a Windows merge weeks
-# later.
+# fallback filter past the budget, or that puts the filter back on argv when jq
+# is present, on any platform, instead of on a Windows merge weeks later.
 # ----------------------------------------------------------------------------
 
 @test "argv budget: spliced gate filter stays well under the Windows argv cap" {
@@ -3705,6 +4520,9 @@ blocked_with_bot_threads() {
     filter="${filter//__ORCH_USER__/some-fairly-long-github-login}"
     filter="${filter//__REQUIRED_CONTEXTS__/$req_ctx_json}"
     filter="${filter//__BLOCK_ALLOWLIST_RE__/advisory}"
+    # ...and ship it the way poll_merge_gates does: without the full-line
+    # documentation comments (_mg_strip_jq_comment_lines).
+    filter="$(_mg_strip_jq_comment_lines "$filter")"
 
     # 30,000 leaves ~2.7 KB of headroom under the 32,767 cap for the flags, the
     # gh path, and future required contexts. Blowing this budget means the
@@ -3712,6 +4530,22 @@ blocked_with_bot_threads() {
     # budget should be raised.
     echo "spliced filter length: ${#filter}"
     [ "${#filter}" -lt 30000 ]
+}
+
+@test "argv budget: the shipped gate filter carries no full-line comment, and still parses" {
+    # The documentation comments stay in the source; poll_merge_gates strips
+    # them before either engine runs the program.
+    local filter
+    # shellcheck source=/dev/null
+    . "$SCRIPTS_DIR/merge-gates.d/10-gate-filter.sh"
+    filter="$(_mg_strip_jq_comment_lines "$_MG_GATE_FILTER_TEMPLATE")"
+    filter="${filter//__ORCH_USER__/x}"
+    filter="${filter//__REQUIRED_CONTEXTS__/[]}"
+    filter="${filter//__BLOCK_ALLOWLIST_RE__/.}"
+    [ "$(grep -cE '^[[:space:]]*#' <<<"$filter")" -eq 0 ]
+    [ "${#filter}" -lt "${#_MG_GATE_FILTER_TEMPLATE}" ]
+    run jq -r "$filter" "$FIXTURES_DIR/merge_gates_pass.json"
+    [ "$status" -eq 0 ]
 }
 
 @test "argv budget: GraphQL document is passed by file reference, not on argv" {
@@ -3738,4 +4572,111 @@ STUB
     [ "$status" -eq 3 ]
     [[ "$output" == *"GH_ARGV_TOO_LONG"* ]]
     [[ "$output" != *"GH_API_DOWN"* ]]
+}
+
+@test "argv: with standalone jq on PATH the gate filter rides a temp file, never argv" {
+    # tooling 2026-08-19 merge-gates-gh-jq-filter-exceeds-windows-arg-cap: the
+    # ~25 KB filter must not cross the gh process boundary at all when jq can
+    # read it from a file. The stub records every `gh api graphql` argv element;
+    # neither the `--jq` flag nor any filter text may appear. TMPDIR is pinned
+    # to a fresh dir so the temp-file cleanup is observable too.
+    local argv_file="$BATS_TEST_TMPDIR/gh-argv" tmpd="$BATS_TEST_TMPDIR/tmpd"
+    mkdir -p "$tmpd"
+    export MERGE_GATES_STUB_ARGV_FILE="$argv_file"
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    TMPDIR="$tmpd" run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [ -s "$argv_file" ]
+    # Counted, not `! grep`: bats ignores a negated status anywhere but the
+    # last line, which made these two assertions no-ops.
+    [ "$(grep -cx -- '--jq' "$argv_file")" -eq 0 ]
+    [ "$(grep -c 'selfImpOnly' "$argv_file")" -eq 0 ]
+    grep -qx -- 'query=@.*' "$argv_file"
+    # The subshell EXIT trap removed the staged filter (and gh stderr) files.
+    [ -z "$(ls -A "$tmpd")" ]
+}
+
+@test "argv: a jq-less host falls back to gh --jq and still evaluates the gates" {
+    # gh is the only hard dep (Windows hosts may lack jq), so the poll must keep
+    # working through gh's bundled engine. Build a PATH with the stub gh plus the
+    # few tools the poll and the stub use — and no jq. The stub's own --jq
+    # emulation runs jq by absolute path, outside that PATH.
+    local nojq="$BATS_TEST_TMPDIR/nojq" argv_file="$BATS_TEST_TMPDIR/gh-argv" b
+    mkdir -p "$nojq"
+    for b in bash cat date grep awk sed mktemp rm sleep tr head dirname; do
+        ln -s "$(command -v "$b")" "$nojq/$b"
+    done
+    MERGE_GATES_STUB_JQ="$(command -v jq)"
+    export MERGE_GATES_STUB_JQ
+    export MERGE_GATES_STUB_ARGV_FILE="$argv_file"
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    PATH="$STUB_BIN_DIR:$nojq" run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    grep -qx -- '--jq' "$argv_file"
+}
+
+@test "argv: a jq too old to run the filter (no IN/1) falls back to gh --jq instead of failing every poll" {
+    # jq 1.5 is on PATH but lacks IN/1: picking it failed every poll and scored
+    # the run GH_API_DOWN. The fake rejects any program that uses IN( — given
+    # inline or through -f — the way jq 1.5 does, and runs everything else.
+    local old="$BATS_TEST_TMPDIR/oldjq" argv_file="$BATS_TEST_TMPDIR/gh-argv" real_jq
+    real_jq="$(command -v jq)"
+    mkdir -p "$old"
+    cat > "$old/jq" <<STUB
+#!/usr/bin/env bash
+prev=""
+for a in "\$@"; do
+    if [[ "\$a" == *"IN("* ]] || { [ "\$prev" = "-f" ] && grep -q 'IN(' "\$a" 2>/dev/null; }; then
+        echo "jq: error: IN/1 is not defined at <top-level>, line 1:" >&2
+        exit 3
+    fi
+    prev="\$a"
+done
+[ "\${1:-}" = "--version" ] && { echo "jq-1.5"; exit 0; }
+exec "$real_jq" "\$@"
+STUB
+    chmod +x "$old/jq"
+    export MERGE_GATES_STUB_JQ="$real_jq"
+    export MERGE_GATES_STUB_ARGV_FILE="$argv_file"
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    PATH="$old:$PATH" run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"cannot run the gate filter"* ]]
+    [[ "$output" != *"gh failed"* ]]
+    grep -qx -- '--jq' "$argv_file"
+}
+
+@test "argv: gh failure under the jq engine reports gh's own error, not a jq parse error" {
+    # gh's stderr is kept off the pipe into jq, so a failed fetch surfaces the
+    # gh message verbatim and keeps the gh-fail classification (retry, then
+    # GH_API_DOWN) exactly as the `gh --jq` path did.
+    export MERGE_GATES_STUB_GH_FAIL="stub network error"
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"gh failed (1/3): stub network error"* ]]
+    [[ "$output" != *"parse error"* ]]
+    [[ "$output" != *"GATES_PASSED"* ]]
+}
+
+@test "dedup WARN: silent on a cancelled older run of the All-checks-green aggregate" {
+    # Every push / label / body edit cancels the aggregate's in-flight run
+    # (cancel-in-progress), so a cross-suite CANCELLED twin of it sits on almost
+    # every head. The gate skips the aggregate ($ctx), so the dedup WARN must
+    # skip it too - otherwise it advises re-running a workflow the gate never reads.
+    local f
+    f="$(fixture_override "$FIXTURES_DIR/merge_gates_dedup_rerun_pass.json" \
+        "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
+        '[{"__typename":"CheckRun","name":"build","conclusion":"SUCCESS","status":"COMPLETED","startedAt":"2026-05-22T12:00:00Z","checkSuite":{"createdAt":"2026-05-22T11:00:00Z"},"isRequired":true},
+          {"__typename":"CheckRun","name":"All checks green (block-on-any-red)","conclusion":"CANCELLED","status":"COMPLETED","startedAt":"2026-05-22T11:05:00Z","checkSuite":{"createdAt":"2026-05-22T10:00:00Z"},"isRequired":false},
+          {"__typename":"CheckRun","name":"All checks green (block-on-any-red)","conclusion":null,"status":"IN_PROGRESS","startedAt":"2026-05-22T12:05:00Z","checkSuite":{"createdAt":"2026-05-22T11:00:00Z"},"isRequired":false}]')"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" != *"blocking context from an older workflow run"* ]]
+    rm -f "$f"
 }

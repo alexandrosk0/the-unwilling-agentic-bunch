@@ -22,6 +22,14 @@
 #      bypasses review AND every required CI check (the highest-trust escape) yet
 #      creates no PR + writes no snapshot, so triggers 1+2 are structurally blind
 #      to it.
+#   5. cr-context-not-green — the LATEST `CR findings …` StatusContext on the
+#      merged head was PENDING / FAILURE / absent (absent judged only past the
+#      run-creation grace, once the gate is seen live in the window), the PR
+#      carried no `cr-out-of-band` (live label or snapshot overrideLabels), and
+#      it is not CR-exempt by policy (Dependabot github-actions bump, diff
+#      entirely under docs/self-improvement/**). A merge on a never-green review
+#      gate is a gate escape the other triggers cannot see: PENDING is neither
+#      terminal-red nor a required context by name.
 #   (overdue SMATCHET_DEVIATION is covered by the strict `deviation-overdue` lint.)
 #
 # Modes:
@@ -34,12 +42,17 @@
 #              nudge. Deliberately NOT wired into SessionStart (that stays
 #              advisory) — a caller opts in explicitly. Degrades to advisory
 #              exit 0 when gh is unavailable (no gate should hard-fail on a
-#              missing/​unauthenticated gh, same fail-open as the other modes).
+#              missing/​unauthenticated gh, same fail-open as the other modes),
+#              but exits 3 when gh IS available and the merged-PR fetch fails
+#              or returns nothing (a window it never read is not a pass).
 #
 # Mirrors memory-drain-nudge.sh: deterministic check -> nudge, no investigation.
 # Default modes (--list / --nudge) are advisory — never block, exit 0 always
-# (even without gh; degrades to a notice). Only --blocking can exit non-zero,
-# and only on a real owed-escape count over the grace.
+# (even without gh; degrades to a notice). Only --blocking can exit non-zero:
+# 1 on a real owed-escape count over the grace, 3 when the merged-PR window
+# could not be fetched. A failed (or empty) fetch is never reported as clean —
+# every mode prints "merged-PR fetch failed (…) — window NOT scanned" on stderr
+# and the "merges clean" line is reachable only when rows were actually read.
 #
 # Test seams (production leaves all unset → identical behaviour):
 #   POSTMORTEM_LEDGER             override the postmortems.md path (has_entry).
@@ -53,6 +66,10 @@
 #   POSTMORTEM_OVERRIDE_LABELS    override the override-label set (space-separated)
 #                                 without sourcing project-config.sh (python-free).
 #   SNAPSHOT_LEDGER               override merge-snapshots.jsonl path.
+#   POSTMORTEM_FETCH_N            merged-PR over-fetch --limit (default SCAN_N*3).
+#   POSTMORTEM_FETCH_RETRIES      halvings of that --limit tried after a 5xx /
+#                                 timeout before the window reads NOT scanned
+#                                 (default 2: 60 → 30 → 15).
 #   POSTMORTEM_DIRECTPUSH_SINCE   git-log window for trigger 4 (default 7 days).
 #   POSTMORTEM_DIRECTPUSH_MAX     cap on pulls-confirmation gh calls (default 40).
 #   POSTMORTEM_ABSENT_GRACE_SECONDS
@@ -578,6 +595,43 @@ snapshot_required_contexts() {
     ' "$SNAPSHOT_LEDGER" 2>/dev/null || true
 }
 
+# --- cr-context-not-green helpers (cr-gate-greens-with-no-cr-status-on-head) ---
+# pr_has_cr_oob <pr> <live-labels> <mergeCommit> — true when the PR carried
+# cr-out-of-band, read from the live labels OR the merge-time snapshot's
+# overrideLabels (issue-sweep strips override labels off merged PRs, so the
+# snapshot is the lossless record). Such a PR is the OVERRIDE trigger's case
+# (a load-bearing label owes on its own), never a silent not-green escape.
+pr_has_cr_oob() {
+    case " $2 " in *" cr-out-of-band "*) return 0 ;; esac
+    [ -n "$3" ] && [ -f "$SNAPSHOT_LEDGER" ] && command -v jq >/dev/null 2>&1 || return 1
+    jq -e --argjson pr "$1" --arg mc "$3" \
+        'select(.pr == $pr and .mergeCommit == $mc) | (.overrideLabels // []) | index("cr-out-of-band")' \
+        "$SNAPSHOT_LEDGER" >/dev/null 2>&1
+}
+
+# pr_cr_review_exempt <pr> — true for the two PR classes the CR finding gate
+# auto-passes by policy (.github/actions/cr-finding-gate): a Dependabot
+# github-actions bump, and a diff ENTIRELY under docs/self-improvement/**
+# (path-excluded from CodeRabbit; merge-gates.sh $selfImpOnly). REST, and fail
+# CLOSED like the action: any gh error or an empty file list is NOT exempt, so
+# the PR is still judged (an over-nudge, never a silent exemption).
+pr_cr_review_exempt() {
+    local meta login ref files
+    if meta="$(gh api "repos/$REPO/pulls/$1" --jq '(.user.login // "") + " " + (.head.ref // "")' 2>/dev/null)"; then
+        login="${meta%% *}"; ref="${meta#* }"
+        case "$login" in
+            "dependabot[bot]"|dependabot)
+                case "$ref" in dependabot/github_actions/*) return 0 ;; esac ;;
+        esac
+    fi
+    files="$(gh api --paginate "repos/$REPO/pulls/$1/files?per_page=100" --jq '.[].filename' 2>/dev/null)" || return 1
+    [ -n "$files" ] || return 1
+    # Here-string, not a pipe: under pipefail an early-exiting `grep -q` can
+    # SIGPIPE the producer and turn a real match into a non-zero pipeline.
+    grep -qv '^docs/self-improvement/' <<<"$files" && return 1  # fail-open-ok: a match means a NON-exempt path exists → not exempt; no-match falls through to the exempt return
+    return 0
+}
+
 owed=()           # "PR #N — <trigger>"
 warns=()          # auditable WARN lines (broken-lane downgrades — not owed escapes)
 merged_commits="" # space-delimited set of mergeCommit oids seen this run (trigger 4 reuse)
@@ -613,6 +667,12 @@ merged_commits="" # space-delimited set of mergeCommit oids seen this run (trigg
 #       .required_contexts ($reqNames) OR its name matches the meant-to-block
 #       allow-list (ALLOW_LIST_RE) and is not "advisory". An advisory / non-
 #       allow-list lane can never block a merge, so its red owes no postmortem.
+#   (d) skip the `All checks green (block-on-any-red)` aggregate by name (here
+#       and in the required-never-terminal column) — it re-derives the verdict
+#       of the OTHER checks (all-checks-green.sh), so it is not an independent
+#       gate: a real red it saw is already in this column under its own name,
+#       and the aggregate alone red or pending (a run the merge raced, a
+#       timeout) is no escape. merge-gates.d/10-gate-filter.sh skips it too.
 # (postmortems.md 2026-06-09 PR #1046–#1072 over-report; #923 allow-list.)
 #
 # `gh pr list` has no mergedAt sort key, so over-fetch by its default
@@ -621,7 +681,8 @@ merged_commits="" # space-delimited set of mergeCommit oids seen this run (trigg
 # late falls outside a createdAt-ordered window and its escape is never seen.
 FETCH_N="${POSTMORTEM_FETCH_N:-$((SCAN_N * 3))}"
 # shellcheck disable=SC2016  # $c/$reqNames are jq variables, not shell expansions
-JQ_ROWS='(sort_by(.mergedAt) | reverse | .[0:__SCAN_N__]) | .[] | [
+JQ_ROWS='"All checks green (block-on-any-red)" as $aggregate
+| (sort_by(.mergedAt) | reverse | .[0:__SCAN_N__]) | .[] | [
     (.number|tostring),
     (.mergeCommit.oid // ""),
     ([.labels[].name] | join(" ")),
@@ -633,6 +694,8 @@ JQ_ROWS='(sort_by(.mergedAt) | reverse | .[0:__SCAN_N__]) | .[] | [
             | .[] )
           | (if .__typename == "CheckRun" then (.name // "") else (.context // "") end) as $n
           | select(
+              ($n != $aggregate)
+              and
               (
                 (.__typename == "CheckRun" and (.status // "") == "COMPLETED"
                  and ((.conclusion // "") | IN("FAILURE","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE")))
@@ -683,6 +746,8 @@ JQ_ROWS='(sort_by(.mergedAt) | reverse | .[0:__SCAN_N__]) | .[] | [
             | .[] )
           | (if .__typename == "CheckRun" then (.name // "") else (.context // "") end) as $n
           | select(
+              ($n != $aggregate)
+              and
               ($reqNames | any(. == $n))
               and
               (
@@ -693,7 +758,13 @@ JQ_ROWS='(sort_by(.mergedAt) | reverse | .[0:__SCAN_N__]) | .[] | [
             )
           | $n
         ] | unique | join(", ") ),
-    (.mergedAt // "")
+    (.mergedAt // ""),
+    # Field 9: state of the LATEST CR findings StatusContext on the head, or
+    # ABSENT when the CR finding gate never posted one (cr-context-not-green).
+    ( [ (.statusCheckRollup // [])[]
+        | select(.__typename == "StatusContext" and ((.context // "") | startswith("CR findings"))) ]
+      | sort_by(.createdAt // .startedAt // "")
+      | if length == 0 then "ABSENT" else (.[-1].state // "ABSENT") end )
   ] | @tsv'
 JQ_ROWS="${JQ_ROWS//__SCAN_N__/$SCAN_N}"
 JQ_ROWS="${JQ_ROWS//__REQ_CTX__/$REQ_CTX_JSON}"
@@ -711,12 +782,52 @@ JQ_ROWS="${JQ_ROWS//__CUTOFF__/$ABSENT_CUTOFF_ISO}"
 #
 # Buffering is bounded by SCAN_N (default small, tens of rows), so holding the
 # window in memory costs nothing meaningful.
+#
+# FAIL LOUD, NOT CLEAN (postmortem-owed-graphql-504-reads-as-clean, tooling P1).
+# The batched rollup query grows with every check context on develop and 504s at
+# a large --limit; the fetch used to drop stderr + exit status, leave ROWS empty
+# and report "last N merges clean" over a window it never read — hiding #2280 and
+# #2286. Now the exit status + first stderr line are kept; a 5xx / timeout is
+# retried at a halved --limit (60 → 30 → 15, POSTMORTEM_FETCH_RETRIES halvings);
+# any other failure, or zero rows, sets FETCH_FAILED, which prints "window NOT
+# scanned" on stderr, suppresses the clean line, and fails --blocking (exit 3).
 ROWS=()
+FETCH_FAILED=""
+_fetch_limit="$FETCH_N"
+_fetch_retries="${POSTMORTEM_FETCH_RETRIES:-2}"
+case "$_fetch_retries" in ''|*[!0-9]*) _fetch_retries=2 ;; esac
+_fetch_out=""
+_fetch_err_file="$(mktemp)"
+while :; do
+    _fetch_rc=0
+    _fetch_out="$(gh pr list --repo "$REPO" --base develop --state merged --limit "$_fetch_limit" \
+            --json number,labels,mergedAt,mergeCommit,statusCheckRollup --jq "$JQ_ROWS" \
+            2>"$_fetch_err_file")" || _fetch_rc=$?
+    [ "$_fetch_rc" -eq 0 ] && break
+    _fetch_first_err="$(head -n 1 "$_fetch_err_file" 2>/dev/null | tr -d '\r' || true)"
+    if [ "$_fetch_retries" -gt 0 ] && [ "$_fetch_limit" -gt 1 ] \
+       && grep -qiE 'HTTP 5[0-9][0-9]|time[d ]*out' "$_fetch_err_file"; then
+        _fetch_limit=$(( _fetch_limit / 2 ))
+        _fetch_retries=$(( _fetch_retries - 1 ))
+        case "$MODE" in
+            list|blocking) echo "postmortem-owed: merged-PR fetch failed (${_fetch_first_err}) — retrying with --limit $_fetch_limit" >&2 ;;
+        esac
+        continue
+    fi
+    FETCH_FAILED="${_fetch_first_err:-gh pr list exited $_fetch_rc}"
+    _fetch_out=""
+    break
+done
+rm -f "$_fetch_err_file"
 while IFS= read -r row; do
     [ -n "$row" ] && ROWS+=("$row")
-done < <(gh pr list --repo "$REPO" --base develop --state merged --limit "$FETCH_N" \
-            --json number,labels,mergedAt,mergeCommit,statusCheckRollup --jq "$JQ_ROWS" 2>/dev/null \
-            | tr -d '\r' || true)
+done < <(printf '%s\n' "$_fetch_out" | tr -d '\r')
+if [ -z "$FETCH_FAILED" ] && [ "${#ROWS[@]}" -eq 0 ]; then
+    FETCH_FAILED="0 merged PRs returned"
+fi
+if [ -n "$FETCH_FAILED" ]; then
+    echo "postmortem-owed: merged-PR fetch failed (${FETCH_FAILED}) — window NOT scanned" >&2
+fi
 
 # The required-context list, decoded ONCE. It is loop-invariant, and re-spawning
 # jq per row put SCAN_N extra processes on a SessionStart hook path for an answer
@@ -738,7 +849,7 @@ for _r in "${ROWS[@]}"; do
     # Fields 5 (present names) and 8 (mergedAt) only — cheap re-split.
     _rest="${_r#*$'\t'}"; _rest="${_rest#*$'\t'}"; _rest="${_rest#*$'\t'}"; _rest="${_rest#*$'\t'}"
     _present="${_rest%%$'\t'*}"
-    _merged="${_r##*$'\t'}"
+    _merged="${_r%$'\t'*}"; _merged="${_merged##*$'\t'}"   # drop field 9, keep field 8
     [ -n "$_merged" ] || continue
     for _rq in "${REQ_NAMES[@]}"; do
         case "|||${_present}|||" in
@@ -750,6 +861,21 @@ for _r in "${ROWS[@]}"; do
                 fi ;;
         esac
     done
+done
+
+# Earliest merge in the window whose head carried ANY CR findings StatusContext
+# (field 9 != ABSENT). The cr-context-not-green trigger judges an ABSENT context
+# only on PRs merged at/after it — so a project (or an era) without the CR
+# finding gate never reads every merge as an escape.
+CR_FIRST_SEEN=""
+for _r in "${ROWS[@]}"; do
+    _crs="${_r##*$'\t'}"
+    [ "$_crs" != "ABSENT" ] || continue
+    _merged="${_r%$'\t'*}"; _merged="${_merged##*$'\t'}"
+    [ -n "$_merged" ] || continue
+    if [ -z "$CR_FIRST_SEEN" ] || [ "$_merged" \< "$CR_FIRST_SEEN" ]; then
+        CR_FIRST_SEEN="$_merged"
+    fi
 done
 
 # A required context present on NO PR in the window cannot be dated, and the two
@@ -782,24 +908,26 @@ fi
 
 for row in "${ROWS[@]}"; do
     [ -z "$row" ] && continue
-    # Split the 8-field @tsv row by tab MANUALLY (not `IFS=$'\t' read`): tab is
+    # Split the 9-field @tsv row by tab MANUALLY (not `IFS=$'\t' read`): tab is
     # IFS-whitespace, so `read` collapses consecutive tabs and DROPS empty middle
     # fields — a row with empty labels but a real red-check ("num⇥mc⇥⇥check")
     # would shift the check into `labels` and blank `redchecks`, silently missing
     # the single most common escape (red required check, no override label).
-    # Parameter expansion preserves empty fields. @tsv always emits 8 fields
+    # Parameter expansion preserves empty fields. @tsv always emits 9 fields
     # (field 5 = the `|||`-joined PRESENT context names, for the absence checks;
     # field 6 = "1" when the merge is older than the run-creation grace window,
     # i.e. old enough to judge absence — see $ABSENT_GRACE_SECONDS;
     # field 7 = required contexts PRESENT but never terminal — see below;
-    # field 8 = mergedAt, for the required-context effective-date check).
+    # field 8 = mergedAt, for the required-context effective-date check;
+    # field 9 = latest CR findings StatusContext state or ABSENT).
     num="${row%%$'\t'*}";         row="${row#*$'\t'}"
     mergecommit="${row%%$'\t'*}"; row="${row#*$'\t'}"
     labels="${row%%$'\t'*}";      row="${row#*$'\t'}"
     redchecks="${row%%$'\t'*}";   row="${row#*$'\t'}"
     present_names="${row%%$'\t'*}";   row="${row#*$'\t'}"
     absent_judgeable="${row%%$'\t'*}"; row="${row#*$'\t'}"
-    req_nonterminal="${row%%$'\t'*}";  merged_at="${row#*$'\t'}"
+    req_nonterminal="${row%%$'\t'*}";  row="${row#*$'\t'}"
+    merged_at="${row%%$'\t'*}";        cr_state="${row#*$'\t'}"
     [ -z "$num" ] && continue
     [ -n "$mergecommit" ] && merged_commits="$merged_commits $mergecommit"
     has_entry "$num" && continue
@@ -978,6 +1106,35 @@ for row in "${ROWS[@]}"; do
             trigger="${trigger:+$trigger; }absent-allowlisted: ${absent_names}"
         fi
     fi
+    # cr-context-not-green (cr-gate-greens-with-no-cr-status-on-head, item 4):
+    # the CR finding gate's `CR findings …` StatusContext is how the repo proves a
+    # head was reviewed, yet 136 PRs merged with it never green — PENDING (CR
+    # never reported), FAILURE, or absent — and none was filed as an escape: a
+    # PENDING StatusContext is neither terminal-red (trigger 1) nor required by
+    # name (it is posted by the required `CR finding gate` job, which itself
+    # goes green), and the poller's grace expiry greens a silent CR. Flag the
+    # LATEST state when it is not SUCCESS, unless the PR carried cr-out-of-band
+    # (the override trigger owns that case) or is CR-exempt by policy
+    # (Dependabot actions bump / self-improvement-only diff). ABSENT is judged
+    # only once the merge is past the run-creation grace and the gate is known to
+    # be live (some PR in the window carried the context, merged no later than
+    # this one). A FAILURE trigger 1 already named is not repeated. Lossy in the
+    # safe direction only: a post-merge re-run that greens the context hides it.
+    cr_part=""
+    case "$cr_state" in
+        SUCCESS|"") ;;
+        ABSENT)
+            if [ "$absent_judgeable" = "1" ] && [ -n "$CR_FIRST_SEEN" ] && [ -n "$merged_at" ] \
+               && ! [ "$merged_at" \< "$CR_FIRST_SEEN" ]; then
+                cr_part="cr-context-not-green: absent"
+            fi ;;
+        *) cr_part="cr-context-not-green: $cr_state" ;;
+    esac
+    case "$trigger" in *"red-check: "*"CR findings"*) cr_part="" ;; esac
+    if [ -n "$cr_part" ] && ! pr_has_cr_oob "$num" "$labels" "$mergecommit" \
+       && ! pr_cr_review_exempt "$num"; then
+        trigger="${trigger:+$trigger; }$cr_part"
+    fi
     # De-noise: Core-cpp-scoped trigger(s) on a PR that touched no Core cpp = false
     # escape. A trigger carrying the cr-out-of-band part is dropped only when the
     # required `CR findings` gate actually RULED green — evidence, not diff scope
@@ -1081,6 +1238,17 @@ if [ "${#warns[@]}" -gt 0 ]; then
     done
 fi
 
+if [ "${#owed[@]}" -eq 0 ] && [ -n "$FETCH_FAILED" ]; then
+    # Nothing owed from triggers 3+4, but triggers 1+2 never read the window:
+    # that is NOT a clean result. The NOT-scanned line was already printed at
+    # the fetch; --blocking must not pass a window it never scanned.
+    if [ "$MODE" = "blocking" ]; then
+        echo "postmortem-owed: merged-PR window NOT scanned — blocking (cannot assert the window is clean)." >&2
+        exit 3
+    fi
+    exit 0
+fi
+
 if [ "${#owed[@]}" -eq 0 ]; then
     # Qualify the CLEAN result specifically (gate-tooling-run-from-stale-session-
     # branch, process P1). "no gate escapes owed" from a checkout running months-old
@@ -1103,7 +1271,7 @@ if [ "${#owed[@]}" -eq 0 ]; then
         esac
     fi
     case "$MODE" in
-        list|blocking) echo "postmortem-owed: no gate escapes owed a postmortem (last $SCAN_N merges clean)." ;;
+        list|blocking) echo "postmortem-owed: no gate escapes owed a postmortem (last ${#ROWS[@]} merges clean)." ;;
     esac
     exit 0
 fi
@@ -1123,5 +1291,9 @@ for o in "${owed[@]}"; do echo "postmortem owed: $o"; done
 if [ "$MODE" = "blocking" ] && [ "${#owed[@]}" -gt "$BLOCKING_GRACE" ]; then
     echo "postmortem-owed: ${#owed[@]} escape(s) owed a postmortem exceeds grace ($BLOCKING_GRACE) — blocking." >&2
     exit 1
+fi
+if [ "$MODE" = "blocking" ] && [ -n "$FETCH_FAILED" ]; then
+    echo "postmortem-owed: merged-PR window NOT scanned — blocking (cannot assert the window is clean)." >&2
+    exit 3
 fi
 exit 0

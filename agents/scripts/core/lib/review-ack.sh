@@ -37,6 +37,9 @@
 #   ra_verdict_from_json <aggregate.json> -> verdict fields from a sidecar result
 #   ra_findings_path                     -> absolute path of the .review-findings.json artifact
 #   ra_findings_fingerprint              -> the artifact's "fingerprint" field, or empty + rc 1
+#   ra_touches_enforcement_surface <mode> [base_ref] -> prints the first changed gate/hook
+#                                           script path; rc 0 when there is one (advisory)
+#   ra_enforcement_fingerprint <mode> [base_ref] -> sha256 of that surface's diff
 #
 #   <mode> is `branch` (committed-on-branch + working tree, vs base_ref) or
 #   `staged` (the index only). base_ref defaults to origin/develop and is ignored
@@ -68,6 +71,35 @@ RA_CPP_GLOBS=(
     'Source/Plugins/*.cpp' 'Source/Plugins/*.h'
     'Source/Standalone/*.cpp' 'Source/Standalone/*.h'
     'tests/*.cpp' 'tests/*.h'
+)
+
+# The repo's own review-enforcement surface: gate scripts, dev scripts, git hooks,
+# CI workflows / actions, harness hooks and the gate config.
+# A diff touching ONLY these is never substantive under the C++-only test above,
+# so the scripts that enforce review could rewrite themselves with a hand-written
+# `n/a` verdict (process 2026-09-14 review-gate-substantive-check-is-cpp-only).
+# Deliberately a SEPARATE set, not part of RA_CPP_GLOBS: that set drives
+# ra_fingerprint and the staged pre-commit gate, which stay unchanged while this
+# trigger runs WARN-first (pre-ship advisory only) through its calibration window.
+#
+# Git pathspecs: `*` also matches `/`, so each entry covers its whole subtree.
+# In a host the gate scripts live in the agent-layer/ submodule, where a host diff
+# shows them only as a change to the `agent-layer` gitlink, so that path (and the
+# .gitmodules that names its URL) is the surface there.
+# CI runs the PR's OWN copy of these files, so a PR editing them can certify
+# itself — e.g. the `All checks green (block-on-any-red)` aggregate runs the
+# PR's all-checks-green.sh, all-checks-green.yml and project.config.json
+# (required contexts); the merge-gates poller lives under agents/scripts/core/.
+RA_ENFORCEMENT_GLOBS=(
+    'agents/scripts/core/*'      # gate scripts, merge-gates.sh + merge-gates.d/, all-checks-green.sh
+    'agents/scripts/project/*'   # test-lint-rules.sh + lint-rules.d/
+    'scripts/dev/*'
+    'scripts/git-hooks/*'
+    '.github/*'                  # workflows (all-checks-green.yml …) + actions (cr-finding-gate)
+    'docs/harness/*/hooks/*'     # harness guards, e.g. guard-auto-merge-arm.sh
+    'project.config.json'        # required contexts, lint zones, gate thresholds
+    'agent-layer'                # the layer gitlink in a host: a pointer bump swaps every gate above
+    '.gitmodules'                # repoints that mount's URL
 )
 
 # Set by ra_is_substantive so a caller can render WHY without recomputing. Exported
@@ -215,6 +247,35 @@ ra_is_substantive() {
     fi
     RA_SUBSTANTIVE_REASON="$lines C++ lines, no strict-zone touch"
     return 1
+}
+
+# _ra_enforcement_diff <mode> <base_ref> [git-diff-args...] — the mode's git diff
+# over RA_ENFORCEMENT_GLOBS, with any extra args (e.g. --name-only).
+_ra_enforcement_diff() {
+    local mode="$1" base="$2"
+    shift 2
+    if [ "$mode" = "staged" ]; then
+        git diff --cached "$@" -- "${RA_ENFORCEMENT_GLOBS[@]}" 2>/dev/null || true
+    else
+        git diff "$@" "$(_ra_branch_base "$base")" -- "${RA_ENFORCEMENT_GLOBS[@]}" 2>/dev/null || true
+    fi
+}
+
+# ra_touches_enforcement_surface <mode> [base_ref] — print the first changed path
+# under RA_ENFORCEMENT_GLOBS (deletions count: removing a gate changes the surface)
+# and return 0; return 1 (printing nothing) when the surface is untouched.
+ra_touches_enforcement_surface() {
+    local -a hits=()
+    mapfile -t hits < <(_ra_enforcement_diff "$1" "${2:-origin/develop}" "--name-only")
+    [ "${#hits[@]}" -gt 0 ] && [ -n "${hits[0]}" ] || return 1
+    printf '%s\n' "${hits[0]}"
+}
+
+# ra_enforcement_fingerprint <mode> [base_ref] — sha256 of the enforcement-surface
+# diff content, recorded by `pre-ship.sh --ack-review` as the `enforcement` marker
+# record so the advisory can tell a reviewed surface diff from an edited-since one.
+ra_enforcement_fingerprint() {
+    _ra_enforcement_diff "$1" "${2:-origin/develop}" | sha256sum | cut -d' ' -f1
 }
 
 # ra_read_marker <mode> — print the recorded FINGERPRINT for <mode>, or nothing.

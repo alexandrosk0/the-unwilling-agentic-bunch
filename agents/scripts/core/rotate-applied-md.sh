@@ -11,11 +11,25 @@
 # (`categories/`), so a deeper partition dir would break every link in a
 # rotated entry. Same-depth siblings keep them valid with zero rewriting.
 #
+# Entries come in two shapes — legacy `- YYYY-MM-DD · …` list blocks and
+# per-entry-file blocks (`# <title>` + a `**Date**:`-style metadata paragraph)
+# — split by the shared applied_md_lib.py. Every block rotates by its OWN date;
+# the legacy-only splitter glued a per-entry block onto the dated block above it
+# and filed it under that block's month. A partition block whose own date names
+# another month is re-homed (to its own partition, or back to the head when that
+# month is still current) on the next run.
+#
 # Partition files are created with a standard header (including the
 # deleted-runtime banner, which is self-scoping: it annotates only entries
 # that reference the removed agentic-flow C++ runtime) and are sorted latest
 # first, like the head. Rotation appends to an existing partition and re-sorts
-# it. Idempotent: a second run is a no-op.
+# it, dropping only exact copies of blocks the partition already holds.
+# Idempotent: a second run is a no-op.
+#
+# Crash-safe ordering: every block that moves is written into its DESTINATION
+# (a partition, or the head) before any file drops it from its SOURCE, so a
+# crash between two writes can leave a block in two files but never in none —
+# and the exact-copy dedupe folds such a copy back to one on the next run.
 #
 # Invoked automatically by archive-backlog-entry.sh after each append, so the
 # head stays bounded by construction. test-backlog-counts.sh runs `--check`
@@ -27,15 +41,21 @@
 #   bash agents/scripts/core/rotate-applied-md.sh            # rotate in place
 #   bash agents/scripts/core/rotate-applied-md.sh --check    # exit 1 if rotation is due
 #
+# Env: ROTATE_APPLIED_TODAY=YYYY-MM-DD  pin "today" (fixtures; default: the date).
+#      ROTATE_APPLIED_CRASH_AFTER=N      test seam: exit 3 right after the Nth
+#                                        file write (a simulated crash).
+#
 # Exit codes:
 #   0 — rotated (or nothing to rotate; or --check with nothing due)
 #   1 — --check mode and rotation is due; OR Python error via `set -e`
 #   2 — applied.md not found / no python
+#   3 — the ROTATE_APPLIED_CRASH_AFTER test seam fired
 
 set -euo pipefail
 
+ROTATE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=agents/scripts/core/lib/resolve-py.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/resolve-py.sh"
+. "$ROTATE_LIB_DIR/lib/resolve-py.sh"
 PY="$(resolve_py)" || { echo "python3 required (no working interpreter on PATH)" >&2; exit 2; }
 
 # applied.md is HOST content — self-improvement entries never move into the agent
@@ -57,18 +77,28 @@ if [ ! -f "$APPLIED" ]; then
     exit 2
 fi
 
-"$PY" - "$APPLIED" "$CHECK_ONLY" <<'PY'
+"$PY" - "$APPLIED" "$CHECK_ONLY" "$ROTATE_LIB_DIR" <<'PY'
 import datetime
+import glob
 import os
-import re
 import sys
 import tempfile
+
+applied, check_only, lib_dir = sys.argv[1], sys.argv[2] == "1", sys.argv[3]
+sys.path.insert(0, lib_dir)
+import applied_md_lib as aml  # noqa: E402  (sibling module; path set above)
+
+
+_crash_env = os.environ.get("ROTATE_APPLIED_CRASH_AFTER", "")
+CRASH_AFTER = int(_crash_env) if _crash_env.isdigit() else 0
+_writes = 0
 
 
 def write_atomic(path, text):
     # Write to a temp sibling and os.replace() so a crash mid-write never
-    # truncates the target; the partition/head pair stays retry-safe together
-    # with the duplicate-drop in the partition merge below.
+    # truncates the target. Crashes BETWEEN writes are covered by the
+    # destination-first write order below plus the exact-copy dedupe.
+    global _writes
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -80,43 +110,68 @@ def write_atomic(path, text):
         except OSError:
             pass
         raise
+    _writes += 1
+    if CRASH_AFTER and _writes >= CRASH_AFTER:
+        print(f"rotate-applied-md: simulated crash after {_writes} write(s)", file=sys.stderr)
+        sys.exit(3)
 
-applied, check_only = sys.argv[1], sys.argv[2] == "1"
+
+def render(header, blocks):
+    out = ["".join(header).rstrip("\n") + "\n"]
+    for block in blocks:
+        out.append("\n" + "".join(block).rstrip("\n") + "\n")
+    return "".join(out)
+
+
 catdir = os.path.dirname(applied)
 
 with open(applied, encoding="utf-8") as f:
-    lines = f.readlines()
+    header, entries = aml.split_entries(f.readlines())
 
-entry_re = re.compile(r"^- (\d{4})-(\d{2})-\d{2} ")
-
-# Split header (everything before the first entry) from entry blocks.
-header, entries, cur, cur_month = [], [], None, None
-for line in lines:
-    m = entry_re.match(line)
-    if m:
-        if cur is not None:
-            entries.append((cur_month, cur))
-        cur, cur_month = [line], (int(m.group(1)), int(m.group(2)))
-    elif cur is None:
-        header.append(line)
-    else:
-        cur.append(line)
-if cur is not None:
-    entries.append((cur_month, cur))
-
-today = datetime.date.today()
-keep = {(today.year, today.month)}
+today_env = os.environ.get("ROTATE_APPLIED_TODAY", "")
+today = (datetime.datetime.strptime(today_env, "%Y-%m-%d").date()
+         if today_env else datetime.date.today())
 prev_last = today.replace(day=1) - datetime.timedelta(days=1)
-keep.add((prev_last.year, prev_last.month))
+keep = {f"{today.year:04d}-{today.month:02d}",
+        f"{prev_last.year:04d}-{prev_last.month:02d}"}
 
-stale = [(month, block) for month, block in entries if month not in keep]
-if not stale:
-    print("rotate-applied-md: head is bounded (nothing older than the previous month).")
+
+def home_of(date):
+    """Where a block belongs: "head", or the YYYY-MM of its partition.
+
+    An undated block has no month to be filed under, so it is never moved:
+    it stays in the head, and one already in a partition stays there.
+    """
+    if date is None or date[:7] in keep:
+        return "head"
+    return date[:7]
+
+
+# Every existing partition, parsed with the same splitter as the head.
+partitions = {}
+for path in sorted(glob.glob(os.path.join(catdir, "applied-[0-9][0-9][0-9][0-9]-[0-9][0-9].md"))):
+    month = os.path.basename(path)[len("applied-"):-len(".md")]
+    with open(path, encoding="utf-8") as f:
+        partitions[month] = aml.split_entries(f.readlines())
+
+stale = [(date, block) for date, block in entries if home_of(date) != "head"]
+misfiled = [(month, date, block)
+            for month, (_, blocks) in sorted(partitions.items())
+            for date, block in blocks
+            if date is not None and home_of(date) != month]
+
+if not stale and not misfiled:
+    print("rotate-applied-md: head is bounded (nothing older than the previous month); "
+          "every partition entry sits under its own month.")
     sys.exit(0)
 if check_only:
-    months = sorted({f"{y:04d}-{m:02d}" for (y, m), _ in stale})
-    print(f"rotate-applied-md: rotation due — {len(stale)} entr(ies) from {', '.join(months)} "
-          f"still in {applied}; run `bash agents/scripts/core/rotate-applied-md.sh`.")
+    msg = "rotate-applied-md: rotation due —"
+    if stale:
+        months = sorted({d[:7] for d, _ in stale})
+        msg += f" {len(stale)} entr(ies) from {', '.join(months)} still in {applied};"
+    if misfiled:
+        msg += f" {len(misfiled)} partition entr(ies) filed under another month;"
+    print(msg + " run `bash agents/scripts/core/rotate-applied-md.sh`.")
     sys.exit(1)
 
 PARTITION_HEADER = """# Agent self-improvement — applied (archive partition {month})
@@ -139,58 +194,89 @@ PARTITION_HEADER = """# Agent self-improvement — applied (archive partition {m
 <!-- Latest first. Appended by rotate-applied-md.sh only. -->
 """
 
+# Blocks bound for each partition (the head's stale entries, then misfiled
+# blocks from other partitions) and blocks bound back for the head.
+incoming, to_head, leaving = {}, [], {}
+for date, block in stale:
+    incoming.setdefault(home_of(date), []).append((date, block))
+for month, date, block in misfiled:
+    leaving.setdefault(month, []).append(block)
+    home = home_of(date)
+    (to_head if home == "head" else incoming.setdefault(home, [])).append((date, block))
 
-def entry_date(block):
-    m = re.match(r"^- (\d{4}-\d{2}-\d{2})", block[0])
-    return m.group(1) if m else "0000-00-00"
-
-
-by_month = {}
-for (y, m), block in stale:
-    by_month.setdefault(f"{y:04d}-{m:02d}", []).append(block)
-
-for month, blocks in sorted(by_month.items()):
+# Plan every touched file's content before writing any of it. A file that both
+# gains and loses blocks gets an interim "union" text (its current blocks plus
+# the additions) for phase 1; its final text (the losses dropped) is phase 2.
+plans = []   # (path, union text or None, final text, gains blocks?)
+for month in sorted(set(incoming) | set(leaving)):
     part = os.path.join(catdir, f"applied-{month}.md")
-    existing = []
-    if os.path.exists(part):
-        with open(part, encoding="utf-8") as f:
-            plines = f.readlines()
-        phead, pcur = [], None
-        for line in plines:
-            if entry_re.match(line):
-                if pcur is not None:
-                    existing.append(pcur)
-                pcur = [line]
-            elif pcur is None:
-                phead.append(line)
-            else:
-                pcur.append(line)
-        if pcur is not None:
-            existing.append(pcur)
-        part_header = "".join(phead)
+    if month in partitions:
+        part_header, current = partitions[month]
     else:
-        part_header = PARTITION_HEADER.format(month=month)
+        part_header, current = [PARTITION_HEADER.format(month=month)], []
+    gone = leaving.get(month, [])
+    existing = [(d, b) for d, b in current if not any(b is g for g in gone)]
 
-    # Drop blocks already present in the partition: a run interrupted between
-    # writing the partition and rewriting applied.md leaves the same entries in
-    # both files, and the retry would otherwise duplicate them here.
-    seen = {"".join(b).rstrip("\n") for b in existing}
-    fresh = [b for b in blocks if "".join(b).rstrip("\n") not in seen]
+    # Drop exact copies only — of a block the partition already holds, or of
+    # one this run already routed here. A run interrupted between writing the
+    # partition and rewriting applied.md leaves the same entries in both files,
+    # and an earlier rotation that never trimmed the head left whole months
+    # duplicated there. Anything that is not a byte-identical copy is written
+    # here, so an entry whose only copy is in the head is never dropped.
+    seen = {aml.block_key(b) for _, b in existing}
+    fresh = []
+    for date, block in incoming.get(month, []):
+        key = aml.block_key(block)
+        if key not in seen:
+            seen.add(key)
+            fresh.append((date, block))
 
-    merged = existing + fresh
-    merged.sort(key=entry_date, reverse=True)
-    out = [part_header.rstrip("\n") + "\n"]
-    for block in merged:
-        out.append("\n" + "".join(block).rstrip("\n") + "\n")
-    write_atomic(part, "".join(out))
+    final = render(part_header, [b for _, b in aml.sort_latest_first(existing + fresh)])
+    union = (render(part_header, [b for _, b in aml.sort_latest_first(current + fresh)])
+             if fresh and gone else None)
+    plans.append((part, union, final, bool(fresh)))
+    skipped = len(incoming.get(month, [])) - len(fresh)
     print(f"rotate-applied-md: {len(fresh)} entr(ies) -> {part}"
-          + (f" ({len(blocks) - len(fresh)} already present, skipped)" if len(fresh) != len(blocks) else ""))
+          + (f" ({skipped} already present, skipped)" if skipped else "")
+          + (f" ({len(gone)} misfiled entr(ies) moved out)" if gone else ""))
 
-kept = [block for month, block in entries if month in keep]
-out = ["".join(header).rstrip("\n") + "\n"]
-for block in kept:
-    out.append("\n" + "".join(block).rstrip("\n") + "\n")
-write_atomic(applied, "".join(out))
-print(f"rotate-applied-md: head keeps {len(kept)} entr(ies) "
-      f"({', '.join(sorted(f'{y:04d}-{m:02d}' for y, m in keep))}).")
+
+def with_rehomed(base):
+    """`base` plus every to_head block it lacks; returns (blocks, count added)."""
+    out = list(base)
+    seen = {aml.block_key(b) for _, b in out}
+    added = 0
+    for date, block in to_head:
+        key = aml.block_key(block)
+        if key in seen:
+            continue
+        seen.add(key)
+        # Insert ahead of the first older dated entry, so the head stays latest
+        # first without re-sorting entries this run did not move.
+        at = next((i for i, (d, _) in enumerate(out) if d is not None and d < date), len(out))
+        out.insert(at, (date, block))
+        added += 1
+    return out, added
+
+
+kept, rehomed = with_rehomed([(d, b) for d, b in entries if home_of(d) == "head"])
+head_final = render(header, [b for _, b in kept])
+head_union = (render(header, [b for _, b in with_rehomed(entries)[0]])
+              if rehomed and stale else None)
+
+# Phase 1 — additions: every destination gains its blocks while every source
+# still holds them. Phase 2 — removals: the final texts. A file with only
+# additions is final after phase 1; one with only removals waits for phase 2.
+for part, union, final, gains in plans:
+    if gains:
+        write_atomic(part, union if union is not None else final)
+if rehomed:
+    write_atomic(applied, head_union if head_union is not None else head_final)
+for part, union, final, gains in plans:
+    if not gains or union is not None:
+        write_atomic(part, final)
+if not rehomed or head_union is not None:
+    write_atomic(applied, head_final)
+print(f"rotate-applied-md: head keeps {len(kept)} entr(ies) ({', '.join(sorted(keep))})"
+      + (f", {rehomed} of them re-homed from a partition." if rehomed else "."))
 PY

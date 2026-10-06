@@ -59,6 +59,7 @@ tests/fixtures/function_size/
 tests/fixtures/lint_rules/
 tests/fixtures/shell_lint/
 tests/fixtures/lint_hook_probe.cpp
+tests/fixtures/all_checks_green_pr2286.json
 tests/fixtures/ci_parity_config_clean.json
 tests/fixtures/ci_parity_config_filtered.json
 tests/fixtures/ci_parity_config_nopr.json
@@ -96,8 +97,10 @@ tests/fixtures/merge_gates_user_comment.json
 
 # --- layer-coupled bats suites (GENERATED — see CONTRACT above) ---
 tests/bats/agent_size.bats
+tests/bats/all_checks_green.bats
 tests/bats/android_openssl_failfast.bats
 tests/bats/archive_backlog_entry.bats
+tests/bats/auto_merge_arm_guard.bats
 tests/bats/capture_intent.bats
 tests/bats/coderabbit_triage.bats
 tests/bats/cr_oob_review_backfill.bats
@@ -122,9 +125,11 @@ tests/bats/is_pure_docs_diff.bats
 tests/bats/issue_sweep.bats
 tests/bats/lint_rules.bats
 tests/bats/lock_claim.bats
+tests/bats/lock_release_on_close.bats
 tests/bats/lock_staleness_sweep.bats
 tests/bats/markdown_links.bats
 tests/bats/merge_gates.bats
+tests/bats/merge_snapshot_holes.bats
 tests/bats/merge_watcher.bats
 tests/bats/merge_watcher_integration.bats
 tests/bats/migrate_bugs_to_issues.bats
@@ -133,7 +138,9 @@ tests/bats/panel_verdicts.bats
 tests/bats/plan_archival_owed.bats
 tests/bats/plan_index_robustness.bats
 tests/bats/plan_lock_gate.bats
+tests/bats/portable_purity.bats
 tests/bats/postmortem_owed.bats
+tests/bats/pr_body_edit.bats
 tests/bats/pre_push_guard.bats
 tests/bats/preship_review_artifact.bats
 tests/bats/pretool_workflow_fleet_preflight.bats
@@ -145,12 +152,14 @@ tests/bats/resolve_py.bats
 tests/bats/resolve_repo.bats
 tests/bats/review_ack_gate.bats
 tests/bats/review_guard.bats
+tests/bats/run_gate.bats
 tests/bats/run_review.bats
 tests/bats/safe_admin_merge.bats
 tests/bats/safe_merge.bats
 tests/bats/script_freshness.bats
 tests/bats/session_registry.bats
 tests/bats/setup_branch_protection.bats
+tests/bats/setup_harness_hooks_path.bats
 tests/bats/shell_lint.bats
 tests/bats/small_helper_audit.bats
 tests/bats/subsystem_docs.bats
