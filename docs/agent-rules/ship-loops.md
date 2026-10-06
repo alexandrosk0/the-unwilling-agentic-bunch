@@ -187,6 +187,35 @@ When `SMATCHET_AGENT_VCS=p4`, the orchestrator follows a **P4-gated ship-loop** 
 
 Full phase sequence + invariants + exception rules in [`docs/perforce/AGENT_FLOWS.md`](../perforce/AGENT_FLOWS.md) § P4-gated ship-loop. Plan: [`docs/plans/shipped/p4-gated-ship-loop.md`](../plans/shipped/p4-gated-ship-loop.md). ADR: [`docs/adr/0008-p4-gated-ship-loop.md`](../adr/0008-p4-gated-ship-loop.md).
 
+## Two-repo ship-loop
+
+The agent layer lives in its own repository and a host mounts it as the git submodule `agent-layer/`. A host pins one layer commit; changing what the host runs means moving that pin.
+
+**(a) Steady-state edit flow.**
+1. Branch, edit and push in the layer repo; open a PR there.
+2. The layer's own gates run on it: `agentic-selftests` (the layer's bats suites), `shell-lint`, the doc-validation subset, and its self-hosted `merge-gates.sh`.
+3. Squash-merge it there.
+4. `auto-bump.yml` (layer repo) opens or updates the host PR `chore(agent-layer): bump to <sha>` on branch `bot/agent-layer-bump`.
+5. `agent-layer-integration.yml` is the binding host check on that PR.
+6. Merge the bump PR.
+
+**Nothing is live for the host until step 6.** A layer merge alone never changes host behaviour, so "it's merged" is never an answer to "is the fix in?".
+
+**(b) Pre-merge validation against real host content.** Step 2 proves the layer against itself only. Two supported shapes:
+- **Local (default).** From a host worktree: `git -C agent-layer fetch origin <layer-branch>`, then `git -C agent-layer checkout <sha>`; run the host gates (`bash scripts/dev/pre-ship.sh`, `bash agent-layer/agents/scripts/core/check-harness-provisioned.sh`). Revert with `git submodule update --checkout --force -- agent-layer`, which restores the pinned SHA; `git checkout -- agent-layer` alone leaves the submodule HEAD detached at the WIP SHA. **Never `git add agent-layer` during this loop**: a stray gitlink write turns a scratch check into a bump commit that races auto-bump's PR.
+- **Host draft PR pinning a layer branch SHA**, when the evidence must come from real runners. Commit the gitlink on a **draft** host PR titled `chore(agent-layer): WIP pin to <layer-branch>@<sha>`, and fire `agent-layer-integration.yml` on it with `workflow_dispatch`. The SHA must be on the layer remote under `refs/heads/*`, or the runner cannot fetch it. Deleting the layer branch after its merge orphans the pin, so re-pin to the merged SHA first. A WIP pin never leaves draft: two open PRs moving the gitlink conflict on every rebase, and the auto-bump PR is the authoritative one.
+
+**(c) Gate matrix.**
+
+| Change | Layer-repo gates | Host gates |
+|---|---|---|
+| Layer content edit (prompts, scripts, rule-docs) | `agentic-selftests` · `shell-lint` · doc-validation subset · self-hosted `merge-gates.sh` | none until the bump |
+| Pointer bump (gitlink only) | none | `agent-layer-integration.yml` (binding) · doc-validation · CodeRabbit · user-comment and Bugbot gates; the build is skipped (`is-pure-docs-diff.sh` classifies a gitlink-only diff docs-tier) |
+| Host content edit (plans, entries, `Source/`) | none | unchanged |
+| WIP draft pin | none | `agent-layer-integration.yml` via `workflow_dispatch` |
+
+**(d) Order of enablement.** `agent-layer-integration.yml` must be seen firing and passing on a pointer-bump PR before `auto-bump.yml` is enabled: automation that opens bump PRs ahead of their binding check is the blind spot this lane exists to close. Bump-PR gate rules: [`merge-gates.md`](merge-gates.md) § Bump-PR gate profile.
+
 ## Post-ship turn-end protocol
 
 After the loop reaches PR-opened (or the equivalent terminal state for the task), end the turn with `AskUserQuestion` offering the four canonical next steps as discrete options:
