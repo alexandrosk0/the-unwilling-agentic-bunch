@@ -1819,6 +1819,19 @@ plan_lock_red_fixture() {
     unset MERGE_GATES_CR_INSTALLED
 }
 
+@test "disposition reader: a bold key, a numbered item or a marker after an unterminated comment is not read" {
+    # Pins the marker shape merge-gates.md documents for both trails.
+    # shellcheck source=/dev/null
+    . "$SCRIPTS_DIR/merge-gates.d/10-gate-filter.sh"
+    reads() { jq -n --arg b "$1" "$_MG_JQ_DISPOSITION_DEF"' disposition([]; $b; "cr-disposition")'; }
+    [ "$(reads '- cr-disposition: acked')" = true ]
+    [ "$(reads $'<!-- closed -->\ncr-disposition: acked')" = true ]
+    [ "$(reads '**cr-disposition**: acked')" = false ]
+    [ "$(reads '1. cr-disposition: acked')" = false ]
+    [ "$(reads '> cr-disposition: acked')" = false ]
+    [ "$(reads $'<!-- never closed\ncr-disposition: acked')" = false ]
+}
+
 # Stale-red re-check (tooling 2026-10-04 stale-plan-lock-red-overridden-instead-
 # of-rerun, item 1): before honouring plan-lock-out-of-band + disposition, the
 # poller re-runs plan_lock_gate_decide against the CURRENT lock table. The gh
