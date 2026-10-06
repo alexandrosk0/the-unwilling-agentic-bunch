@@ -105,18 +105,32 @@
 set -uo pipefail
 
 SELF_NAME="${ACG_SELF:-All checks green (block-on-any-red)}"
-# Same config resolution as merge-gates.sh: PC_CONFIG_FILE, else the HOST config
-# project-config.sh resolves. A bare three-levels-up climb from agents/scripts/core/
-# lands on agent-layer/ once the layer is the host's submodule, and the LAYER's
-# own project.config.json there would silently swap the layer's required contexts
-# in while gating a host PR (merge-gates.sh § DUAL-ROOT). The climb stays only as
-# the fallback for a copy with no project-config.sh beside it (a test fixture).
+# The HOST's project.config.json (its required contexts), never the layer's own.
+# First hit wins:
+#   1. PC_CONFIG_FILE — an exact file (the host workflow passes
+#      ${{ github.workspace }}/project.config.json);
+#   2. SMATCHET_PROJECT_CONFIG — project-config.sh's documented escape hatch;
+#   3. PROJECT_ROOT — a caller naming the host tree (the host workflow's
+#      PROJECT_ROOT=.), read as <PROJECT_ROOT>/project.config.json;
+#   4. project-config.sh's own resolution: its superproject rung finds the host
+#      when this layer is the host's agent-layer/ submodule; a standalone layer is
+#      its own project.
+# Nothing climbs from this script's location: inside the agent-layer/ mount
+# ../../../project.config.json is the LAYER's config, whose required contexts
+# would silently gate a host PR (merge-gates.sh § DUAL-ROOT). With none of these
+# (a copy with no project-config.sh beside it) the required-absent rule is inert
+# and says so.
+CONFIG_FILE=""
 _acg_pc="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/dev/project-config.sh"
-if [ -z "${PC_CONFIG_FILE:-}" ] && [ -f "$_acg_pc" ]; then
+if [ -n "${PC_CONFIG_FILE:-}" ]; then
+    CONFIG_FILE="$PC_CONFIG_FILE"
+elif [ -z "${SMATCHET_PROJECT_CONFIG:-}" ] && [ -n "${PROJECT_ROOT:-}" ]; then
+    CONFIG_FILE="${PROJECT_ROOT%/}/project.config.json"
+elif [ -f "$_acg_pc" ]; then
     # shellcheck source=scripts/dev/project-config.sh
     PC_ROOTS_ONLY=1 . "$_acg_pc" >/dev/null 2>&1 || true
+    CONFIG_FILE="${PC_CONFIG_FILE:-}"
 fi
-CONFIG_FILE="${PC_CONFIG_FILE:-$(dirname "$0")/../../../project.config.json}"
 
 die() { echo "all-checks-green: $*" >&2; exit 2; }
 

@@ -477,6 +477,73 @@ run_live() {
     [[ "$output" == *"Host-only required lane"* ]]
 }
 
+# layer_tree <dir> — a minimal agent layer at <dir>: all-checks-green.sh, the gate
+# filter it sources, project-config.sh, and the LAYER's own project.config.json
+# (required context "Layer-only lane"), committed as its own repo.
+layer_tree() {
+    mkdir -p "$1/agents/scripts/core/merge-gates.d" "$1/scripts/dev"
+    cp "$ACG" "$1/agents/scripts/core/"
+    cp "$REPO_ROOT/agents/scripts/core/merge-gates.d/10-gate-filter.sh" "$1/agents/scripts/core/merge-gates.d/"
+    cp "$REPO_ROOT/scripts/dev/project-config.sh" "$1/scripts/dev/"
+    jq -n '{branch_protection: {required_contexts: ["Layer-only lane"]}}' > "$1/project.config.json"
+    git -C "$1" init -q -b develop
+    git -C "$1" add -A
+    git -C "$1" -c user.email=t@t -c user.name=t commit -qm layer
+}
+
+# host_tree <dir> — a host repo whose project.config.json requires
+# "Host-only required lane".
+host_tree() {
+    mkdir -p "$1"
+    git -C "$1" init -q -b develop
+    jq -n '{branch_protection: {required_contexts: ["Host-only required lane"]}}' > "$1/project.config.json"
+}
+
+# run_from_host <host> [VAR=value ...] — the live run from the host checkout's
+# root, as the host workflow runs it, with no inherited config roots.
+run_from_host() {
+    local host="$1"
+    shift
+    run env -u ACG_REQUIRED_CONTEXTS -u PC_CONFIG_FILE -u PROJECT_ROOT -u AGENT_LAYER_ROOT \
+        -u SMATCHET_PROJECT_CONFIG -u SMATCHET_PROJECT_ROOT_OVERRIDE \
+        PATH="$STUB/bin:$PATH" ACG_SLEEP_BIN=true ACG_REPO=o/r ACG_PR=2286 ACG_SHA="$HEAD_SHA" \
+        ACG_MAX_WAIT_SECONDS=0 "$@" \
+        bash -c 'cd "$1" && bash agent-layer/agents/scripts/core/all-checks-green.sh' _ "$host"
+}
+
+@test "live: from a layer mounted as the host's agent-layer/ submodule, the HOST config's required set gates" {
+    # Inside the mount, ../../../project.config.json is the LAYER's config; the
+    # host's comes from project-config.sh's superproject rung.
+    local t="$BATS_TEST_TMPDIR/mount"
+    layer_tree "$t/layer"
+    host_tree "$t/host"
+    git -C "$t/host" -c protocol.file.allow=always submodule add -q "$t/layer" agent-layer
+    stub_gh; replay final "$GREEN_EDIT"; serve runs; serve status; serve_pr "$HEAD_SHA"
+    run_from_host "$t/host"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"NOT-YET     Host-only required lane"* ]]
+    [[ "$output" != *"Layer-only lane"* ]]
+}
+
+@test "live: the host workflow's PROJECT_ROOT=. and PC_CONFIG_FILE win over a plain agent-layer/ checkout" {
+    # A layer checked out as a plain directory has no superproject link, so only
+    # the workflow's own roots can name the host.
+    local t="$BATS_TEST_TMPDIR/plain"
+    host_tree "$t/host"
+    layer_tree "$t/host/agent-layer"
+    jq -n '{branch_protection: {required_contexts: ["Explicit file lane"]}}' > "$t/explicit.json"
+    stub_gh; replay final "$GREEN_EDIT"; serve runs; serve status; serve_pr "$HEAD_SHA"
+    run_from_host "$t/host" PROJECT_ROOT=.
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"NOT-YET     Host-only required lane"* ]]
+    [[ "$output" != *"Layer-only lane"* ]]
+    rm -f "$STUB"/*.count
+    run_from_host "$t/host" PROJECT_ROOT=. PC_CONFIG_FILE="$t/explicit.json"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"NOT-YET     Explicit file lane"* ]]
+    [[ "$output" != *"Host-only required lane"* ]]
+}
+
 @test "live: the first blocking red fails fast (one poll, ::error names it)" {
     stub_gh; replay "2026-10-04T01:56:45Z"; serve runs; serve status; serve_pr "$HEAD_SHA"
     run_live
