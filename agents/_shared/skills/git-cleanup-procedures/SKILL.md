@@ -152,7 +152,7 @@ esac
    esac
    ```
 
-   Action when all four hold: **propose only**. Open the same PR `auto-bump.yml` would (branch `bot/agent-layer-bump` off the host's `develop`, `git update-index --cacheinfo 160000,$layer_tip,agent-layer`, title `chore(agent-layer): bump to <sha>`), or in dry-run mode print those commands. Never merge it in the pass that opened it: it rides the full gate poll ([`merge-gates.md`](../../../docs/agent-rules/merge-gates.md) § Bump-PR gate profile).
+   Action when all four hold: **propose only**. Open the same PR `auto-bump.yml` would (branch `bot/agent-layer-bump` off the host's `develop`, `git update-index --cacheinfo 160000,$layer_tip,agent-layer`, title `chore(agent-layer): bump to <sha>`), or in dry-run mode print those commands. Never merge it in the pass that opened it: it rides the full gate poll ([`merge-gates.md`](../../../../docs/agent-rules/merge-gates.md) § Bump-PR gate profile).
 
 ## Standard cleanup loop — per-PR mechanics
 
