@@ -740,8 +740,12 @@ else:
             # emitted octal-escaped in quotes (+++ "b/..."), which the startswith
             # parser below silently misses — added lines in that file then either drop
             # out of scope or attach to the PREVIOUS file at wrong line numbers.
+            # errors="replace": the diff carries the REMOVED lines of every file it
+            # touches, so one deleted non-UTF-8 fixture would otherwise raise before
+            # any plan line is read. Only added lines in plan docs are classified.
             out = subprocess.run(["git", "-c", "core.quotepath=off", "diff", "--unified=0", "--no-color", *diff_args],
-                                 capture_output=True, text=True, check=True).stdout
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                 check=True).stdout
         except subprocess.CalledProcessError as exc:
             sys.stderr.write("WARN: git diff failed (%s); nothing to scope\n" % exc)
             return set()
