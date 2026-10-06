@@ -210,7 +210,7 @@ The agent layer lives in its own repository and a host mounts it as the git subm
 | Change | Layer-repo gates | Host gates |
 |---|---|---|
 | Layer content edit (prompts, scripts, rule-docs) | `agentic-selftests` · `shell-lint` · doc-validation subset · self-hosted `merge-gates.sh` | none until the bump |
-| Pointer bump (gitlink only) | none | `agent-layer-integration.yml` (binding) · doc-validation · CodeRabbit · user-comment and Bugbot gates; the build is skipped (`is-pure-docs-diff.sh` classifies a gitlink-only diff docs-tier) |
+| Pointer bump (gitlink only) | none | `agent-layer-integration.yml` (binding) · doc-validation · the build and lint lanes (the host's change detection treats the gitlink as code) · CodeRabbit · user-comment and Bugbot gates |
 | Host content edit (plans, entries, `Source/`) | none | unchanged |
 | WIP draft pin | none | `agent-layer-integration.yml` via `workflow_dispatch` |
 

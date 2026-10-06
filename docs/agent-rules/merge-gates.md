@@ -174,7 +174,7 @@ Implementation: `agents/scripts/core/merge-gates.sh` (sourceable + CLI), `agents
 ## Bump-PR gate profile
 
 A host PR that only moves the `agent-layer` gitlink (`chore(agent-layer): bump to <sha>`, opened by the layer repo's `auto-bump.yml` or by `git-janitor` as backstop) meets the same four conditions as any other PR, as follows:
-- **CI.** `agent-layer-integration.yml` is the binding lane, plus every lane its paths do not filter out, doc-validation included. The C++ build is skipped because `is-pure-docs-diff.sh` classifies a gitlink-only diff docs-tier. That skips the build, never the gates.
+- **CI.** `agent-layer-integration.yml` is the binding lane, plus every lane its paths do not filter out, doc-validation included. The host's change detection treats the `agent-layer` gitlink as code, so the build and lint lanes run too: a layer change can move a lint rule, and those lanes re-validate it against host code. `is-pure-docs-diff.sh` classifies a gitlink-only diff as docs-tier only for the local build cadence and `merge-gates.sh`'s pure-docs checks, never for which CI lanes run.
 - **CodeRabbit.** It typically lands `COMMENTED + 0 actionable` on a one-line gitlink diff, which passes.
 - **User comments and Bugbot.** Unchanged.
 
