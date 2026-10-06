@@ -49,6 +49,7 @@ These are the agent's non-negotiable stops. (The protected-branch-guard bash and
 - **Delete a protected / load-bearing branch** — never, even with no open PR and no presence on `develop`. Some branches are infrastructure (a relay/asset-host branch the product pushes to at runtime); deleting one breaks live behaviour (e.g. 404s on screenshots already embedded in filed issues) — and can red-wall the **build** when the same branch also mirrors a dependency tarball fetched at configure time (a single deletion takes out both runtime assets and the build mirror, recreated only from a fresh empty base). Two guards run **before any `branch -D` / remote-ref delete** — a hit on **either** refuses: (1) the config allowlist `vcs.protected_branches`, (2) a code-reference net (`git grep` the branch name in committed `Source/`/`tools/`/`scripts/`). Exact bash → skill § Protected-branch guards. The branch literal lives ONLY in `project.config.json`, never in this portable file (keeps `test-portable-purity` green).
 - **Squash-merge a PR carrying unvalidated visual commits** — never. Intermediate commits on a draft PR may be unvalidated iterations awaiting a user verdict (AGENTS.md § Visual-validation exception). Before squash-merging, confirm the user approved the latest visual state (the merge-gates user-comments gate covers this when the user actually commented; absent a comment, ask).
 - **Push directly to `develop`** — never, except the narrow FF-clean docs-batch exception below. Everything else lands via PR + squash-merge.
+- **Act on a rewritten layer history** — never. If the backstop bump proposer finds the host's pinned layer commit is not an ancestor of the layer's `develop`, HALT and surface it; do not propose a bump. **Scope:** one invocation cleans one repo. Layer-repo PR and branch cleanup is a second invocation against the layer repo, never a cross-repo delete from this pass.
 - **Skip the regression build** — never. Even a docs-only diff runs `cmake --build … SmatchetStandalone`, except under the FF-clean exception (which substitutes `test-all.sh` because no C++ TU is in the diff). A build failure on `develop` blocks all future work — the gate is non-negotiable everywhere else.
 
 ### FF-clean docs-batch exception (the decision)
@@ -66,7 +67,7 @@ The PR-only-to-`develop` rule is suspended for a single batch — `develop` only
 
 ## Pre-flight
 
-Run the 6-step pre-flight audit (worktree list → fetch+prune → uncommitted-state audit → unmerged-branch audit → open-PR list → resolve `ORCH_USER` → source the merge-gates poller) and the Step-0 cross-checks (worktree bookkeeping audit, detached-HEAD salvage tag, lock-staleness sweep) **before any mutation** — exact commands in [`git-cleanup-procedures`](../_shared/skills/git-cleanup-procedures/SKILL.md) § Pre-flight + § Pre-flight cross-checks. If the uncommitted-state audit reports modifications outside the safe-ignore set (`build/`, `.fetchcontent-*/`), HALT and surface the file list (per § Hard refusals).
+Run the 6-step pre-flight audit (worktree list → fetch+prune → uncommitted-state audit → unmerged-branch audit → open-PR list → resolve `ORCH_USER` → source the merge-gates poller) and the Step-0 cross-checks (worktree bookkeeping audit, detached-HEAD salvage tag, lock-staleness sweep, and on a two-repo host the backstop bump proposer) **before any mutation** — exact commands in [`git-cleanup-procedures`](../_shared/skills/git-cleanup-procedures/SKILL.md) § Pre-flight + § Pre-flight cross-checks. If the uncommitted-state audit reports modifications outside the safe-ignore set (`build/`, `.fetchcontent-*/`), HALT and surface the file list (per § Hard refusals).
 
 ## Standard cleanup loop
 
@@ -106,6 +107,7 @@ Inventory the mutations actually performed this round — one bullet each, no as
 - `git pull --ff-only origin develop` — old → new develop tip.
 - `docs/self-improvement/categories/*.md` status flips → `applied.md`.
 - (FF-clean exception only) the FF-push row described in § FF-clean docs-batch exception.
+- (two-repo host, backstop only) the bump PR opened when the layer tip is ahead of the host pin and auto-bump missed it — PR number, old → new pin.
 
 ## Regression gate
 

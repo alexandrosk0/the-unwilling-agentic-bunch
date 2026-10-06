@@ -113,6 +113,47 @@ esac
 2. **Detached-HEAD salvage tag** — for any worktree on detached HEAD, `git -C <path> log --oneline HEAD ^origin/develop ^origin/main` to inventory unique commits. If non-empty, create `salvage/<worktree-name>-<short-summary>` BEFORE any prune/remove so a parallel-agent's WIP isn't GC'd.
 3. **Lock staleness sweep** — `bash agents/scripts/core/lock-staleness-sweep.sh` to surface plan-locks whose PR merged but the auto-release token didn't fire (squash-merge edge case). Run before the final report.
 
+4. **Backstop bump proposer** (two-repo hosts only) — proposes the layer pin bump when the layer repo's `auto-bump.yml` missed one. All four predicates must hold; each failure mode is spelled out because a wrong reading here either spams bump PRs or hides a rewritten layer history.
+
+   ```bash
+   # P2 first: no gitlink means a pre-flip tree, and the whole step is a no-op.
+   pinned=$(git -C "$MAIN_REPO" ls-tree origin/develop agent-layer | awk '$1 == "160000" {print $3}')
+   [ -n "$pinned" ] || exit 0                                    # P2 inert
+   layer_url=$(git -C "$MAIN_REPO" config -f .gitmodules submodule.agent-layer.url)
+   layer_slug=$(printf '%s' "$layer_url" | sed -E 's#^https://github.com/##; s#\.git$##')
+   host_slug=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+
+   # P1: the layer tip resolves. A network failure skips silently; never propose blind.
+   layer_tip=$(git ls-remote "$layer_url" refs/heads/develop | cut -f1) || exit 0
+   [ -n "$layer_tip" ] || exit 0
+
+   # P3: the tip moved, and the pin is its ancestor. Fetch both into the cache FIRST:
+   # on a missing object merge-base exits 128, not 1, which reads like a rewrite.
+   [ "$layer_tip" != "$pinned" ] || exit 0
+   cache="$MAIN_REPO/.git/agent-layer-backstop.git"
+   [ -d "$cache" ] || git clone --bare --filter=blob:none "$layer_url" "$cache"
+   git -C "$cache" fetch --no-tags origin develop && git -C "$cache" fetch --no-tags origin "$pinned" || exit 0
+   rc=0; git -C "$cache" merge-base --is-ancestor "$pinned" "$layer_tip" || rc=$?
+   case "$rc" in
+       0) ;;                                                     # ancestor: proceed
+       1) echo "HALT: layer develop no longer contains the host pin $pinned (history rewritten)"; exit 1 ;;
+       *) exit 0 ;;                                              # fetch/lookup failed: skip silently
+   esac
+
+   # P4: no open bump PR, and auto-bump is not mid-run (terminal and older than 20 min).
+   open=$(gh pr list --repo "$host_slug" --head bot/agent-layer-bump --base develop --state open --json number --jq length)
+   [ "$open" = 0 ] || exit 0
+   last=$(gh run list --repo "$layer_slug" --workflow auto-bump.yml --limit 1 --json status,createdAt \
+          --jq '.[0] | "\(.status) \(.createdAt)"')
+   case "$last" in
+       "") ;;                                                    # never ran
+       completed\ *) [ $(( $(date -u +%s) - $(date -u -d "${last#completed }" +%s) )) -ge 1200 ] || exit 0 ;;
+       *) exit 0 ;;                                              # queued / in progress: racing auto-bump
+   esac
+   ```
+
+   Action when all four hold: **propose only**. Open the same PR `auto-bump.yml` would (branch `bot/agent-layer-bump` off the host's `develop`, `git update-index --cacheinfo 160000,$layer_tip,agent-layer`, title `chore(agent-layer): bump to <sha>`), or in dry-run mode print those commands. Never merge it in the pass that opened it: it rides the full gate poll ([`merge-gates.md`](../../../docs/agent-rules/merge-gates.md) § Bump-PR gate profile).
+
 ## Standard cleanup loop — per-PR mechanics
 
 For each open PR targeting `develop`, in **dependency order** (oldest unmerged first; same-file PRs → older first). The agent owns step 3 (merge-gate rc-handling); the mechanical steps:
