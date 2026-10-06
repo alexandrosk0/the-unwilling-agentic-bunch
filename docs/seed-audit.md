@@ -302,6 +302,15 @@ decision rather than an oversight:
 | 117 | `tests/bats/workflow_job_mask.bats` | `CLEAR` | Claude (agent) | 2026-09-13 | No findings in head or history. |
 | 118 | `tests/bats/workflow_watchdog.bats` | `CLEAR` | Claude (agent) | 2026-09-13 | No findings in head or history. |
 | 119 | `tests/bats/worktree_prune.bats` | `CLEAR` | Claude (agent) | 2026-09-13 | No findings in head or history. |
+| 120 | `tests/fixtures/all_checks_green_pr2286.json` | `CLEAR` | Claude (agent) | 2026-10-06 | Real CI metadata for `all_checks_green.bats`: PR #2286's head check-run / status names, ids, states and timestamps, trimmed to the fields the script reads. No logins, URLs or e-mail; gitleaks-shape scan: no findings. |
+| 121 | `tests/bats/all_checks_green.bats` | `CLEAR` | Claude (agent) | 2026-10-06 | Stub `gh` + the #2286 fixture only. No findings. |
+| 122 | `tests/bats/auto_merge_arm_guard.bats` | `CLEAR` | Claude (agent) | 2026-10-06 | Synthetic hook payloads only. No findings. |
+| 123 | `tests/bats/lock_release_on_close.bats` | `CLEAR` | Claude (agent) | 2026-10-06 | Sandbox bare remote; placeholder `t@t` identity. No findings. |
+| 124 | `tests/bats/merge_snapshot_holes.bats` | `CLEAR` | Claude (agent) | 2026-10-06 | Stub `gh` with a placeholder `api.github.com/repos/x` error line. No findings. |
+| 125 | `tests/bats/portable_purity.bats` | `CLEAR` | Claude (agent) | 2026-10-06 | Temp-repo fixtures only. No findings. |
+| 126 | `tests/bats/pr_body_edit.bats` | `CLEAR` | Claude (agent) | 2026-10-06 | Stub `gh` PR bodies only. No findings. |
+| 127 | `tests/bats/run_gate.bats` | `CLEAR` | Claude (agent) | 2026-10-06 | Synthetic commands only. No findings. |
+| 128 | `tests/bats/setup_harness_hooks_path.bats` | `CLEAR` | Claude (agent) | 2026-10-06 | Temp-repo fixture; placeholder `t@local` identity. No findings. |
 
 ## Status
 

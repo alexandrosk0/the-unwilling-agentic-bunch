@@ -68,7 +68,7 @@ SOURCE_URL="https://github.com/alexandrosk0/Smatchet.git"
 # decision: agents/scripts/** travels, scripts/dev/ stays), re-audit it for
 # publication, then set this deliberately. It started at 61 (2026-08-29, under the
 # retired `grep -l 'agents/'` rule) and has drifted with the tree ever since.
-EXPECTED_BATS_COUNT=67
+EXPECTED_BATS_COUNT=75
 
 # Wrapper roots that TRAVEL with the layer, and the host root that does not. A
 # suite goes where its wrapper goes: scripts/dev/test-all.sh discovers tests by the
