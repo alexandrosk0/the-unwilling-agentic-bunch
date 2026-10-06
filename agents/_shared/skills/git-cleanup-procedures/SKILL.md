@@ -144,7 +144,7 @@ esac
    open=$(gh pr list --repo "$host_slug" --head bot/agent-layer-bump --base develop --state open --json number --jq length)
    [ "$open" = 0 ] || exit 0
    last=$(gh run list --repo "$layer_slug" --workflow auto-bump.yml --limit 1 --json status,createdAt \
-          --jq '.[0] | "\(.status) \(.createdAt)"')
+          --jq 'if length == 0 then "" else .[0] | "\(.status) \(.createdAt)" end')
    case "$last" in
        "") ;;                                                    # never ran
        completed\ *) [ $(( $(date -u +%s) - $(date -u -d "${last#completed }" +%s) )) -ge 1200 ] || exit 0 ;;

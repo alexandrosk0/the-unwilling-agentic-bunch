@@ -100,12 +100,15 @@ jobs:
           GH_TOKEN: ${{ secrets.AGENT_LAYER_BUMP_PAT }}
         run: |
           set -euo pipefail
-          sha="$GITHUB_SHA"
-          # Guard (i): the SHA is on the layer's develop, so a runner on the
-          # host can fetch it.
+          # Pin develop's tip as fetched now, never GITHUB_SHA: a dispatch on an
+          # older ref, or a queued run that starts after a newer merge, would
+          # otherwise force-push an older pin over a newer bump PR.
           git fetch --no-tags origin develop
-          if ! git merge-base --is-ancestor "$sha" origin/develop; then
-            echo "::error::${sha} is not on origin/develop; refusing to pin it."
+          sha=$(git rev-parse origin/develop)
+          # Guard (i): the run's own commit is on develop. A dispatch from any
+          # other ref is an operator error, so refuse rather than guess.
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "$sha"; then
+            echo "::error::${GITHUB_SHA} is not on origin/develop; dispatch this workflow from develop."
             exit 1
           fi
           gh auth setup-git
@@ -123,6 +126,19 @@ jobs:
           fi
           git -C host checkout -B "$BUMP_BRANCH"
           git -C host update-index --cacheinfo "160000,${sha},agent-layer"
+          # The host keeps byte-identical copies of a few layer scripts
+          # (docs/mirrored-paths.txt), and its mirror gate fails a bump whose
+          # copies lag the new pin. Carry them in the same commit.
+          if [ -f host/docs/mirrored-paths.txt ]; then
+            { grep -vE '^[[:space:]]*(#|$)' host/docs/mirrored-paths.txt || true; } | while IFS= read -r mp; do
+              if git cat-file -e "${sha}:${mp}" 2>/dev/null; then
+                git show "${sha}:${mp}" > "host/${mp}"
+                git -C host add -- "$mp"
+              else
+                echo "::warning::${mp} is mirrored by the host but absent at ${sha}; left as is."
+              fi
+            done
+          fi
           git -C host -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit --quiet -m "chore(agent-layer): bump to ${sha:0:12}"
