@@ -1989,14 +1989,23 @@ planlock_fork_sandbox() {
     git init -q --bare "$t/org/Smatchet.git"
     git init -q --bare "$t/someone/Smatchet.git"
     git init -q "$t/clone"
-    git -C "$t/clone" -c user.email=t@t -c user.name=t commit -q --allow-empty -m seed
+    # The clone's own identity: lock-claim.sh's commit-tree needs one, and a CI
+    # runner has no global user.email to fall back on.
+    git -C "$t/clone" config user.email t@t
+    git -C "$t/clone" config user.name t
+    git -C "$t/clone" commit -q --allow-empty -m seed
     git -C "$t/clone" remote add origin "$t/someone/Smatchet.git"
     git -C "$t/clone" remote add upstream "$t/org/Smatchet.git"
     printf 'docs/plans/INDEX.md\n' > "$t/ws"
     (cd "$t/clone" && unset SMATCHET_LOCK_BACKEND SMATCHET_AGENT_VCS \
         && LOCK_REMOTE=upstream LOCK_BRANCH=claude/other-branch AGENT_ID=bats \
            SMATCHET_LOCK_BYPASS_REPO_CHECK=1 bash "$SCRIPTS_DIR/lock-claim.sh" live-lock "$t/ws") >/dev/null 2>&1
-    [ -n "$(git -C "$t/org/Smatchet.git" for-each-ref refs/locks/live-lock)" ]
+    # Fail here, by name: a lock that never landed would otherwise surface later
+    # as an unrelated "stale red" refusal.
+    [ -n "$(git -C "$t/org/Smatchet.git" for-each-ref refs/locks/live-lock)" ] || {
+        echo "planlock_fork_sandbox: lock-claim.sh landed no refs/locks/live-lock on the base repo" >&2
+        return 1
+    }
     printf '%s' "$t/clone"
 }
 
