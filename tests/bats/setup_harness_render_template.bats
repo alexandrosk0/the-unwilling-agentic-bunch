@@ -125,6 +125,43 @@ run_cursor_setup() {
     [[ "$output" == *"still-running"* ]]
 }
 
+@test "render_template: never writes through a symlink in the destination's place" {
+    printf 'p `{{AGENT_LAYER}}agents/`\n' > "$TMP_TREE/t.mdc"
+    mkdir -p "$TMP_TREE/out"
+    # A live link to a file that matches a superseded sha256: an upgrade would
+    # overwrite the link's target.
+    printf 'shared rule\n' > "$TMP_TREE/target.mdc"
+    ln -s "$TMP_TREE/target.mdc" "$TMP_TREE/out/r.mdc"
+    run render_template "$TMP_TREE/t.mdc" "$TMP_TREE/out/r.mdc" "" "$(file_sha256 "$TMP_TREE/target.mdc")"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skip-copy"*"symlink"* ]]
+    [ "$(cat "$TMP_TREE/target.mdc")" = "shared rule" ]
+    # A dangling link: a first render would create the file it names.
+    ln -s "$TMP_TREE/ghost.mdc" "$TMP_TREE/out/d.mdc"
+    run render_template "$TMP_TREE/t.mdc" "$TMP_TREE/out/d.mdc" ""
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skip-copy"* ]]
+    [ ! -e "$TMP_TREE/ghost.mdc" ]
+}
+
+@test "render_template: a symlinked stamp is neither written through nor trusted" {
+    printf 'p `{{AGENT_LAYER}}agents/`\n' > "$TMP_TREE/t.mdc"
+    mkdir -p "$TMP_TREE/out"
+    printf 'keep\n' > "$TMP_TREE/victim"
+    ln -s "$TMP_TREE/victim" "$TMP_TREE/out/.r.mdc.sha256"
+    run render_template "$TMP_TREE/t.mdc" "$TMP_TREE/out/r.mdc" ""
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"render"* ]]
+    [ "$(cat "$TMP_TREE/victim")" = "keep" ]
+    # A link that names a file holding the destination's own sha256 does not
+    # make a local edit look like setup's own rendering.
+    printf 'my edit\n' > "$TMP_TREE/out/r.mdc"
+    file_sha256 "$TMP_TREE/out/r.mdc" > "$TMP_TREE/victim"
+    run render_template "$TMP_TREE/t.mdc" "$TMP_TREE/out/r.mdc" ""
+    [[ "$output" == *"user-modified"* ]]
+    [ "$(cat "$TMP_TREE/out/r.mdc")" = "my edit" ]
+}
+
 @test "setup-harness cursor: a standalone layer gets layer-root paths that resolve" {
     # A minimal standalone layer: the script and what setup_cursor reads, plus the
     # directories the rule names. No project-config.sh beside the script, so both

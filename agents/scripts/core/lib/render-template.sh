@@ -76,14 +76,32 @@ _rt_stamp_path() {
     printf '%s/.%s.sha256' "$(dirname "$1")" "$(basename "$1")"
 }
 
+# _rt_writable <path> — succeed when <path> is absent or a regular file that is
+# not a symlink. A symlink (dangling or not) or any other file type is never
+# written through: the write would land on whatever the link names.
+_rt_writable() {
+    [ -L "$1" ] && return 1
+    [ -e "$1" ] && [ ! -f "$1" ] && return 1
+    return 0
+}
+
+# _rt_write_stamp <dst> <stamp> — record <dst>'s sha256 in <stamp>; a stamp
+# path that _rt_writable refuses is left alone, which only costs the next run
+# its stamp-based upgrade.
+_rt_write_stamp() {
+    _rt_writable "$2" || return 0
+    file_sha256 "$1" > "$2"
+}
+
 # render_template <src> <dst> <prefix> [superseded-sha256 ...]
 # Write <src> to <dst> with every {{AGENT_LAYER}} replaced by <prefix>, and
 # stamp the sha256 of what was written.
 # copy_template's never-clobber contract holds: an existing <dst> that differs
-# from the rendering is a local edit and is left alone. It is not a local edit,
-# and is upgraded, when it still matches the stamp (this script wrote it and
-# nobody changed it since) or a listed sha256 (a copy of a template version
-# shipped before rendering and stamping existed).
+# from the rendering is a local edit and is left alone, and a symlink or other
+# non-regular file in <dst>'s place is never written through. <dst> is not a
+# local edit, and is upgraded, when it still matches the stamp (this script
+# wrote it and nobody changed it since) or a listed sha256 (a copy of a
+# template version shipped before rendering and stamping existed).
 render_template() {
     local src="$1" dst="$2" prefix="$3" rendered stamp sha known legacy
     shift 3
@@ -91,19 +109,19 @@ render_template() {
     rendered="$(render_placeholder "$rendered" '{{AGENT_LAYER}}' "$prefix")"
     stamp="$(_rt_stamp_path "$dst")"
     mkdir -p "$(dirname "$dst")"
-    if [ -e "$dst" ] && [ ! -f "$dst" ]; then
-        echo "  skip-copy  $dst (exists but is not a regular file)"
+    if ! _rt_writable "$dst"; then
+        echo "  skip-copy  $dst (a symlink or not a regular file — not writing through it)"
         return 0
     fi
     if [ -f "$dst" ]; then
         if [ "$(cat "$dst")" = "$rendered" ]; then
-            [ -f "$stamp" ] || file_sha256 "$dst" > "$stamp"
+            [ -f "$stamp" ] || _rt_write_stamp "$dst" "$stamp"
             return 0
         fi
         sha="$(file_sha256 "$dst")"
         known=""
         if [ -n "$sha" ]; then
-            if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$sha" ]; then
+            if [ -f "$stamp" ] && [ ! -L "$stamp" ] && [ "$(cat "$stamp")" = "$sha" ]; then
                 known="stamp"
             else
                 for legacy in "$@"; do
@@ -118,11 +136,11 @@ render_template() {
             return 0
         fi
         printf '%s\n' "$rendered" > "$dst"
-        file_sha256 "$dst" > "$stamp"
+        _rt_write_stamp "$dst" "$stamp"
         echo "  upgrade    $dst (unmodified since setup wrote it)"
         return 0
     fi
     printf '%s\n' "$rendered" > "$dst"
-    file_sha256 "$dst" > "$stamp"
+    _rt_write_stamp "$dst" "$stamp"
     echo "  render     $dst"
 }
