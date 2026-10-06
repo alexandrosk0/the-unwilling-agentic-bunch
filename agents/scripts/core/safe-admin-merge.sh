@@ -284,7 +284,7 @@ evaluate_rollup() {
         # Label OR PR-body marker — same predicate as merge-gates.d/10-gate-filter.sh
         # ($crdisposition). Body-only waivers (documented in merge-gates.md) must
         # not leave safe-admin-merge blocking CR findings* forever.
-        | (($labels | any(startswith("cr-disposition:") and length > 15))
+        | (($labels | any(test("^cr-disposition:[^[:space:]<]")))
            or ((.body // "") | test("cr-disposition:[[:space:]]*[^[:space:]<]"; "i"))) as $crDisp
         | (sam_latest) as $latest
         # Resolve each deduped rollup row to a (name, green?) pair; bind as $rows so
@@ -471,7 +471,7 @@ downgraded_red_checks() {
         | ($labels | any(. == "intent-out-of-band")) as $intentOob
         | ($labels | any(. == "plan-lock-out-of-band")) as $planlockOob
         | ($labels | any(. == "cr-out-of-band")) as $crOob
-        | (($labels | any(startswith("cr-disposition:") and length > 15))
+        | (($labels | any(test("^cr-disposition:[^[:space:]<]")))
            or ((.body // "") | test("cr-disposition:[[:space:]]*[^[:space:]<]"; "i"))) as $crDisp
         | (sam_latest) as $latest
         | $latest[]

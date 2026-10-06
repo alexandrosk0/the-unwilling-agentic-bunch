@@ -105,6 +105,9 @@ MODE = sys.argv[1]
 # CRLF block. Write what the files are: UTF-8 with LF.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+else:  # Python < 3.7 has no reconfigure(); wrap the byte stream instead.
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n")
 
 # Markdown inline links: [text](target) and the CommonMark titled form
 # [text](target "Title"). The title is captured separately and preserved

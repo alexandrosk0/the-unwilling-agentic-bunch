@@ -93,7 +93,7 @@ _require_review_proof() {
     fi
     # The same tree view pre-ship.sh fingerprints (untracked files included), or a
     # pre-ship-made ack over a diff with a new, never-added file could never match.
-    ra_ita_untracked quiet
+    ra_ita_untracked quiet || return 2
     ra_is_substantive branch "$base_ref" || return 0
     local reason="$RA_SUBSTANTIVE_REASON" want_fp have_fp findings_fp
     want_fp="$(ra_fingerprint branch "$base_ref")"
@@ -343,7 +343,7 @@ run_selftest() {
         printf 'int untracked_fn() { return 2; }\n' > Source/Core/src/Sync/Untracked.cpp
         # shellcheck source=agents/scripts/core/lib/review-ack.sh
         . "$REVIEW_ACK_LIB"
-        ra_ita_untracked quiet
+        ra_ita_untracked quiet || exit 1
         ra_fingerprint branch base
     )" || {
         rm -rf "$tmpd" "$tmp2"

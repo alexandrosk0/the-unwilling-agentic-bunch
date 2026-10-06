@@ -71,9 +71,11 @@ _MG_GATE_FILTER_TEMPLATE='
 # cr-out-of-band downgrade): it proves the operator consciously waived CR review
 # with a recorded reason rather than reflexively slapping a generic override on.
 # Body match: `cr-disposition:` followed by any non-empty reason on the line
-# (regex tolerates leading whitespace / list markers). (NB: no apostrophes in
-# this single-quoted jq filter string.)
-| (($labels | any(startswith("cr-disposition:") and length > 15))
+# (regex tolerates leading whitespace / list markers). Label and body take the same
+# reason rule: it must not be blank or start with `<`, so the playbook placeholder
+# `cr-disposition:<reason>` is not an attestation in either place. (NB: no
+# apostrophes in this single-quoted jq filter string.)
+| (($labels | any(test("^cr-disposition:[^[:space:]<]")))
    or (($pr.body // "") | test("cr-disposition:[[:space:]]*[^[:space:]<]"; "i"))) as $crdisposition
 | ($labels | any(. == "bugbot-out-of-band")) as $bb
 # Dedup key is (check-suite createdAt, startedAt), NOT startedAt alone. A rerun

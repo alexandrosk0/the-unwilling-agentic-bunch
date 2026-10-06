@@ -465,14 +465,43 @@ _cr_installed() { # _cr_installed [env assignments...] — detect_cr_installed's
     [ "$output" = "true" ]
 }
 
-@test "the poller and safe-admin-merge share the CR finding gate's disposition predicate" {
-    # One attestation rule across the layers: a label `cr-disposition:<x>` with a non-empty suffix, or
-    # a body marker whose reason does not start with `<` (the playbook placeholder is not a reason).
-    local root re
+# _cr_waiver_blockers <labels-json-array> <body> — the blockers evaluate_rollup reports for a
+# red CR finding gate under that waiver. Empty output means the waiver was honoured.
+_cr_waiver_blockers() {
+    local rollup
+    rollup="$(jq -nc --argjson labels "$1" --arg body "$2" '{state: "OPEN", body: $body,
+        labels: ($labels | map({name: .})),
+        statusCheckRollup: [{__typename: "StatusContext", context: "CR findings (2 actionable)", state: "FAILURE"}]}')"
+    bash -c '. "$SCRIPT" >/dev/null 2>&1; evaluate_rollup "$1" ""' _ "$rollup"
+}
+
+@test "a cr-disposition reason must not be blank or the playbook placeholder, as label or body" {
+    # A real reason honours the waiver, whether it is a label or a PR-body marker.
+    run _cr_waiver_blockers '["cr-out-of-band","cr-disposition:rate-limit-acked"]' ''
+    [ "$status" -eq 0 ] && [ -z "$output" ]
+    run _cr_waiver_blockers '["cr-out-of-band"]' $'Waiver.\ncr-disposition: rate-limit-acked\n'
+    [ "$status" -eq 0 ] && [ -z "$output" ]
+    # The placeholder, a blank suffix or a bare prefix does not.
+    local label
+    for label in 'cr-disposition:<reason>' 'cr-disposition: ' 'cr-disposition:'; do
+        run _cr_waiver_blockers "[\"cr-out-of-band\",\"$label\"]" ''
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"CR findings"* ]] || { echo "label '$label' was honoured" >&2; return 1; }
+    done
+    run _cr_waiver_blockers '["cr-out-of-band"]' $'Use cr-disposition:<reason> to waive.\n'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CR findings"* ]]
+}
+
+@test "the poller takes the same cr-disposition predicate as safe-admin-merge" {
+    # The poller's filter is one jq program inside the merge-gates pipeline, so it is pinned to
+    # the exact predicate text the behavioural test above exercises through safe-admin-merge.
+    local root label body
     root="$(git rev-parse --show-toplevel)"
-    re='cr-disposition:[[:space:]]*[^[:space:]<]'
-    grep -qF "$re" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
-    [ "$(grep -cF "$re" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 2 ]
-    ! grep -qF 'cr-disposition:[[:space:]]*[^[:space:]]"' "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
-    grep -qF 'any(startswith("cr-disposition:") and length > 15)' "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
+    label='any(test("^cr-disposition:[^[:space:]<]"))'
+    body='test("cr-disposition:[[:space:]]*[^[:space:]<]"; "i")'
+    grep -qF "$label" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
+    grep -qF "$body" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
+    [ "$(grep -cF "$label" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 2 ]
+    [ "$(grep -cF "$body" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 2 ]
 }
