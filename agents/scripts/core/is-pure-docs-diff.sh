@@ -46,11 +46,14 @@ fi
 
 # Allow-list as ERE — line must match one of:
 #   docs/...    backlog/...    agents/scripts/...    any path ending in .md
+#   agent-layer   .gitmodules   (a pointer-only bump of the agent layer mount;
+#                                 both anchored, so agent-layer-notes.txt is not)
 # Any `*.md` (at any depth) is documentation — never compiled — so it can never
 # require a C++ build. This deliberately covers the Source/Core/src/<ctx>/ leaf
 # docs and root CONTEXT-MAP.md; the old root-uppercase-only restriction predated
-# docs living under Source/.
-allow='^(docs/|backlog/|agents/scripts/|.*\.md$)'
+# docs living under Source/. A bump of the agent-layer gitlink skips the build,
+# never the gates: agent-layer-integration.yml still binds on it.
+allow='^(docs/|backlog/|agents/scripts/|agent-layer$|\.gitmodules$|.*\.md$)'
 
 if printf '%s\n' "$files" | grep -qvE -- "$allow"; then
     exit 1
