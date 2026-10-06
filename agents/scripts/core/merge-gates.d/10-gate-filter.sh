@@ -73,8 +73,8 @@ _MG_GATE_FILTER_TEMPLATE='
 # Body match: `cr-disposition:` followed by any non-empty reason on the line
 # (regex tolerates leading whitespace / list markers). (NB: no apostrophes in
 # this single-quoted jq filter string.)
-| (($labels | any(startswith("cr-disposition:")))
-   or (($pr.body // "") | test("cr-disposition:[[:space:]]*[^[:space:]]"; "i"))) as $crdisposition
+| (($labels | any(startswith("cr-disposition:") and length > 15))
+   or (($pr.body // "") | test("cr-disposition:[[:space:]]*[^[:space:]<]"; "i"))) as $crdisposition
 | ($labels | any(. == "bugbot-out-of-band")) as $bb
 # Dedup key is (check-suite createdAt, startedAt), NOT startedAt alone. A rerun
 # stays in one check suite, so old-FAILURE/new-SUCCESS ties on the first key and

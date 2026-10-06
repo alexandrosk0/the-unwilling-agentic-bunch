@@ -452,7 +452,27 @@ _cr_installed() { # _cr_installed [env assignments...] — detect_cr_installed's
     mkdir -p "$empty"
     run _cr_installed SMATCHET_PROJECT_ROOT_OVERRIDE=1 PROJECT_ROOT="$empty"
     [ "$output" = "true" ]
-    # Without the override the foreign root is not taken at all: the real host answers.
-    run _cr_installed PROJECT_ROOT="$empty"
+}
+
+@test "cr-installed: without the override a caller's PROJECT_ROOT is not taken" {
+    # The host-shaped root with no CodeRabbit config answers "false" when it IS taken (two
+    # tests up), so "true" here can only come from the real host answering instead. -u keeps
+    # an override exported by test-all.sh for layer bats suites from leaking in.
+    local host="$STUB_BIN_DIR/host"
+    mkdir -p "$host"
+    printf '{}\n' > "$host/project.config.json"
+    run _cr_installed -u SMATCHET_PROJECT_ROOT_OVERRIDE PROJECT_ROOT="$host"
     [ "$output" = "true" ]
+}
+
+@test "the poller and safe-admin-merge share the CR finding gate's disposition predicate" {
+    # One attestation rule across the layers: a label `cr-disposition:<x>` with a non-empty suffix, or
+    # a body marker whose reason does not start with `<` (the playbook placeholder is not a reason).
+    local root re
+    root="$(git rev-parse --show-toplevel)"
+    re='cr-disposition:[[:space:]]*[^[:space:]<]'
+    grep -qF "$re" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
+    [ "$(grep -cF "$re" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 2 ]
+    ! grep -qF 'cr-disposition:[[:space:]]*[^[:space:]]"' "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
+    grep -qF 'any(startswith("cr-disposition:") and length > 15)' "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
 }

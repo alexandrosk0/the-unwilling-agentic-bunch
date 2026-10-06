@@ -46,6 +46,12 @@
 #                         MCP `list_pull_requests(base=develop, state=closed)`
 #                         filtered on a non-null merged_at.
 #   --against <ref>       tree to enumerate (default origin/develop).
+#   --merge-oids <file>   "<pr> <sha>" lines: GitHub's merge-commit oid per PR
+#                         (MCP `merge_commit_sha`). Resolves a PR the scrape
+#                         misses that is NOT a `Merge pull request #N` commit —
+#                         a squash whose subject was edited to drop `(#N)`, or a
+#                         PR merged into another PR's branch. With gh present it
+#                         is fetched per missed PR instead (`mergeCommit.oid`).
 #
 # OUTPUT (stdout) — a JSON array of units, ready for the sweep workflow's args:
 #   [{"pr":1883,"sha":"e5aa8d11","note":"merge-PR constituent 1/2"}, ...]
@@ -70,7 +76,7 @@ cd "$(git rev-parse --show-toplevel)" || exit 2
 . "$(dirname "$0")/lib/resolve-py.sh"
 
 MODE="range"
-LO=""; HI=""; MERGED_LIST=""; AGAINST="origin/develop"; JSON_OUT=0
+LO=""; HI=""; MERGED_LIST=""; MERGE_OIDS=""; AGAINST="origin/develop"; JSON_OUT=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --json) JSON_OUT=1; shift ;;
@@ -85,7 +91,9 @@ while [ $# -gt 0 ]; do
         --against) AGAINST="${2:-}"; shift 2 ;;
         --against=*) AGAINST="${1#*=}"; shift ;;
         --selftest) MODE="selftest"; shift ;;
-        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+        --merge-oids) MERGE_OIDS="${2:-}"; shift 2 ;;
+        --merge-oids=*) MERGE_OIDS="${1#*=}"; shift ;;
+        -h|--help) sed -n '2,52p' "$0"; exit 0 ;;
         *) echo "historical-review-worklist: unknown arg $1" >&2; exit 2 ;;
     esac
 done
@@ -116,6 +124,16 @@ merge_commit_for() {
               s=$0; sub(/^[^|]*\|/,"",s)
               if (s ~ ("^Merge pull request #" pr "( |$)")) { print $1; exit }
           }'
+}
+
+# merge_oid_for <pr> — GitHub's merge-commit oid for <pr>: from --merge-oids
+# when given, else gh. Empty when neither knows it.
+merge_oid_for() {
+    if [ -n "$MERGE_OIDS" ]; then
+        awk -v pr="$1" '$1 == pr { print $2; exit }' "$MERGE_OIDS"
+    elif command -v gh >/dev/null 2>&1; then
+        gh pr view "$1" --json mergeCommit --jq '.mergeCommit.oid // empty' 2>/dev/null
+    fi
 }
 
 # constituents_of <sha> — non-merge commits unique to a merge commit's topic side.
@@ -178,8 +196,27 @@ EOF
         echo "  (stale authority, or an edited squash subject — verify before trusting this batch's coverage)" >&2
     fi
 
-    UNITS=""; RESOLVED=0; UNRESOLVED=""
-    emit() { UNITS="${UNITS}${UNITS:+$'\n'}$1 $2 $3"; RESOLVED=$((RESOLVED+1)); }
+    UNITS=""; RESOLVED=0; UNRESOLVED=""; SHARED=""
+    # A sha already emitted under another PR (a PR merged into a sibling PR's
+    # branch, whose commits that sibling's merge also carries) is not reviewed
+    # twice: the PR counts as covered through the shared unit.
+    emit() {
+        if printf '%s\n' "$UNITS" | awk -v s="$2" '$2 == s { f=1 } END { exit !f }'; then
+            SHARED="${SHARED}${SHARED:+ }$1"; return
+        fi
+        UNITS="${UNITS}${UNITS:+$'\n'}$1 $2 $3"; RESOLVED=$((RESOLVED+1))
+    }
+    emit_merge() {
+        local pr="$1" mc="$2" idx=0 total c
+        total=$(constituents_of "$mc" | wc -l)
+        if [ "$total" -eq 0 ]; then
+            UNRESOLVED="${UNRESOLVED}${UNRESOLVED:+ }#$pr(no-constituents)"; return
+        fi
+        while read -r c; do
+            [ -n "$c" ] || continue
+            idx=$((idx+1)); emit "$pr" "$c" "merge-PR constituent $idx/$total"
+        done < <(constituents_of "$mc")
+    }
 
     while read -r pr sha; do
         [ -n "$pr" ] || continue
@@ -196,27 +233,33 @@ EOF
     done < "$CAND_FILE"
 
     # Repair the misses the scrape structurally cannot see.
+    # `Merge pull request #N` repairs first, so a PR merged INTO a sibling's
+    # branch resolves to the sibling's units as shared coverage.
+    OID_MISSES=""
     for pr in $MISSING; do
         mc="$(merge_commit_for "$pr" "$AGAINST")"
-        if [ -z "$mc" ]; then
+        if [ -n "$mc" ]; then emit_merge "$pr" "$mc"; else OID_MISSES="$OID_MISSES $pr"; fi
+    done
+    # Then GitHub's own merge-commit oid: a squash whose subject was edited to
+    # drop `(#N)`, or a merge commit inside another PR's branch.
+    for pr in $OID_MISSES; do
+        oid="$(merge_oid_for "$pr")"
+        if [ -z "$oid" ] || ! git merge-base --is-ancestor "$oid" "$AGAINST" 2>/dev/null; then
             UNRESOLVED="${UNRESOLVED}${UNRESOLVED:+ }#$pr"
             continue
         fi
-        total=$(constituents_of "$mc" | wc -l)
-        if [ "$total" -eq 0 ]; then
-            UNRESOLVED="${UNRESOLVED}${UNRESOLVED:+ }#$pr(no-constituents)"
-            continue
+        if is_merge_commit "$oid"; then
+            emit_merge "$pr" "$oid"
+        else
+            emit "$pr" "$(git log -1 --format=%h "$oid")" "squash, subject lacks (#$pr)"
         fi
-        idx=0
-        while read -r c; do
-            [ -n "$c" ] || continue
-            idx=$((idx+1)); emit "$pr" "$c" "merge-PR constituent $idx/$total"
-        done < <(constituents_of "$mc")
     done
 
     AUTH_N=$(wc -l < "$AUTH_FILE" | tr -d ' ')
     SCRAPE_N=$(wc -l < "$SCRAPE_NUMS" | tr -d ' ')
-    COVERED=$(printf '%s\n' "$UNITS" | awk 'NF{print $1}' | sort -u | wc -l | tr -d ' ')
+    # shellcheck disable=SC2086  # SHARED is a space-separated PR list
+    COVERED=$( { printf '%s\n' "$UNITS" | awk 'NF{print $1}'; printf '%s\n' $SHARED; } \
+               | awk 'NF' | sort -u | wc -l | tr -d ' ')
 
     {
         echo "historical-review-worklist: range [$LO,$HI] against $AGAINST (authority: $AUTH_SRC)"
@@ -227,6 +270,8 @@ EOF
         else
             echo "  scrape MISSED            : none"
         fi
+        # shellcheck disable=SC2086
+        [ -z "$SHARED" ] || echo "  covered via a shared unit: $(printf '%s\n' $SHARED | sort -n -u | tr '\n' ' ')"
         echo "  coverage                 : $COVERED/$AUTH_N PRs -> $RESOLVED review unit(s)"
     } >&2
 
@@ -361,14 +406,58 @@ repoC="$(mktemp -d)"
     cp "$self" agents/scripts/core/historical-review-worklist.sh
     cp "$(dirname "$self")/lib/resolve-py.sh" agents/scripts/core/lib/resolve-py.sh
     echo a > a.txt && git add -A && git commit -qm "feat: thing (#100)"
-    printf '100\n102\n' > /tmp/authC.$$
+    printf '100\n102\n' > /tmp/authC.$$; : > /tmp/oidsC.$$
     bash agents/scripts/core/historical-review-worklist.sh \
-        --range 100 102 --merged-list /tmp/authC.$$ --against develop >/dev/null 2>/tmp/errC.$$
-    rc=$?; err="$(cat /tmp/errC.$$)"; rm -f /tmp/authC.$$ /tmp/errC.$$
+        --range 100 102 --merged-list /tmp/authC.$$ --merge-oids /tmp/oidsC.$$ \
+        --against develop >/dev/null 2>/tmp/errC.$$
+    rc=$?; err="$(cat /tmp/errC.$$)"; rm -f /tmp/authC.$$ /tmp/oidsC.$$ /tmp/errC.$$
     [ "$rc" = "2" ] || { echo "FAIL(C): unresolvable PR exit $rc, want 2"; exit 1; }
     case "$err" in *"no resolvable commit"*) ;; *) echo "FAIL(C): missing loud message; stderr: $err"; exit 1 ;; esac
 ) || fail=1
 rm -rf "$repoC"
 
-if [ "$fail" = "0" ]; then echo "historical-review-worklist --selftest: PASS (3 e2e fixtures)"; exit 0; fi
+# Fixture D — a PR the scrape misses that is NOT a `Merge pull request #N`
+# commit: a squash whose subject was edited to drop `(#N)` (#2233/#2235/#2236),
+# and a PR merged into a sibling PR's branch (#2198 inside #2207). Both must
+# resolve through GitHub's merge-commit oid, and the nested one must count as
+# covered via the sibling's units instead of being reviewed twice.
+repoD="$(mktemp -d)"
+(
+    cd "$repoD" || exit 99
+    git init -q -b develop && git config user.email t@t && git config user.name t
+    mkdir -p agents/scripts/core/lib
+    cp "$self" agents/scripts/core/historical-review-worklist.sh
+    cp "$(dirname "$self")/lib/resolve-py.sh" agents/scripts/core/lib/resolve-py.sh
+    echo a > a.txt && git add -A && git commit -qm "feat: thing (#100)"
+    echo b > b.txt && git add -A && git commit -qm "Fix: an edited squash subject"
+    squash="$(git rev-parse HEAD)"
+    git checkout -q -b inner
+    echo c > c.txt && git add -A && git commit -qm "inner work"
+    git checkout -q -b outer develop
+    echo d > d.txt && git add -A && git commit -qm "outer work"
+    git merge -q --no-ff inner -m "Merge remote-tracking branch 'origin/inner' into outer"
+    nested="$(git rev-parse HEAD)"
+    git checkout -q develop
+    git merge -q --no-ff outer -m "Merge pull request #105 from o/outer"
+    printf '100\n103\n104\n105\n' > /tmp/authD.$$
+    printf '103 %s\n104 %s\n' "$squash" "$nested" > /tmp/oidsD.$$
+    out="$(bash agents/scripts/core/historical-review-worklist.sh --json --range 100 105 \
+             --merged-list /tmp/authD.$$ --merge-oids /tmp/oidsD.$$ --against develop 2>/tmp/errD.$$)"
+    rc=$?; err="$(cat /tmp/errD.$$)"; rm -f /tmp/authD.$$ /tmp/oidsD.$$ /tmp/errD.$$
+    [ "$rc" = "0" ] || { echo "FAIL(D): exit $rc, want 0; stderr: $err"; exit 1; }
+    case "$err" in *"covered via a shared unit: 104"*) ;; *) echo "FAIL(D): #104 not reported as shared coverage; stderr: $err"; exit 1 ;; esac
+    PYQ="$(resolve_py)" || { echo "FAIL(D): no python for --json assertion"; exit 1; }
+    printf '%s\n' "$out" | "$PYQ" -c '
+import json, sys
+obj = json.loads(sys.stdin.readline())
+assert obj["coverage"]["covered"] == 4 and obj["coverage"]["units"] == 4, obj["coverage"]
+notes = {u["pr"]: u.get("note", "") for u in obj["units"]}
+assert notes.get(103) == "squash, subject lacks (#103)", notes
+assert 104 not in notes, "nested PR re-emitted its sibling units: %r" % notes
+assert sum(1 for u in obj["units"] if u["pr"] == 105) == 2, obj["units"]
+' || { echo "FAIL(D): oid-resolved units wrong: $out"; exit 1; }
+) || fail=1
+rm -rf "$repoD"
+
+if [ "$fail" = "0" ]; then echo "historical-review-worklist --selftest: PASS (4 e2e fixtures)"; exit 0; fi
 echo "historical-review-worklist --selftest: FAIL"; exit 1

@@ -100,6 +100,12 @@ import os, posixpath, re, sys
 
 MODE = sys.argv[1]
 
+# A Windows pipe defaults to the ANSI code page and CRLF, so an em dash in an
+# entry body would land in applied.md as a cp1252 byte (invalid UTF-8) inside a
+# CRLF block. Write what the files are: UTF-8 with LF.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+
 # Markdown inline links: [text](target) and the CommonMark titled form
 # [text](target "Title"). The title is captured separately and preserved
 # verbatim — matching only `([^)\s]+)\)` silently SKIPS every titled link, which

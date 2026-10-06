@@ -85,6 +85,34 @@ ra_marker_path() {
     printf '%s\n' "$root/.review-ack"
 }
 
+# ra_ita_untracked [quiet] — register untracked files with `git add --intent-to-add`.
+#
+# Untracked files are INVISIBLE to every git-diff- and git-grep-based gate
+# (`git diff <base>` skips them; `git grep` scans tracked only). Running pre-ship
+# before the first `git add` therefore false-passed comment-noise and
+# plan-ref-integrity on brand-new files (PR #953 — two CI-only failures). Intent-
+# to-add registers them in the index (content stays unstaged) so the gates see
+# exactly what CI will see — and so `ra_fingerprint` covers a brand-new .cpp
+# instead of stamping a diff that silently omits it. Every script that computes or
+# checks a fingerprint calls it first (pre-ship.sh, record-review-verdict.sh), so
+# they all fingerprint the same tree view. Run it from the work-tree top.
+# `quiet` suppresses the stdout note so --review-fingerprint stays machine-readable.
+# Sets an EXIT trap (replacing the caller's) that undoes the registrations.
+ra_ita_untracked() {
+    local quiet="${1:-}"
+    local untracked=()
+    mapfile -t untracked < <(git ls-files --others --exclude-standard)
+    [ "${#untracked[@]}" -gt 0 ] || return 0
+    [ "$quiet" = "quiet" ] ||
+        echo "pre-ship: git add --intent-to-add ${#untracked[@]} untracked file(s) so gates can see them"
+    git add --intent-to-add -- "${untracked[@]}"
+    # Undo the ita registrations on EVERY exit (pass or fail) — leaving them
+    # would make scratch files commit-eligible via a later `git commit -a` and
+    # flip their `git status` bucket from untracked to modified (CR-964 review).
+    # shellcheck disable=SC2064  # expand ${untracked[@]} NOW, not at trap time
+    trap "git restore --staged -- $(printf '%q ' "${untracked[@]}") 2>/dev/null || true" EXIT
+}
+
 # Resolve a WORKING python interpreter (empty + rc 1 if none). `command -v python3`
 # alone is insufficient on Windows: the python3 "App Execution Alias" stub passes
 # `command -v` but exits 49 ("Python was not found") when actually run — so probe

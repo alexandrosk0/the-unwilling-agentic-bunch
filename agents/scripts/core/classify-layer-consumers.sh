@@ -101,10 +101,12 @@ def hits(text, pats):
     return sorted(found)
 
 rows = []
-for path in sorted(glob.glob("agents/scripts/core/*.sh")
-                   + glob.glob("agents/scripts/core/lib/*.sh")
-                   + glob.glob("agents/scripts/project/*.sh")):
-    path = path.replace(os.sep, "/")
+# Normalise separators BEFORE sorting: a native Windows python globs "core\\x.sh", and "\\"
+# sorts after "/", which would reorder every row against the POSIX-ordered baseline.
+paths = [p.replace(os.sep, "/") for p in glob.glob("agents/scripts/core/*.sh")
+         + glob.glob("agents/scripts/core/lib/*.sh")
+         + glob.glob("agents/scripts/project/*.sh")]
+for path in sorted(paths):
     with io.open(path, "r", encoding="utf-8", errors="replace") as fh:
         text = fh.read()
     h = hits(text, HOST) + hits(text, HOST_VARS)
@@ -122,6 +124,8 @@ for path in sorted(glob.glob("agents/scripts/core/*.sh")
 sys.stdout.write("\n".join(rows) + "\n")
 PY
 )" || { echo "classify-layer-consumers: classification failed" >&2; exit 2; }
+# A native Windows python writes CRLF; strip it so --check compares and --regen writes LF.
+current="${current//$'\r'/}"
 
 if [ "$mode" = "regen" ]; then
   mkdir -p "$(dirname "$BASELINE")"
