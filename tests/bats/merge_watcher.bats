@@ -2647,7 +2647,9 @@ print('ok')
 
 @test "cr-none-grace pure-docs: detector allow-list parity with is-pure-docs-diff.sh" {
     # _PURE_DOCS_ALLOW must accept exactly the four classes is-pure-docs-diff.sh
-    # accepts (docs/, backlog/, agents/scripts/, any *.md) and reject the rest.
+    # accepts (docs/, backlog/, agents/scripts/, any *.md) and reject the rest,
+    # including the agent-layer gitlink and .gitmodules: the script accepts those
+    # for the build cadence only, and a bump PR keeps the code-PR CodeRabbit wait.
     run python -c "
 import importlib.util
 spec = importlib.util.spec_from_file_location('mw', r'$SCRIPTS_DIR/merge-watcher.py')
@@ -2657,7 +2659,7 @@ for p in ['docs/x.md','backlog/2026/p1.md','agents/scripts/core/x.sh','README.md
           'Source/Core/src/Grid/AGENTS.md','CONTEXT-MAP.md']:
     assert m(p), p
 for p in ['Source/Core/src/Foo.cpp','scripts/dev/build.sh','.github/workflows/ci.yml',
-          'docs.md.cpp','mydocs/x.txt']:
+          'docs.md.cpp','mydocs/x.txt','agent-layer','.gitmodules']:
     assert not m(p), p
 print('ok')
 "

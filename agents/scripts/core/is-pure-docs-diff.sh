@@ -52,7 +52,10 @@ fi
 # require a C++ build. This deliberately covers the Source/Core/src/<ctx>/ leaf
 # docs and root CONTEXT-MAP.md; the old root-uppercase-only restriction predated
 # docs living under Source/. A bump of the agent-layer gitlink skips the build,
-# never the gates: agent-layer-integration.yml still binds on it.
+# never the gates: agent-layer-integration.yml still binds on it. The poller's and
+# the watcher's copies of this list deliberately omit agent-layer and .gitmodules,
+# so CodeRabbit gating still treats a bump PR as code (merge-gates.md § Bump-PR
+# gate profile).
 allow='^(docs/|backlog/|agents/scripts/|agent-layer$|\.gitmodules$|.*\.md$)'
 
 if printf '%s\n' "$files" | grep -qvE -- "$allow"; then

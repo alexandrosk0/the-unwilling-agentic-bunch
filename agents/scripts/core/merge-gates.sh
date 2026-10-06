@@ -633,8 +633,9 @@ poll_merge_gates() {
     # cursor[bot] inline-finding review threads — Bugbot gate #4) · 26 bbOob
     # (bugbot-out-of-band label) · 27 selfImpOnly (bool: PR diff entirely under
     # docs/self-improvement/** → auto-skip CR + Bugbot gates) ·
-    # 28 pureDocs (bool: PR diff strictly within the is-pure-docs-diff.sh
-    # allow-list — docs/ / backlog/ / agents/scripts/ / *.md) ·
+    # 28 pureDocs (bool: PR diff strictly within the poller's pure-docs
+    # allow-list — docs/ / backlog/ / agents/scripts/ / *.md; the agent-layer
+    # gitlink and .gitmodules are deliberately code) ·
     # 29 crRateLimited (bool: CR posted a rate-limit signal on a comment OR the
     # CodeRabbit StatusContext description — a TEMPORARY skip, not a terminal pass) ·
     # 30 crDisposition (bool: a `cr-disposition:`-prefixed label is present OR a
@@ -926,9 +927,9 @@ poll_merge_gates() {
         # path-ignore (docs/agent-rules/merge-gates.md § Bugbot gate).
         local self_imp_only="${fields[27]:-false}"
 
-        # pure_docs — true iff the PR diff is strictly within the
-        # is-pure-docs-diff.sh allow-list (docs/ / backlog/ / agents/scripts/ /
-        # *.md). Field 28. Drives the rate-limit auto-downgrade (deliverable 1):
+        # pure_docs — true iff the PR diff is strictly within the poller's
+        # pure-docs allow-list (docs/ / backlog/ / agents/scripts/ / *.md; the
+        # agent-layer gitlink and .gitmodules are deliberately code). Field 28. Drives the rate-limit auto-downgrade (deliverable 1):
         # a CR rate-limit skip on a pure-docs PR is harmless to fast-pass.
         # Empty/parse-miss → false (fail-safe = NOT pure-docs → treated as code).
         local pure_docs="${fields[28]:-false}"

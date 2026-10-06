@@ -3539,6 +3539,33 @@ blocked_with_bot_threads() {
     unset MERGE_GATES_CR_INSTALLED
 }
 
+@test "CR rate-limit + gitlink-only bump PR + NO current-head CR verdict BLOCK (a bump is code to CR)" {
+    # merge-gates.md § Bump-PR gate profile: the poller's pure-docs allow-list
+    # deliberately omits the agent-layer gitlink and .gitmodules (a .gitmodules
+    # change can repoint the mount's URL), so a rate-limited CR pauses a bump PR
+    # exactly as it pauses a code PR, even though is-pure-docs-diff.sh calls the
+    # same diff docs-tier for the local build cadence.
+    local f1 f2 f3
+    f1="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.comments.nodes" \
+        '[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"body":"> Review skipped\n\nCodeRabbit hit its rate limit. Please try again later."}]')"
+    f2="$(fixture_override "$f1" \
+        "data.repository.pullRequest.files" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[{"path":"agent-layer"},{"path":".gitmodules"}]}')"
+    f3="$(fixture_override "$f2" \
+        "data.repository.pullRequest.reviews" \
+        '{"pageInfo":{"hasNextPage":false},"nodes":[]}')"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f3"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" != *"pure-docs-auto-downgrade"* ]]
+    [[ "$output" == *"CODE-PR-pause"* ]]
+    rm -f "$f1" "$f2" "$f3"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
 @test "CR rate-limit + CODE PR + current-head APPROVED verdict does NOT block (stale rate-limit ignored)" {
     # Regression for the PR-2 finding: a STALE rate-limit comment from a PRIOR
     # push must NOT override a legitimate current-head CR verdict. With an
