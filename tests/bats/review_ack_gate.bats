@@ -228,6 +228,74 @@ commit_in_fixture() {
     [ "$status" -eq 2 ]
 }
 
+# ---- enforcement-surface advisory trigger (WARN-first, process 2026-09-14) ----
+# ra_touches_enforcement_surface flags a diff to the gate/hook scripts themselves,
+# which the C++-only substantive test never sees. It is a SEPARATE glob set: the
+# staged commit gate (RA_CPP_GLOBS / ra_fingerprint) must stay N/A for it.
+
+@test "ra_touches_enforcement_surface flags a staged gate-script edit; the commit gate stays N/A" {
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$REPO_TMP/scripts/git-hooks/extra-gate.sh"
+    git -C "$REPO_TMP" add scripts/git-hooks/extra-gate.sh
+    run bash -c "cd '$REPO_TMP' && . agents/scripts/core/lib/review-ack.sh && ra_touches_enforcement_surface staged"
+    [ "$status" -eq 0 ]
+    [ "$output" = "scripts/git-hooks/extra-gate.sh" ]
+    # The fingerprint is a real sha256 that moves with the surface diff.
+    run bash -c "cd '$REPO_TMP' && . agents/scripts/core/lib/review-ack.sh && ra_enforcement_fingerprint staged"
+    [[ "$output" =~ ^[0-9a-f]{64}$ ]]
+    local fp1="$output"
+    echo "echo more" >> "$REPO_TMP/scripts/git-hooks/extra-gate.sh"
+    git -C "$REPO_TMP" add scripts/git-hooks/extra-gate.sh
+    run bash -c "cd '$REPO_TMP' && . agents/scripts/core/lib/review-ack.sh && ra_enforcement_fingerprint staged"
+    [ "$output" != "$fp1" ]
+    # Out of RA_CPP_GLOBS on purpose: the commit-time gate is unchanged (N/A).
+    run check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"N/A"* ]]
+}
+
+# CI runs the PR's own copy of the aggregate, the merge-gates poller, the project
+# lint gates, the workflows / actions, the harness guards and the gate config, so
+# an edit to any of them is a self-certifying edit and must be flagged.
+@test "ra_touches_enforcement_surface flags every self-certifying gate path" {
+    local p
+    for p in agents/scripts/core/all-checks-green.sh \
+             agents/scripts/core/merge-gates.sh \
+             agents/scripts/core/merge-gates.d/10-gate-filter.sh \
+             agents/scripts/project/test-lint-rules.sh \
+             agents/scripts/project/lint-rules.d/10-rule.sh \
+             .github/workflows/all-checks-green.yml \
+             .github/actions/cr-finding-gate/action.yml \
+             docs/harness/claude-code/hooks/guard-auto-merge-arm.sh \
+             project.config.json; do
+        git -C "$REPO_TMP" reset --quiet --hard
+        mkdir -p "$REPO_TMP/$(dirname "$p")"
+        echo "# edit" >> "$REPO_TMP/$p"
+        git -C "$REPO_TMP" add -- "$p"
+        run bash -c "cd '$REPO_TMP' && . agents/scripts/core/lib/review-ack.sh && ra_touches_enforcement_surface staged"
+        [ "$status" -eq 0 ]
+        [ "$output" = "$p" ]
+    done
+}
+
+# In a host the gates live in the agent-layer/ submodule: a host diff carries them
+# only as the gitlink, so a pointer bump is an enforcement-surface edit too.
+@test "ra_touches_enforcement_surface flags an agent-layer pointer bump" {
+    git -C "$REPO_TMP" update-index --add --cacheinfo "160000,1111111111111111111111111111111111111111,agent-layer"
+    git -C "$REPO_TMP" -c core.hooksPath=/dev/null commit --quiet -m pin
+    git -C "$REPO_TMP" update-index --cacheinfo "160000,2222222222222222222222222222222222222222,agent-layer"
+    run bash -c "cd '$REPO_TMP' && . agents/scripts/core/lib/review-ack.sh && ra_touches_enforcement_surface staged"
+    [ "$status" -eq 0 ]
+    [ "$output" = "agent-layer" ]
+}
+
+@test "ra_touches_enforcement_surface is quiet for a docs-only diff" {
+    echo note > "$REPO_TMP/docs/n.md"
+    git -C "$REPO_TMP" add docs/n.md
+    run bash -c "cd '$REPO_TMP' && . agents/scripts/core/lib/review-ack.sh && ra_touches_enforcement_surface staged"
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
 # ---- check (A): the Pillar-2 scan must not depend on a mode bit -------------
 # The hook once guarded the scan with `[[ -x ... ]]` while the scanner was
 # tracked 100644, so every Linux/macOS commit skipped it silently. Git Bash on
