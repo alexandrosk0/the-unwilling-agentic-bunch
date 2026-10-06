@@ -116,7 +116,18 @@ jobs:
           # clone can be rejected server-side. No submodule checkout needed.
           git clone --filter=blob:none --branch develop --no-tags \
             "https://github.com/${HOST_REPO}.git" host
-          pinned=$(git -C host rev-parse HEAD:agent-layer)
+          pinned=$(git -C host rev-parse HEAD:agent-layer) || {
+            echo "::error::Cannot read the host's agent-layer pin; refusing to bump."
+            exit 1
+          }
+          # Guard (iii): the host's pin is on the line being bumped. A pin outside
+          # develop's history (a WIP pin, or a rewritten develop) is a human call,
+          # never something to force-push over.
+          if ! git cat-file -e "${pinned}^{commit}" 2>/dev/null \
+              || ! git merge-base --is-ancestor "$pinned" "$sha"; then
+            echo "::error::The host pins ${pinned}, which is not an ancestor of develop's tip ${sha}; refusing to bump. Resolve the pin by hand."
+            exit 1
+          fi
           # Guard (ii): skip when the pinned tree is already this tree (a
           # revert back to the pin, say), so no empty PR is ever opened.
           if [ "$(git rev-parse "${sha}^{tree}")" = "$(git rev-parse "${pinned}^{tree}" 2>/dev/null || echo none)" ]; then

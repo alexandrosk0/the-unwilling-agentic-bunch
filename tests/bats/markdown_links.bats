@@ -253,8 +253,10 @@ _diff_scope_fixture() {
 }
 
 @test "diff scope in a standalone layer grandfathers a baselined link but FAILS a new one" {
-    # No Source/: the layer repo on its own, where links into the host cannot resolve.
+    # The layer repo on its own (its config says profile agent-layer), where links
+    # into the host cannot resolve.
     _diff_scope_fixture
+    printf '{"profile": "agent-layer"}\n' > "$FIXTURE_DIR/project.config.json"
     run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"
     [ "$status" -eq 1 ]
     [[ "$output" == *"BROKEN_LINK: 'missing-new.md'"* ]]
@@ -262,9 +264,11 @@ _diff_scope_fixture() {
 }
 
 @test "diff scope in a host checkout still FAILS a baselined link in a touched file" {
-    # With Source/ present, touching a file means fixing its dangling links.
+    # No agent-layer profile, and no Source/ either (a sparse host checkout): touching
+    # a file still means fixing its dangling links. The marker is positive, so a
+    # missing directory cannot switch the stricter rule off.
     _diff_scope_fixture
-    mkdir -p "$FIXTURE_DIR/Source"
+    printf '{"project": {"name": "host"}}\n' > "$FIXTURE_DIR/project.config.json"
     run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"
     [ "$status" -eq 1 ]
     [[ "$output" == *"BROKEN_LINK: 'missing-new.md'"* ]]
