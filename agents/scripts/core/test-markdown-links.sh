@@ -242,6 +242,7 @@ case "$_tml_self_phys" in "$(pwd -P)"/agent-layer/*) TML_SELF_FROM_PROJECT="${_t
 export TML_SELF_FROM_PROJECT
 
 "$PY" - <<'PY'
+import json
 import os
 import re
 import sys
@@ -628,7 +629,23 @@ if SCOPE == "baseline":
 # scope (it only ever sees markdown a change actually touched), so consulting the
 # baseline there would double-grandfather and let a NEW break slip through on a file
 # that happens to carry an old one.
-baseline = read_baseline() if SCOPE == "all" else set()
+# Except in a standalone agent layer: the layer repo checked out on its own, which
+# its project.config.json marks with "profile": "agent-layer". There the baseline
+# holds links into the host's tree, which cannot resolve without a host, so
+# "touching a file means fixing its links" would fail every layer PR that edits
+# such a file. A new break with a new href still fails. A positive marker, so a
+# host checkout missing something (a sparse checkout) still fails closed.
+def _standalone_layer():
+    try:
+        with open(os.path.join(REPO_ROOT, "project.config.json"), encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    return isinstance(cfg, dict) and cfg.get("profile") == "agent-layer"
+
+
+STANDALONE_LAYER = _standalone_layer()
+baseline = read_baseline() if (SCOPE == "all" or STANDALONE_LAYER) else set()
 reportable = [v for v in violations if (v[0], v[2]) not in baseline]
 grandfathered = len(violations) - len(reportable)
 

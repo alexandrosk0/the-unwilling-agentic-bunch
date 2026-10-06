@@ -1,0 +1,192 @@
+name: Auto-bump the host pin
+
+# After every merge to develop here, open or update the one host PR that moves
+# the host's agent-layer/ gitlink to this commit:
+# `chore(agent-layer): bump to <sha>` on branch bot/agent-layer-bump.
+# The host's agent-layer-integration.yml is the binding check on that PR, and
+# the PR rides the host's full merge gates (merge-gates.md § Bump-PR gate
+# profile): no out-of-band label, no SKIP_MERGE_GATES.
+#
+# Off until the repo variable AUTO_BUMP is `on`. Turn it on only after the
+# host's integration lane has been seen passing on a pointer-bump PR
+# (ship-loops.md § Two-repo ship-loop, step (d)).
+#
+# Failure modes:
+# - AGENT_LAYER_BUMP_PAT missing, expired or revoked: the preflight fails and
+#   names the secret. GITHUB_TOKEN has no rights on the host, so there is no
+#   fallback. The PAT is fine-grained, scoped to the host repo only, with
+#   contents: write + pull-requests: write.
+# - The host's develop is protected against the bot: this workflow only ever
+#   pushes bot/agent-layer-bump and opens a PR. It never pushes develop and
+#   never merges.
+# - A bump PR open for more than a day is not retried by git-janitor's
+#   backstop. A stuck bump is a signal for a human, not a loop.
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+# Serialize, never collapse: cancelling a run mid-flight can drop the newest
+# SHA and leave the pin behind with nothing red.
+concurrency:
+  group: agent-layer-auto-bump
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  HOST_REPO: alexandrosk0/Smatchet
+  BUMP_BRANCH: bot/agent-layer-bump
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  bump:
+    name: Open or update the host bump PR
+    if: vars.AUTO_BUMP == 'on'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout the layer (full history, for the range and the guards)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: AGENT_LAYER_BUMP_PAT preflight
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_LAYER_BUMP_PAT }}
+          # Interpolate a boolean, never the secret itself, into the script.
+          PAT_SET: ${{ secrets.AGENT_LAYER_BUMP_PAT != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$PAT_SET" != "true" ]; then
+            echo "::error::AGENT_LAYER_BUMP_PAT is not set. This repo's GITHUB_TOKEN has no rights on ${HOST_REPO}, so the bump cannot be pushed or opened. Create a fine-grained PAT scoped to ${HOST_REPO} only (contents: write, pull-requests: write) and store it as this repo's AGENT_LAYER_BUMP_PAT secret."
+            exit 1
+          fi
+          # Probe with the host PR read the later steps need; -i also returns
+          # the token's expiry header, so one call covers both checks.
+          if ! probe=$(gh api -i "repos/${HOST_REPO}/pulls?per_page=1" 2>&1); then
+            case "$probe" in
+              *401*|*"Bad credentials"*)
+                echo "::error::AGENT_LAYER_BUMP_PAT no longer authenticates (HTTP 401): it has expired or was revoked. Rotate it (same scopes) and re-run this workflow. Nothing is lost: the host pin simply stays where it is until the next run."
+                ;;
+              *)
+                echo "::error::AGENT_LAYER_BUMP_PAT preflight failed before any host call: ${probe}"
+                ;;
+            esac
+            exit 1
+          fi
+          expiry=$(printf '%s' "$probe" | tr -d '\r' \
+            | grep -i '^github-authentication-token-expiration:' \
+            | head -n1 | cut -d' ' -f2-) || true
+          if [ -n "${expiry:-}" ] && exp_epoch=$(date -u -d "$expiry" +%s 2>/dev/null); then
+            days_left=$(( (exp_epoch - $(date -u +%s)) / 86400 ))
+            if [ "$days_left" -le 14 ]; then
+              echo "::warning::AGENT_LAYER_BUMP_PAT expires in ${days_left} day(s) (${expiry}). Rotate it before then, or bumps stop."
+            else
+              echo "::notice::AGENT_LAYER_BUMP_PAT valid for ${days_left} more day(s) (${expiry})."
+            fi
+          elif [ -n "${expiry:-}" ]; then
+            echo "::warning::AGENT_LAYER_BUMP_PAT authenticates, but its expiry header could not be parsed as a date: '${expiry}'. No countdown this run."
+          else
+            echo "::notice::AGENT_LAYER_BUMP_PAT authenticates and carries no expiry header (a token minted with no expiry), so there is no countdown."
+          fi
+
+      - name: Write the new pin on bot/agent-layer-bump
+        id: pin
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_LAYER_BUMP_PAT }}
+        run: |
+          set -euo pipefail
+          # Pin develop's tip as fetched now, never GITHUB_SHA: a dispatch on an
+          # older ref, or a queued run that starts after a newer merge, would
+          # otherwise force-push an older pin over a newer bump PR.
+          git fetch --no-tags origin develop
+          sha=$(git rev-parse origin/develop)
+          # Guard (i): the run's own commit is on develop. A dispatch from any
+          # other ref is an operator error, so refuse rather than guess.
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "$sha"; then
+            echo "::error::${GITHUB_SHA} is not on origin/develop; dispatch this workflow from develop."
+            exit 1
+          fi
+          gh auth setup-git
+          # Full blob-less clone, not shallow: a force-push from a shallow
+          # clone can be rejected server-side. No submodule checkout needed.
+          git clone --filter=blob:none --branch develop --no-tags \
+            "https://github.com/${HOST_REPO}.git" host
+          pinned=$(git -C host rev-parse HEAD:agent-layer) || {
+            echo "::error::Cannot read the host's agent-layer pin; refusing to bump."
+            exit 1
+          }
+          # Guard (iii): the host's pin is on the line being bumped. A pin outside
+          # develop's history (a WIP pin, or a rewritten develop) is a human call,
+          # never something to force-push over.
+          if ! git cat-file -e "${pinned}^{commit}" 2>/dev/null \
+              || ! git merge-base --is-ancestor "$pinned" "$sha"; then
+            echo "::error::The host pins ${pinned}, which is not an ancestor of develop's tip ${sha}; refusing to bump. Resolve the pin by hand."
+            exit 1
+          fi
+          # Guard (ii): skip when the pinned tree is already this tree (a
+          # revert back to the pin, say), so no empty PR is ever opened.
+          if [ "$(git rev-parse "${sha}^{tree}")" = "$(git rev-parse "${pinned}^{tree}" 2>/dev/null || echo none)" ]; then
+            echo "::notice::The host already pins this tree (${pinned}); nothing to bump."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git -C host checkout -B "$BUMP_BRANCH"
+          git -C host update-index --cacheinfo "160000,${sha},agent-layer"
+          # The host keeps byte-identical copies of a few layer scripts
+          # (docs/mirrored-paths.txt), and its mirror gate fails a bump whose
+          # copies lag the new pin. Carry them in the same commit.
+          if [ -f host/docs/mirrored-paths.txt ]; then
+            { grep -vE '^[[:space:]]*(#|$)' host/docs/mirrored-paths.txt || true; } | while IFS= read -r mp; do
+              if git cat-file -e "${sha}:${mp}" 2>/dev/null; then
+                git show "${sha}:${mp}" > "host/${mp}"
+                git -C host add -- "$mp"
+              else
+                echo "::warning::${mp} is mirrored by the host but absent at ${sha}; left as is."
+              fi
+            done
+          fi
+          git -C host -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit --quiet -m "chore(agent-layer): bump to ${sha:0:12}"
+          git -C host push --force origin "HEAD:refs/heads/${BUMP_BRANCH}"
+          {
+            echo "changed=true"
+            echo "sha=${sha}"
+            echo "pinned=${pinned}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the bump PR
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_LAYER_BUMP_PAT }}
+          SHA: ${{ steps.pin.outputs.sha }}
+          PINNED: ${{ steps.pin.outputs.pinned }}
+        run: |
+          set -euo pipefail
+          title="chore(agent-layer): bump to ${SHA:0:12}"
+          {
+            echo "Moves \`agent-layer\` from \`${PINNED:0:12}\` to \`${SHA:0:12}\`."
+            echo
+            echo "Layer changes: https://github.com/${GITHUB_REPOSITORY}/compare/${PINNED}...${SHA}"
+            echo
+            git log --format='- %s' "${PINNED}..${SHA}" 2>/dev/null || echo "- (range not in this checkout's history)"
+            echo
+            echo "Opened by the layer's auto-bump.yml. \`agent-layer-integration.yml\` is the binding check; the full merge gates apply."
+          } > body.md
+          # Every host-targeting gh call names --repo: this workflow runs in the
+          # layer repo, so gh's implicit repo is the wrong one. No `|| true`: a
+          # failed lookup must abort, not open a duplicate PR.
+          number=$(gh pr list --repo "$HOST_REPO" --head "$BUMP_BRANCH" --base develop \
+            --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --repo "$HOST_REPO" --title "$title" --body-file body.md
+            echo "::notice::Updated ${HOST_REPO}#${number} to pin ${SHA:0:12}."
+          else
+            gh pr create --repo "$HOST_REPO" --head "$BUMP_BRANCH" --base develop \
+              --title "$title" --body-file body.md
+          fi

@@ -5,8 +5,8 @@
 #
 # Contract under test (exit codes):
 #   0 — the ahead-range diff is strictly within the pure-docs allow-list
-#       (docs/**, backlog/**, agents/scripts/**, or ANY *.md at any depth), OR
-#       the diff is empty.
+#       (docs/**, backlog/**, agents/scripts/**, ANY *.md at any depth, or the
+#       agent-layer gitlink / .gitmodules of a layer bump), OR the diff is empty.
 #   1 — at least one changed file is outside the allow-list (a .cpp, a CMake
 #       file, a non-scripts agents/ file, .github/, etc.).
 #   2 — the base ref cannot be resolved.
@@ -101,6 +101,42 @@ run_classify() {
 
 @test "a .github/ workflow -> exit 1" {
     commit_files ".github/workflows/ci.yml"
+    run_classify
+    [ "$status" -eq 1 ]
+}
+
+# commit_gitlink — record agent-layer as a submodule pointer (mode 160000),
+# with or without a .gitmodules change, the shape of a layer bump PR.
+commit_gitlink() {
+    git -C "$REPO_TMP" update-index --add --cacheinfo "160000,$(git -C "$REPO_TMP" rev-parse HEAD),agent-layer"
+    if [ "${1:-}" = with-gitmodules ]; then
+        printf '[submodule "agent-layer"]\n\tpath = agent-layer\n\turl = https://example.invalid/layer.git\n' > "$REPO_TMP/.gitmodules"
+        git -C "$REPO_TMP" add .gitmodules
+    fi
+    git -C "$REPO_TMP" commit --quiet -m "bump agent-layer"
+}
+
+@test "agent-layer gitlink bump alone -> exit 0" {
+    commit_gitlink
+    run_classify
+    [ "$status" -eq 0 ]
+}
+
+@test "agent-layer gitlink + .gitmodules -> exit 0" {
+    commit_gitlink with-gitmodules
+    run_classify
+    [ "$status" -eq 0 ]
+}
+
+@test "agent-layer gitlink + a C++ file -> exit 1 (the bump does not launder it)" {
+    commit_gitlink
+    commit_files "Source/Core/src/Tracker/Foo.cpp"
+    run_classify
+    [ "$status" -eq 1 ]
+}
+
+@test "a root file merely prefixed agent-layer -> exit 1 (anchored)" {
+    commit_files "agent-layer-notes.txt"
     run_classify
     [ "$status" -eq 1 ]
 }

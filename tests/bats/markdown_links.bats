@@ -233,6 +233,48 @@ print('src:', is_active_md('Source/Core/foo.md'))
     [[ "$output" == *"1 grandfathered"* ]]
 }
 
+# Diff scope in a fixture repo: a.md is on origin/develop with one baselined
+# dangling link, then a commit adds a second dangling link to the same file.
+_diff_scope_fixture() {
+    mkdir -p "$FIXTURE_DIR/agents/scripts/core" "$FIXTURE_DIR/docs/high-integrity"
+    cp "$LINT" "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"
+    {
+        printf '# Dangling markdown links — grandfathered baseline\n\n'
+        printf '## dangling links (1)\n'
+        printf -- '- `docs/a.md` — `missing-old.md` (resolves to `docs/missing-old.md`)\n'
+    } > "$FIXTURE_DIR/docs/high-integrity/markdown-link-baseline.md"
+    printf '# a\n\n[old](missing-old.md)\n' > "$FIXTURE_DIR/docs/a.md"
+    git -C "$FIXTURE_DIR" init -q -b develop
+    git -C "$FIXTURE_DIR" add -A
+    git -C "$FIXTURE_DIR" -c user.name=t -c user.email=t@t.test commit -q -m base
+    git -C "$FIXTURE_DIR" update-ref refs/remotes/origin/develop HEAD
+    printf '[new](missing-new.md)\n' >> "$FIXTURE_DIR/docs/a.md"
+    git -C "$FIXTURE_DIR" -c user.name=t -c user.email=t@t.test commit -q -am change
+}
+
+@test "diff scope in a standalone layer grandfathers a baselined link but FAILS a new one" {
+    # The layer repo on its own (its config says profile agent-layer), where links
+    # into the host cannot resolve.
+    _diff_scope_fixture
+    printf '{"profile": "agent-layer"}\n' > "$FIXTURE_DIR/project.config.json"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"BROKEN_LINK: 'missing-new.md'"* ]]
+    [[ "$output" != *"BROKEN_LINK: 'missing-old.md'"* ]]
+}
+
+@test "diff scope in a host checkout still FAILS a baselined link in a touched file" {
+    # No agent-layer profile, and no Source/ either (a sparse host checkout): touching
+    # a file still means fixing its dangling links. The marker is positive, so a
+    # missing directory cannot switch the stricter rule off.
+    _diff_scope_fixture
+    printf '{"project": {"name": "host"}}\n' > "$FIXTURE_DIR/project.config.json"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"BROKEN_LINK: 'missing-new.md'"* ]]
+    [[ "$output" == *"BROKEN_LINK: 'missing-old.md'"* ]]
+}
+
 @test "the rendered baseline rows parse back (round-trip)" {
     # Regression guard: the row regex was once anchored at end-of-line while the
     # renderer appends "(resolves to ...)", so EVERY row failed to parse and --all

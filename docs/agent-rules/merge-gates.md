@@ -171,6 +171,15 @@ Step 1 without step 2 leaves a CI-green, gate-waived PR still BLOCKED on the ope
 
 Implementation: `agents/scripts/core/merge-gates.sh` (sourceable + CLI), `agents/scripts/core/merge-gates-prompt.sh` (`ask_user_question` shim), `agents/scripts/core/merge-gates.graphql`. Tests: `tests/bats/merge_gates.bats` + `tests/fixtures/merge_gates_*.json`.
 
+## Bump-PR gate profile
+
+A host PR that only moves the `agent-layer` gitlink (`chore(agent-layer): bump to <sha>`, opened by the layer repo's `auto-bump.yml` or by `git-janitor` as backstop) meets the same four conditions as any other PR, as follows:
+- **CI.** `agent-layer-integration.yml` is the binding lane, plus every lane its paths do not filter out, doc-validation included. The host's change detection treats the `agent-layer` gitlink as code, so the build and lint lanes run too: a layer change can move a lint rule, and those lanes re-validate it against host code. `is-pure-docs-diff.sh` classifies a gitlink-only diff as docs-tier only for the local build cadence and `merge-gates.sh`'s pure-docs checks, never for which CI lanes run.
+- **CodeRabbit.** It typically lands `COMMENTED + 0 actionable` on a one-line gitlink diff, which passes.
+- **User comments and Bugbot.** Unchanged.
+
+**No `*-out-of-band` label and no `SKIP_MERGE_GATES` is sanctioned on a bump PR.** The bump is the only thing that binds layer changes to the host, so gating it loosely reopens the blind spot the integration lane closes. The same holds for a janitor-authored bump: it rides the full gate poll and is never merged in the pass that opened it.
+
 ## Sanctioned step-level masks
 
 A `continue-on-error` step inside an otherwise-blocking check is sanctioned only
