@@ -74,10 +74,10 @@ JSON
 
 # ----------------------------------------------------------------------------
 
-@test "--selftest passes (23/23) and dogfoods the gate" {
+@test "--selftest passes (24/24) and dogfoods the gate" {
     run bash "$SCRIPT" --selftest
     [ "$status" -eq 0 ]
-    [[ "$output" == *"PASS — safe-admin-merge --selftest (23/23)"* ]]
+    [[ "$output" == *"PASS — safe-admin-merge --selftest (24/24)"* ]]
 }
 
 @test "dedup-to-latest: older CANCELLED run with a newer SUCCESS run reads GREEN (exit 0, merge fires)" {
@@ -300,16 +300,29 @@ JSON
     [ ! -f "$MERGE_SENTINEL" ]
 }
 
-@test "CR gate: cr-out-of-band label waives the wait (exit 0, merge fires)" {
-    # Explicit operator override — no CodeRabbit row, but the label says merge
-    # without waiting. CI stays green; CR is the only thing being waived.
+@test "CR gate: cr-out-of-band + cr-disposition waive the wait (exit 0, merge fires)" {
+    # Explicit operator override — no CodeRabbit row, but the labels say merge
+    # without waiting, with a recorded reason. CI stays green; CR is the only thing waived.
     export SAFE_ADMIN_MERGE_CR_INSTALLED=true
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[{"name":"cr-out-of-band"},{"name":"cr-disposition:rate-limit-acked"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
     run bash "$SCRIPT" 1332
     [ "$status" -eq 0 ]
     [ -f "$MERGE_SENTINEL" ]
+}
+
+@test "CR gate: a bare cr-out-of-band does not waive the wait (exit 1, no merge)" {
+    # The waiver needs a recorded reason, as in the rollup checks; without one the gate
+    # keeps waiting for CodeRabbit.
+    export SAFE_ADMIN_MERGE_CR_INSTALLED=true
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
+      {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
+      {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
+    run bash "$SCRIPT" 1332
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"CodeRabbit"* ]]
+    [ ! -f "$MERGE_SENTINEL" ]
 }
 
 @test "CR gate: grace expired on a stale head degrades to a backstop pass (exit 0, merge fires)" {
@@ -387,7 +400,7 @@ JSON
     # (the watcher-path convention, ADR-0017). A PENDING CodeRabbit rollup row
     # would instead block at the CI-pending stage, before the CR gate.
     export SAFE_ADMIN_MERGE_CR_INSTALLED=true
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","headRefOid":"headsha3","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","headRefOid":"headsha3","labels":[{"name":"cr-out-of-band"},{"name":"cr-disposition:rate-limit-acked"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
     export SAFE_ADMIN_MERGE_STUB_MERGED_JSON='{"mergeCommit":{"oid":"mc3"},"mergedAt":"2026-08-16T12:10:00Z"}'
@@ -452,7 +465,71 @@ _cr_installed() { # _cr_installed [env assignments...] — detect_cr_installed's
     mkdir -p "$empty"
     run _cr_installed SMATCHET_PROJECT_ROOT_OVERRIDE=1 PROJECT_ROOT="$empty"
     [ "$output" = "true" ]
-    # Without the override the foreign root is not taken at all: the real host answers.
-    run _cr_installed PROJECT_ROOT="$empty"
+}
+
+@test "cr-installed: without the override a caller's PROJECT_ROOT is not taken" {
+    # The host-shaped root with no CodeRabbit config answers "false" when it IS taken (two
+    # tests up), so "true" here can only come from the real host answering instead. -u keeps
+    # an override exported by test-all.sh for layer bats suites from leaking in.
+    local host="$STUB_BIN_DIR/host"
+    mkdir -p "$host"
+    printf '{}\n' > "$host/project.config.json"
+    run _cr_installed -u SMATCHET_PROJECT_ROOT_OVERRIDE PROJECT_ROOT="$host"
     [ "$output" = "true" ]
+}
+
+# _cr_waiver_blockers <labels-json-array> <body> — the blockers evaluate_rollup reports for a
+# red CR finding gate under that waiver. Empty output means the waiver was honoured.
+_cr_waiver_blockers() {
+    local rollup
+    rollup="$(jq -nc --argjson labels "$1" --arg body "$2" '{state: "OPEN", body: $body,
+        labels: ($labels | map({name: .})),
+        statusCheckRollup: [{__typename: "StatusContext", context: "CR findings (2 actionable)", state: "FAILURE"}]}')"
+    bash -c '. "$SCRIPT" >/dev/null 2>&1; evaluate_rollup "$1" ""' _ "$rollup"
+}
+
+@test "a cr-disposition reason must not be blank or the playbook placeholder, as label or body" {
+    # A real reason honours the waiver, whether it is a label or a PR-body marker.
+    run _cr_waiver_blockers '["cr-out-of-band","cr-disposition:rate-limit-acked"]' ''
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run _cr_waiver_blockers '["cr-out-of-band"]' $'Waiver.\ncr-disposition: rate-limit-acked\n'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run _cr_waiver_blockers '["cr-out-of-band"]' $'Waiver.\r\n  - cr-disposition: rate-limit-acked\r\n'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    # The placeholder, a blank suffix or a bare prefix does not.
+    local label
+    for label in 'cr-disposition:<reason>' 'cr-disposition: ' 'cr-disposition:'; do
+        run _cr_waiver_blockers "[\"cr-out-of-band\",\"$label\"]" ''
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"CR findings"* ]] || { echo "label '$label' was honoured" >&2; return 1; }
+    done
+    run _cr_waiver_blockers '["cr-out-of-band"]' $'Use cr-disposition:<reason> to waive.\n'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CR findings"* ]]
+    # A blank body marker does not borrow the next line as its reason.
+    run _cr_waiver_blockers '["cr-out-of-band"]' $'cr-disposition:\nUnrelated text\n'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CR findings"* ]]
+    # Prose that mentions the token mid-line is not a marker.
+    run _cr_waiver_blockers '["cr-out-of-band"]' $'Rate limit hit; no cr-disposition: needed here.\n'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CR findings"* ]]
+}
+
+@test "the poller takes the same cr-disposition predicate as safe-admin-merge" {
+    # The poller's filter is one jq program inside the merge-gates pipeline, so it is pinned to
+    # the exact predicate text the behavioural test above exercises through safe-admin-merge.
+    local root label body
+    root="$(git rev-parse --show-toplevel)"
+    label='any(test("^cr-disposition:[^[:space:]<]"))'
+    body='test("(^|\n)[[:blank:]]*([-*][[:blank:]]+)?cr-disposition:[[:blank:]]*[^[:space:]<]"; "i")'
+    grep -qF "$label" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
+    grep -qF "$body" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
+    # safe-admin-merge keeps one copy, in its shared jq defs, used by all three CR checks.
+    [ "$(grep -cF "$label" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 1 ]
+    [ "$(grep -cF "$body" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 1 ]
+    [ "$(grep -cF 'sam_cr_disposition as $crDisp' "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 3 ]
 }

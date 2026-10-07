@@ -85,6 +85,51 @@ ra_marker_path() {
     printf '%s\n' "$root/.review-ack"
 }
 
+# ra_ita_untracked [quiet] — register untracked files with `git add --intent-to-add`.
+#
+# Untracked files are INVISIBLE to every git-diff- and git-grep-based gate
+# (`git diff <base>` skips them; `git grep` scans tracked only). Running pre-ship
+# before the first `git add` therefore false-passed comment-noise and
+# plan-ref-integrity on brand-new files (PR #953 — two CI-only failures). Intent-
+# to-add registers them in the index (content stays unstaged) so the gates see
+# exactly what CI will see — and so `ra_fingerprint` covers a brand-new .cpp
+# instead of stamping a diff that silently omits it. Every script that computes or
+# checks a fingerprint calls it first (pre-ship.sh, record-review-verdict.sh), so
+# they all fingerprint the same tree view. Run it from the work-tree top.
+# `quiet` suppresses the stdout note so --review-fingerprint stays machine-readable.
+# Sets an EXIT trap (replacing the caller's) that undoes the registrations.
+# Returns 1 when the listing or the registration fails: the fingerprint would then omit
+# new files, so a caller must stop rather than fingerprint a partial tree view.
+ra_ita_untracked() {
+    local quiet="${1:-}" listing entry
+    local untracked=()
+    # NUL-delimited: a line listing C-quotes non-ASCII names and splits a name holding a
+    # newline, so `git add` would be handed a path that does not exist.
+    listing="$(mktemp)" || return 1
+    if ! git ls-files -z --others --exclude-standard >"$listing"; then
+        rm -f "$listing"
+        echo "review-ack: could not list untracked files; refusing to fingerprint without them" >&2
+        return 1
+    fi
+    while IFS= read -r -d '' entry; do
+        untracked+=("$entry")
+    done <"$listing"
+    rm -f "$listing"
+    [ "${#untracked[@]}" -gt 0 ] || return 0
+    [ "$quiet" = "quiet" ] ||
+        echo "pre-ship: git add --intent-to-add ${#untracked[@]} untracked file(s) so gates can see them"
+    # Undo the ita registrations on EVERY exit (pass or fail) — leaving them
+    # would make scratch files commit-eligible via a later `git commit -a` and
+    # flip their `git status` bucket from untracked to modified (CR-964 review).
+    # Set before the add, so a partial registration is undone too.
+    # shellcheck disable=SC2064  # expand ${untracked[@]} NOW, not at trap time
+    trap "git restore --staged -- $(printf '%q ' "${untracked[@]}") 2>/dev/null || true" EXIT
+    if ! git add --intent-to-add -- "${untracked[@]}"; then
+        echo "review-ack: git add --intent-to-add failed; refusing to fingerprint without the untracked files" >&2
+        return 1
+    fi
+}
+
 # Resolve a WORKING python interpreter (empty + rc 1 if none). `command -v python3`
 # alone is insufficient on Windows: the python3 "App Execution Alias" stub passes
 # `command -v` but exits 49 ("Python was not found") when actually run — so probe

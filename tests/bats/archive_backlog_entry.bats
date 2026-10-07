@@ -81,6 +81,20 @@ _run_archive() {  # <args...>
     grep -q '](../../../agents/scripts/core/lib/script-freshness.sh)' "$WORK/docs/self-improvement/categories/applied.md"
 }
 
+@test "outbound: the archived body stays UTF-8 with LF (the em dash survives)" {
+    # A Windows pipe defaults to the ANSI code page and CRLF: the fixture's "P2 — a
+    # subject" once landed in applied.md as a cp1252 0x97 byte inside a CRLF block.
+    run _run_archive "$ENTRY"
+    [ "$status" -eq 0 ]
+    run "$PY" -c 'import sys
+d = open(sys.argv[1], "rb").read()
+d.decode("utf-8")
+assert b"\r" not in d, "CR in applied.md"
+assert "P2 \u2014 a subject".encode("utf-8") in d, "em dash not stored as UTF-8"' \
+        "$WORK/docs/self-improvement/categories/applied.md"
+    [ "$status" -eq 0 ]
+}
+
 @test "outbound: a sibling-category link drops its ../" {
     run _run_archive "$ENTRY"
     [ "$status" -eq 0 ]

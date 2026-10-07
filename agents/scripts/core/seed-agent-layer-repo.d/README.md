@@ -73,9 +73,11 @@ no-deps required-key gate skips silently when the schema file is absent, so **st
 validation of this file is inert by construction** — and that is a known gap, not a
 feature. Do not set `PC_SCHEMA_FILE` here to paper over it.
 
-Real JSON-Schema validation of both configs runs **host-side**, in the host's
-`doc-validation.yml` and `agent-layer-integration.yml` — the only lanes where both trees
-are checked out at once.
+Real JSON-Schema validation of this config runs **host-side**: the host's
+`doc-validation.yml` schema step validates it, and its seed copy, as the host mounts them
+(`agent-layer/project.config.json` and
+`agent-layer/agents/scripts/core/seed-agent-layer-repo.d/project.config.json`), against
+the host's schema.
 
 ## The submodule working tree is not a write target
 
@@ -104,9 +106,11 @@ allowlist is committed as [`docs/seed-paths.txt`](docs/seed-paths.txt) and the p
 publication verdict as [`docs/seed-audit.md`](docs/seed-audit.md).
 
 The prose here is not yet fully project-neutral — de-Smatchet-ification of portable prose
-is a tracked follow-up, not a precondition of the extraction. Residual host literals are
-reported by a host-side scan rather than by this repo's own purity gate; see
-`docs/seed-audit.md` for why that check lives where it does.
+is a tracked follow-up, not a precondition of the extraction. This repo's own purity gate
+does not look for residual host literals (the host name is deliberately off its denylist);
+the `_doc` in [`project.config.json`](project.config.json) explains why. The host-side scan
+meant to report them (plan row 12b, `agent-layer-integration.yml`) is not in place yet, so
+until it lands nothing reports them.
 
 ## Licence
 

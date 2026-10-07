@@ -91,6 +91,9 @@ _require_review_proof() {
         echo "record-review-verdict: base ref '$base_ref' does not resolve — cannot judge substantiveness (fetch it or pass a valid <base-ref>)" >&2
         return 2
     fi
+    # The same tree view pre-ship.sh fingerprints (untracked files included), or a
+    # pre-ship-made ack over a diff with a new, never-added file could never match.
+    ra_ita_untracked quiet || return 2
     ra_is_substantive branch "$base_ref" || return 0
     local reason="$RA_SUBSTANTIVE_REASON" want_fp have_fp findings_fp
     want_fp="$(ra_fingerprint branch "$base_ref")"
@@ -118,7 +121,13 @@ EOF
 
 _record() {
     local tail_text="$1" base_ref="${2:-origin/develop}"
-    local gitdir head line body out
+    local top gitdir head line body out
+    # The review-ack lib's pathspecs and its project.config.json read are relative to the
+    # work-tree top; from a subdirectory they match nothing and every diff reads as not
+    # substantive, so the proof check would be skipped. Its other callers cd first too.
+    top="$(git rev-parse --show-toplevel 2>/dev/null)" \
+        || { echo "record-review-verdict: not inside a git work tree" >&2; return 2; }
+    cd "$top" || { echo "record-review-verdict: cannot cd to $top" >&2; return 2; }
     gitdir="$(git rev-parse --git-dir 2>/dev/null)" \
         || { echo "record-review-verdict: not inside a git repository" >&2; return 2; }
     head="$(git rev-parse --verify HEAD 2>/dev/null)" \
@@ -264,6 +273,20 @@ run_selftest() {
         echo "record-review-verdict --selftest: FAIL — marker stamped despite no review proof" >&2
         return 1
     fi
+    # The same refusal from a SUBDIRECTORY of the work tree: the lib's pathspecs are
+    # top-relative, so a run from below the top must not read the diff as trivial.
+    out="$(cd "$tmp2/Source/Core" && bash "$SELF" "n/a — trivial" base 2>&1)" && {
+        rm -rf "$tmpd" "$tmp2"
+        echo "record-review-verdict --selftest: FAIL — recorded an unproven verdict when run from a subdirectory" >&2
+        return 1
+    }
+    case "$out" in
+        *"has no proof a review ran"*) ;;
+        *) rm -rf "$tmpd" "$tmp2"
+           echo "record-review-verdict --selftest: FAIL — subdirectory run rejected for the wrong reason:" >&2
+           printf '%s\n' "$out" | sed 's/^/    /' >&2
+           return 1 ;;
+    esac
     # Same diff, findings-form tail — the proof gate blocks the TAIL SHAPE, not
     # just the n/a escape, so this MUST be refused too.
     if (cd "$tmp2" && bash "$SELF" "3 findings, all fixed" base >/dev/null 2>&1); then
@@ -313,6 +336,33 @@ run_selftest() {
         echo "record-review-verdict --selftest: FAIL — a proven substantive-diff verdict left no marker" >&2
         return 1
     fi
+    # An untracked C++ file beside the diff: pre-ship.sh fingerprints it (intent-to-add),
+    # so an ack it made must verify here too, and the file must stay untracked after.
+    fp="$(
+        cd "$tmp2" || exit 1
+        printf 'int untracked_fn() { return 2; }\n' > Source/Core/src/Sync/Untracked.cpp
+        # shellcheck source=agents/scripts/core/lib/review-ack.sh
+        . "$REVIEW_ACK_LIB"
+        ra_ita_untracked quiet || exit 1
+        ra_fingerprint branch base
+    )" || {
+        rm -rf "$tmpd" "$tmp2"
+        echo "record-review-verdict --selftest: FAIL — could not fingerprint the untracked-file fixture" >&2
+        return 1
+    }
+    (cd "$tmp2" && printf 'branch\t%s\n' "$fp" > .review-ack &&
+        printf '{"fingerprint":"%s","reviewer":"selftest"}\n' "$fp" > .review-findings.json)
+    if ! (cd "$tmp2" && bash "$SELF" "0 findings" base >/dev/null 2>&1); then
+        rm -rf "$tmpd" "$tmp2"
+        echo "record-review-verdict --selftest: FAIL — refused a pre-ship-style ack over a diff with an untracked file" >&2
+        return 1
+    fi
+    if [ -z "$(git -C "$tmp2" ls-files --others --exclude-standard -- Source/Core/src/Sync/Untracked.cpp)" ]; then
+        rm -rf "$tmpd" "$tmp2"
+        echo "record-review-verdict --selftest: FAIL — the untracked file was left registered in the index" >&2
+        return 1
+    fi
+    rm -f "$tmp2/Source/Core/src/Sync/Untracked.cpp"
     # SMATCHET_SKIP_REVIEW_GATE=1 bypasses the artifact requirement (documented
     # emergency escape, mirrors pre-ship.sh) even with NO proof at all.
     (cd "$tmp2" && rm -f .review-ack .review-findings.json)

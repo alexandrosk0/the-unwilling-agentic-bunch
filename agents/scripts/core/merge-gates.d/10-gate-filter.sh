@@ -70,11 +70,17 @@ _MG_GATE_FILTER_TEMPLATE='
 # generalising the PR-2 cr-rate-limit-code-pr-auto-pause requirement to EVERY
 # cr-out-of-band downgrade): it proves the operator consciously waived CR review
 # with a recorded reason rather than reflexively slapping a generic override on.
-# Body match: `cr-disposition:` followed by any non-empty reason on the line
-# (regex tolerates leading whitespace / list markers). (NB: no apostrophes in
-# this single-quoted jq filter string.)
-| (($labels | any(startswith("cr-disposition:")))
-   or (($pr.body // "") | test("cr-disposition:[[:space:]]*[^[:space:]]"; "i"))) as $crdisposition
+# Body match: a line that starts with `cr-disposition:` (after optional leading
+# blanks and a `-` / `*` list marker) and carries a non-empty reason on that SAME
+# line. Anchored to a line start, so prose that merely mentions the token (say,
+# "no cr-disposition: needed") is not a marker. The gap after the colon is spaces
+# or tabs only: jq tests the whole body, so `[[:space:]]` would run on past a
+# newline and let a blank marker borrow the next line as its reason. Label and
+# body take the same reason rule: it must not be blank or start with `<`, so the
+# playbook placeholder `cr-disposition:<reason>` is not an attestation in either
+# place. (NB: no apostrophes in this single-quoted jq filter string.)
+| (($labels | any(test("^cr-disposition:[^[:space:]<]")))
+   or (($pr.body // "") | test("(^|\n)[[:blank:]]*([-*][[:blank:]]+)?cr-disposition:[[:blank:]]*[^[:space:]<]"; "i"))) as $crdisposition
 | ($labels | any(. == "bugbot-out-of-band")) as $bb
 # Dedup key is (check-suite createdAt, startedAt), NOT startedAt alone. A rerun
 # stays in one check suite, so old-FAILURE/new-SUCCESS ties on the first key and

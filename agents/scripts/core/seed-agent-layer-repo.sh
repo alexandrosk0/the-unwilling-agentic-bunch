@@ -382,7 +382,10 @@ audit_delta() {
     local repo="$1" pin="$2"
     local -a specs
     mapfile -t specs < <(manifest_pathspecs)
-    git -C "$repo" log --oneline "$pin..HEAD" -- "${specs[@]}" \
+    # --full-history: default simplification hides side-branch commits whose merge
+    # nets to zero for these paths, and filter-repo publishes those commits anyway
+    # (parity with seed-audit-sweep.py's range).
+    git -C "$repo" log --oneline --full-history "$pin..HEAD" -- "${specs[@]}" \
         ':(exclude)agents/scripts/core/seed-agent-layer-repo.d/docs/seed-audit.md'
 }
 

@@ -1109,7 +1109,12 @@ _resolve_py() {
     [[ "$output" == *"offline-loading-only-render"* ]]
 }
 
-@test "--diff fails on a NEW offline write and passes on a grandfathered one" {
+# The next three cover the offline_delta_hits HELPER (the delta engine the graduated
+# offline heuristics use under --diff), driven with the exact-write scanner. They are not
+# the --diff contract for offline-write-bypasses-queue itself: that rule is absolute-0
+# under --diff (compute_offline_write_violations), so an existing write is NOT
+# grandfathered there; see the absolute-0 tests below.
+@test "offline_delta_hits helper: reports a NEW hit, grandfathers an existing one" {
     tmp="$(mktemp -d)"
     ( cd "$tmp" && git init -q && git config user.email t@t && git config user.name t ) >/dev/null
     mkdir -p "$tmp/Source/Core/src/Ui"
@@ -1126,7 +1131,7 @@ _resolve_py() {
     [[ "$output" == *"New.cpp"* ]]
 }
 
-@test "--diff delta keeps a renamed file's existing offline hits grandfathered" {
+@test "offline_delta_hits helper keeps a renamed file's existing hits grandfathered" {
     tmp="$(mktemp -d)"
     ( cd "$tmp" && git init -q && git config user.email t@t && git config user.name t ) >/dev/null
     mkdir -p "$tmp/Source/Core/src/Ui"
@@ -1137,7 +1142,7 @@ _resolve_py() {
     [ -z "$output" ]
 }
 
-@test "--diff delta fails a write moved out of the exempt Sync/ seam into Ui/" {
+@test "offline_delta_hits helper reports a hit moved out of the exempt Sync/ seam into Ui/" {
     tmp="$(mktemp -d)"
     ( cd "$tmp" && git init -q && git config user.email t@t && git config user.name t ) >/dev/null
     mkdir -p "$tmp/Source/Core/src/Sync" "$tmp/Source/Core/src/Ui"

@@ -63,7 +63,8 @@
 #   * CodeRabbit is not installed for the repo (NONE is the steady state); OR
 #   * the `CodeRabbit` rollup signal (StatusContext OR CheckRun) is terminal-
 #     green on the head — CR finished its pass (reviewed or skipped); OR
-#   * the `cr-out-of-band` label waives the wait (the explicit operator escape); OR
+#   * the `cr-out-of-band` label, with a cr-disposition attestation, waives the wait
+#     (the explicit operator escape; a bare cr-out-of-band does not); OR
 #   * the head commit is older than the grace window and CR never resolved
 #     (SAFE_ADMIN_MERGE_CR_GRACE_MINUTES, default 20) — a stuck/disabled CR must
 #     not wedge the ship-loop forever, so this degrades to a logged pass.
@@ -88,11 +89,11 @@
 #                        would re-open the pre-label-run race the poller now
 #                        refuses. A red Test-delta / Perf PR-fast blocks until
 #                        the post-label re-run reports green server-side.
-#   cr-out-of-band     → waives the CodeRabbit-completion wait above, AND
-#                        (with a cr-disposition:* attestation — label OR a
-#                        nonempty `cr-disposition:<reason>` PR-body marker,
-#                        same predicate as merge-gates.d/10-gate-filter.sh)
-#                        discounts the CR finding-gate StatusContext/CheckRun
+#   cr-out-of-band     → with a cr-disposition attestation (a label OR a
+#                        `cr-disposition:<reason>` PR-body marker line, same
+#                        predicate as merge-gates.d/10-gate-filter.sh) waives the
+#                        CodeRabbit-completion wait above AND discounts the CR
+#                        finding-gate StatusContext/CheckRun
 #                        (`CR findings*` / `CR finding gate`) from the rollup —
 #                        same CI discount merge-gates.sh $downgraded applies
 #                        (tooling 2026-08-18: otherwise the waiver that clears
@@ -219,6 +220,11 @@ read_required_contexts() {
 # ----------------------------------------------------------------------------
 # shellcheck disable=SC2016  # single-quoted jq literal — $-refs are jq vars
 _SAM_JQ_DEFS='
+# The cr-disposition attestation, with the same rule as merge-gates.d/10-gate-filter.sh: a label
+# whose reason is not blank and does not start with "<", or a PR-body line that starts with
+# cr-disposition: (after optional blanks and a -/* bullet) and carries such a reason on that line.
+def sam_cr_disposition: (([.labels[]?.name] // []) | any(test("^cr-disposition:[^[:space:]<]")))
+    or ((.body // "") | test("(^|\n)[[:blank:]]*([-*][[:blank:]]+)?cr-disposition:[[:blank:]]*[^[:space:]<]"; "i"));
 def sam_latest: (((.statusCheckRollup) // [])
     | map(. + {_k: (if .__typename == "CheckRun" then ["CheckRun", (.name // "")]
                     else ["StatusContext", (.context // "")] end)})
@@ -284,8 +290,7 @@ evaluate_rollup() {
         # Label OR PR-body marker — same predicate as merge-gates.d/10-gate-filter.sh
         # ($crdisposition). Body-only waivers (documented in merge-gates.md) must
         # not leave safe-admin-merge blocking CR findings* forever.
-        | (($labels | any(startswith("cr-disposition:")))
-           or ((.body // "") | test("cr-disposition:[[:space:]]*[^[:space:]]"; "i"))) as $crDisp
+        | sam_cr_disposition as $crDisp
         | (sam_latest) as $latest
         # Resolve each deduped rollup row to a (name, green?) pair; bind as $rows so
         # the absent-required cross-check below can see which names are present.
@@ -372,7 +377,7 @@ detect_cr_grace_expired() {
     # grace_min == 0 DISABLES the backstop. A 0-minute window would mark every
     # past head instantly stale and let evaluate_cr PASS on a never-shown CR —
     # re-opening the #1332 merge-beats-review race. Treat 0 as "no backstop;
-    # wait for a real CR verdict (or the cr-out-of-band label)".
+    # wait for a real CR verdict (or cr-out-of-band + cr-disposition)".
     if [ "$grace_min" -eq 0 ]; then printf 'false'; return 0; fi
     local committed
     # Prefer the commit whose oid == headRefOid (the TRUE PR head): `gh pr view
@@ -407,7 +412,7 @@ detect_cr_grace_expired() {
 # the leading token: PASS → continue to merge; BLOCK → refuse (exit 1). Exit 0
 # on a successful eval; NON-ZERO only on a jq parse/runtime error (caller fails
 # closed). First-match-wins ordering mirrors poll_merge_gates' CR arms:
-#   cr-out-of-band override  >  not-installed  >  CR terminal-green  >
+#   cr-out-of-band + cr-disposition override  >  not-installed  >  CR terminal-green  >
 #   CR present-but-not-green (BLOCK, ignores grace)  >  grace-expired backstop
 #   (CR absent + stale head → PASS)  >  CR absent (BLOCK).
 # The grace backstop deliberately sits AFTER the present-but-not-green arm: an
@@ -418,9 +423,11 @@ evaluate_cr() {
     local view_json="$1" cr_installed="$2" grace_expired="$3"
     printf '%s' "$view_json" | jq -r \
         --arg installed "$cr_installed" \
-        --arg grace "$grace_expired" '
+        --arg grace "$grace_expired" "$_SAM_JQ_DEFS"'
         ([.labels[]?.name] // []) as $labels
         | ($labels | any(. == "cr-out-of-band")) as $crOob
+        # cr-out-of-band waives the wait only with a recorded reason, as in the rollup checks.
+        | sam_cr_disposition as $crDisp
         # CodeRabbit rollup rows — StatusContext "CodeRabbit" OR CheckRun
         # "CodeRabbit" / "CR findings (N actionable)" (both shapes CR emits).
         | (((.statusCheckRollup) // [])
@@ -437,7 +444,7 @@ evaluate_cr() {
                 or (.__typename == "StatusContext"
                    and (((.state // "") | ascii_upcase) == "SUCCESS"))) ]
             | length > 0) as $green
-        | if $crOob then "PASS cr-out-of-band label waives the CodeRabbit wait"
+        | if ($crOob and $crDisp) then "PASS cr-out-of-band + cr-disposition waive the CodeRabbit wait"
           elif ($installed != "true") then "PASS CodeRabbit not installed for this repo"
           elif ($present and $green) then "PASS CodeRabbit review complete on head"
           elif $present then "BLOCK CodeRabbit review still in progress on head (context present, not yet green)"
@@ -471,8 +478,7 @@ downgraded_red_checks() {
         | ($labels | any(. == "intent-out-of-band")) as $intentOob
         | ($labels | any(. == "plan-lock-out-of-band")) as $planlockOob
         | ($labels | any(. == "cr-out-of-band")) as $crOob
-        | (($labels | any(startswith("cr-disposition:")))
-           or ((.body // "") | test("cr-disposition:[[:space:]]*[^[:space:]]"; "i"))) as $crDisp
+        | sam_cr_disposition as $crDisp
         | (sam_latest) as $latest
         | $latest[]
         | sam_name as $name
@@ -765,15 +771,26 @@ run_selftest() {
         fails=$((fails + 1))
     fi
 
-    # CASE 10 — cr-out-of-band label waives the wait even with CR absent → PASS.
+    # CASE 10 — cr-out-of-band + a cr-disposition label waive the wait even with CR absent → PASS.
     local cr_oob_rollup
-    cr_oob_rollup='{"state":"OPEN","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
+    cr_oob_rollup='{"state":"OPEN","labels":[{"name":"cr-out-of-band"},{"name":"cr-disposition:rate-limit-acked"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"}]}'
     verdict=$(evaluate_cr "$cr_oob_rollup" "true" "false")
     if [[ "$verdict" == PASS* ]] && [[ "$verdict" == *"cr-out-of-band"* ]]; then
-        echo "selftest CASE10 PASS — cr-out-of-band waives the CR wait"
+        echo "selftest CASE10 PASS — cr-out-of-band + disposition waive the CR wait"
     else
-        echo "selftest CASE10 FAIL — cr-out-of-band should PASS (got: '$verdict')" >&2
+        echo "selftest CASE10 FAIL — cr-out-of-band + disposition should PASS (got: '$verdict')" >&2
+        fails=$((fails + 1))
+    fi
+    # CASE 10b — a bare cr-out-of-band (no recorded reason) does not waive the wait.
+    local cr_oob_bare_rollup
+    cr_oob_bare_rollup='{"state":"OPEN","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
+      {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"}]}'
+    verdict=$(evaluate_cr "$cr_oob_bare_rollup" "true" "false")
+    if [[ "$verdict" == BLOCK* ]]; then
+        echo "selftest CASE10b PASS — a bare cr-out-of-band does not waive the CR wait"
+    else
+        echo "selftest CASE10b FAIL — a bare cr-out-of-band should BLOCK (got: '$verdict')" >&2
         fails=$((fails + 1))
     fi
 
@@ -895,7 +912,7 @@ run_selftest() {
     fi
 
     if [ "$fails" -eq 0 ]; then
-        echo "PASS — safe-admin-merge --selftest (23/23)"
+        echo "PASS — safe-admin-merge --selftest (24/24)"
         return 0
     fi
     echo "FAIL — safe-admin-merge --selftest ($fails failing case(s))" >&2
