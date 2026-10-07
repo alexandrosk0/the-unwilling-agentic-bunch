@@ -207,6 +207,13 @@ fi
 
 cd "$repo_root"
 
+# Branch mode fingerprints and classifies `git diff <base>`, which skips untracked files, so a new
+# first-party .cpp would be left out (and a branch whose only change is that file would read as not
+# substantive). Register them first, the same tree view pre-ship.sh and record-review-verdict.sh use.
+if [ "$mode" = "branch" ]; then
+    ra_ita_untracked quiet || exit 2
+fi
+
 if [ "$action" = "record" ]; then
     fp="$(ra_fingerprint "$mode" "$base_ref")"
     if [ -n "$verdict_file" ]; then

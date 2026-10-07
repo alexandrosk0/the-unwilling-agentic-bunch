@@ -77,21 +77,29 @@ cd "$(git rev-parse --show-toplevel)" || exit 2
 
 MODE="range"
 LO=""; HI=""; MERGED_LIST=""; MERGE_OIDS=""; AGAINST="origin/develop"; JSON_OUT=0
+# need_args <n> <flag> <args...> — a value-taking flag must have its values. `shift N` with fewer
+# than N args left fails without shifting, and this parser runs without errexit, so a short
+# trailing flag would loop forever instead of being a usage error.
+need_args() {
+    local n="$1" flag="$2"
+    shift 2
+    [ "$#" -ge "$n" ] || { echo "historical-review-worklist: $flag needs $((n - 1)) value(s)" >&2; exit 2; }
+}
 while [ $# -gt 0 ]; do
     case "$1" in
         --json) JSON_OUT=1; shift ;;
-        --range) LO="${2:-}"; HI="${3:-}"; shift 3 ;;
+        --range) need_args 3 "$1" "$@"; LO="$2"; HI="$3"; shift 3 ;;
         # `--range=<lo>-<hi>` / `--range=<lo>,<hi>` — the single-token twin of the
         # two-arg form above (shell-lint FLAG_PARITY requires a `=` twin for any
         # value-taking flag; it is also the form that survives being pasted into a
         # CI `run:` line without arg-splitting surprises).
         --range=*) LO="${1#*=}"; HI="${LO#*[-,]}"; LO="${LO%%[-,]*}"; shift ;;
-        --merged-list) MERGED_LIST="${2:-}"; shift 2 ;;
+        --merged-list) need_args 2 "$1" "$@"; MERGED_LIST="$2"; shift 2 ;;
         --merged-list=*) MERGED_LIST="${1#*=}"; shift ;;
-        --against) AGAINST="${2:-}"; shift 2 ;;
+        --against) need_args 2 "$1" "$@"; AGAINST="$2"; shift 2 ;;
         --against=*) AGAINST="${1#*=}"; shift ;;
         --selftest) MODE="selftest"; shift ;;
-        --merge-oids) MERGE_OIDS="${2:-}"; shift 2 ;;
+        --merge-oids) need_args 2 "$1" "$@"; MERGE_OIDS="$2"; shift 2 ;;
         --merge-oids=*) MERGE_OIDS="${1#*=}"; shift ;;
         -h|--help) sed -n '2,52p' "$0"; exit 0 ;;
         *) echo "historical-review-worklist: unknown arg $1" >&2; exit 2 ;;
@@ -459,5 +467,19 @@ assert sum(1 for u in obj["units"] if u["pr"] == 105) == 2, obj["units"]
 ) || fail=1
 rm -rf "$repoD"
 
-if [ "$fail" = "0" ]; then echo "historical-review-worklist --selftest: PASS (4 e2e fixtures)"; exit 0; fi
+# Fixture E — a value-taking flag left short at the end is a usage error. The parser runs
+# without errexit, so a failed `shift N` used to loop forever; `timeout` turns a hang into a FAIL.
+# selftest: asserts-failure — every short trailing value-taking flag must exit 2, not loop.
+if command -v timeout >/dev/null 2>&1; then
+    for argsE in "--range" "--range 5" "--merged-list" "--against" "--range 1 2 --merge-oids"; do
+        # shellcheck disable=SC2086  # word-split the fixture on purpose
+        timeout 10 bash "$self" $argsE >/dev/null 2>&1
+        rcE=$?
+        [ "$rcE" = "2" ] || { echo "FAIL(E): '$argsE' exit $rcE, want 2 (124 = hung)"; fail=1; }
+    done
+else
+    echo "SKIP(E): no timeout command, so the short-trailing-flag cases are not run"
+fi
+
+if [ "$fail" = "0" ]; then echo "historical-review-worklist --selftest: PASS (4 e2e fixtures + arg parsing)"; exit 0; fi
 echo "historical-review-worklist --selftest: FAIL"; exit 1

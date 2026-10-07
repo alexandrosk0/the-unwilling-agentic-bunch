@@ -223,6 +223,18 @@ commit_in_fixture() {
     [[ "$output" != *"REFUSING"* ]]
 }
 
+@test "branch mode counts an untracked new strict-zone file and leaves it untracked" {
+    # `git diff <base>` skips untracked files, so before branch mode registered them a brand-new
+    # first-party .cpp read as "not substantive" and --check passed with no ack.
+    git -C "$REPO_TMP" switch --quiet -c feature
+    echo "int fresh() { return 1; }" > "$REPO_TMP/Source/Core/src/Sync/Fresh.cpp"
+    run bash -c 'cd "$REPO_TMP" && bash agents/scripts/core/review-ack.sh --check --branch develop 2>&1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"NO current branch ack"* ]]
+    # The intent-to-add registration is undone on exit.
+    [ "$(git -C "$REPO_TMP" status --porcelain -- Source/Core/src/Sync/Fresh.cpp)" = "?? Source/Core/src/Sync/Fresh.cpp" ]
+}
+
 @test "--check rejects an unknown flag with rc 2" {
     run bash -c "cd '$REPO_TMP' && bash agents/scripts/core/review-ack.sh --check --bogus 2>&1"
     [ "$status" -eq 2 ]

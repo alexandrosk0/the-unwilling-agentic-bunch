@@ -74,10 +74,10 @@ JSON
 
 # ----------------------------------------------------------------------------
 
-@test "--selftest passes (23/23) and dogfoods the gate" {
+@test "--selftest passes (24/24) and dogfoods the gate" {
     run bash "$SCRIPT" --selftest
     [ "$status" -eq 0 ]
-    [[ "$output" == *"PASS — safe-admin-merge --selftest (23/23)"* ]]
+    [[ "$output" == *"PASS — safe-admin-merge --selftest (24/24)"* ]]
 }
 
 @test "dedup-to-latest: older CANCELLED run with a newer SUCCESS run reads GREEN (exit 0, merge fires)" {
@@ -300,16 +300,29 @@ JSON
     [ ! -f "$MERGE_SENTINEL" ]
 }
 
-@test "CR gate: cr-out-of-band label waives the wait (exit 0, merge fires)" {
-    # Explicit operator override — no CodeRabbit row, but the label says merge
-    # without waiting. CI stays green; CR is the only thing being waived.
+@test "CR gate: cr-out-of-band + cr-disposition waive the wait (exit 0, merge fires)" {
+    # Explicit operator override — no CodeRabbit row, but the labels say merge
+    # without waiting, with a recorded reason. CI stays green; CR is the only thing waived.
     export SAFE_ADMIN_MERGE_CR_INSTALLED=true
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[{"name":"cr-out-of-band"},{"name":"cr-disposition:rate-limit-acked"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
     run bash "$SCRIPT" 1332
     [ "$status" -eq 0 ]
     [ -f "$MERGE_SENTINEL" ]
+}
+
+@test "CR gate: a bare cr-out-of-band does not waive the wait (exit 1, no merge)" {
+    # The waiver needs a recorded reason, as in the rollup checks; without one the gate
+    # keeps waiting for CodeRabbit.
+    export SAFE_ADMIN_MERGE_CR_INSTALLED=true
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
+      {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
+      {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
+    run bash "$SCRIPT" 1332
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"CodeRabbit"* ]]
+    [ ! -f "$MERGE_SENTINEL" ]
 }
 
 @test "CR gate: grace expired on a stale head degrades to a backstop pass (exit 0, merge fires)" {
@@ -387,7 +400,7 @@ JSON
     # (the watcher-path convention, ADR-0017). A PENDING CodeRabbit rollup row
     # would instead block at the CI-pending stage, before the CR gate.
     export SAFE_ADMIN_MERGE_CR_INSTALLED=true
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","headRefOid":"headsha3","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","headRefOid":"headsha3","labels":[{"name":"cr-out-of-band"},{"name":"cr-disposition:rate-limit-acked"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
     export SAFE_ADMIN_MERGE_STUB_MERGED_JSON='{"mergeCommit":{"oid":"mc3"},"mergedAt":"2026-08-16T12:10:00Z"}'
@@ -515,6 +528,8 @@ _cr_waiver_blockers() {
     body='test("(^|\n)[[:blank:]]*([-*][[:blank:]]+)?cr-disposition:[[:blank:]]*[^[:space:]<]"; "i")'
     grep -qF "$label" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
     grep -qF "$body" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
-    [ "$(grep -cF "$label" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 2 ]
-    [ "$(grep -cF "$body" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 2 ]
+    # safe-admin-merge keeps one copy, in its shared jq defs, used by all three CR checks.
+    [ "$(grep -cF "$label" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 1 ]
+    [ "$(grep -cF "$body" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 1 ]
+    [ "$(grep -cF 'sam_cr_disposition as $crDisp' "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 3 ]
 }

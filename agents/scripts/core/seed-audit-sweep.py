@@ -187,13 +187,15 @@ def main():
         else:
             inv.scan(line, sha, "<commit-message>")
 
+    # Checked in both modes: with --since an empty history is a legitimate "nothing new", so only
+    # the manifest's own match against HEAD can show the sweep was looking at real paths.
+    head_files = [f for f in git_lines(args.repo, ["ls-files", "--"] + specs) if f]
+    if not head_files:
+        sys.stderr.write("seed-audit-sweep: the manifest matched no tracked file in %s, so there is "
+                         "nothing the coverage check could prove\n" % args.repo)
+        return 2
     unseen = []
     if not args.since:
-        head_files = [f for f in git_lines(args.repo, ["ls-files", "--"] + specs) if f]
-        if not head_files:
-            sys.stderr.write("seed-audit-sweep: the manifest matched no tracked file in %s, so there is "
-                             "nothing the coverage check could prove\n" % args.repo)
-            return 2
         unseen = sorted(set(head_files) - seen)
 
     out = sys.stdout
