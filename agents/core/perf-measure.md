@@ -83,7 +83,7 @@ Per AGENTS.md § Agent output contract § Helper class — these sections must a
   Pre-existing dominant rows: <list>  (context — what perf_temp: markers are competing against)
   ```
 - `## Outcome: <state>` — one of `applied | halted | failed | partial | aborted`. Telemetry keys on this line per AGENTS.md § Agent output contract.
-- `## Self-improvement` — only if a scenario was missing, the CLI didn't expose a needed field, or the fallback path took multiple round-trips. Empty is fine. Orchestrator appends to `docs/self-improvement/AGENT_SELF_IMPROVEMENT.md`.
+- `## Self-improvement` — only if a scenario was missing, the CLI didn't expose a needed field, or the fallback path took multiple round-trips. Empty is fine. Orchestrator files it as one entry under `$PROJECT_ROOT/docs/self-improvement/categories/<category>/` (the project's backlog, never inside a host's layer mount; format: `$AGENT_LAYER_ROOT/docs/self-improvement/AGENT_SELF_IMPROVEMENT.md`).
 
 ## Fallback — CLI unavailable
 
@@ -98,7 +98,7 @@ halt_reason: cli-gap — <name the missing CLI surface, e.g. "MCP socket unreach
 
 Then hand off:
 
-- **MCP socket unreachable / build broken** → `build-doctor` (`docs/self-improvement/categories/process.md` + the failing target name).
+- **MCP socket unreachable / build broken** → `build-doctor` (a `docs/self-improvement/categories/process/<YYYY-MM-DD>-<slug>.md` entry + the failing target name).
 - **Scenario missing or lacks a non-MCP CLI surface** → `test-author` to extend `Source/Core/src/Commands/Scenarios/` per AGENTS.md § Verification automation (no manual UI substitution allowed).
 
 Do not attempt to read FPS visually — you can't observe the GUI, and the rule disallows it even if you could.
