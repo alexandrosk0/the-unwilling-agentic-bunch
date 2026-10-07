@@ -2,7 +2,7 @@
 
 > Lifted from [`AGENTS.md`](../../AGENTS.md) § Quality Pillars per [`docs/plans/shipped/agents-md-reduction.md`](../plans/shipped/agents-md-reduction.md). AGENTS.md retains a load-bearing stub naming the pillars + their owning agents (with **UX Pillars** + **Engineering Pillars** sub-anchors) so external `AGENTS.md § <subsection>` references — including legacy `§ UX Pillars` — continue to resolve. Renamed from `ux-pillars.md` when DRY was added as an Engineering Pillar (ADR-0015). Edit this file directly — no parallel copy in AGENTS.md.
 
-Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) are user-facing: 1-3 and 6 are **enforceable** (agents auto-fail PRs that violate them); 4 is **aspirational** today (flagged as `process` entries under the project's `docs/self-improvement/categories/process/`, not a merge block, until the supporting infrastructure lands). **Engineering Pillars** (5: DRY) govern code-maintainability and are enforced like UX 1-3.
+Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) are user-facing: 1-3 and 6 are **enforceable** (agents auto-fail PRs that violate them); 4 is **aspirational** today (flagged per § 4 below, not a merge block, until the supporting infrastructure lands). **Engineering Pillars** (5: DRY) govern code-maintainability and are enforced like UX 1-3.
 
 ## 1. Performance — sustain ≈ 144 Hz
 

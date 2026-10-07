@@ -126,6 +126,6 @@ bash scripts/dev/test-all.sh         →  Passed: <total>  Failed: 0
 
 ### `## Residue requiring user action`
 
-Manual-residue items still uncovered, each with a concrete deferred-automation plan filed in `docs/self-improvement/categories/tooling.md` (NEVER "manual forever"). If no residue: write `none`.
+Manual-residue items still uncovered, each with a concrete deferred-automation plan filed as its own entry, `docs/self-improvement/categories/tooling/<YYYY-MM-DD>-<slug>.md` (NEVER "manual forever"). If no residue: write `none`.
 
 End every response with `## Outcome: <state>` (one of `applied | halted | failed | partial | aborted`) then `## Self-improvement` — proactive: list **every** verification step encountered this round that needs a new CLI probe / new scenario / new debug command / ImGui Test Engine harness, plus the deferred-automation entry if any residue stayed manual. Empty is the **rare** case (only when audited plan had zero manual residue). Orchestrator files it as one entry under `$PROJECT_ROOT/docs/self-improvement/categories/<category>/` (the project's backlog, never inside a host's layer mount; format: `$AGENT_LAYER_ROOT/docs/self-improvement/AGENT_SELF_IMPROVEMENT.md`).

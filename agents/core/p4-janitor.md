@@ -81,7 +81,7 @@ Only after the user reviews the dry-run output should any `--apply` (or destruct
 
 ## Cron variant (deferred — not yet wired)
 
-The plan lists a daily checkpoint scheduled task (`p4d -jc`) as Phase 0 Step 6, deferred. The janitor pass can sit alongside it on the same schedule. Concrete script + scheduled-task spec → backlog `docs/self-improvement/categories/tooling.md` ("automate p4-janitor weekly pass via Windows Scheduled Task").
+The plan lists a daily checkpoint scheduled task (`p4d -jc`) as Phase 0 Step 6, deferred. The janitor pass can sit alongside it on the same schedule. Concrete script + scheduled-task spec → backlog entry `docs/self-improvement/categories/tooling/<YYYY-MM-DD>-<slug>.md` ("automate p4-janitor weekly pass via Windows Scheduled Task").
 
 ## Output contract
 
