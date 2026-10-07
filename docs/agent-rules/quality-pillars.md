@@ -2,7 +2,7 @@
 
 > Lifted from [`AGENTS.md`](../../AGENTS.md) § Quality Pillars per [`docs/plans/shipped/agents-md-reduction.md`](../plans/shipped/agents-md-reduction.md). AGENTS.md retains a load-bearing stub naming the pillars + their owning agents (with **UX Pillars** + **Engineering Pillars** sub-anchors) so external `AGENTS.md § <subsection>` references — including legacy `§ UX Pillars` — continue to resolve. Renamed from `ux-pillars.md` when DRY was added as an Engineering Pillar (ADR-0015). Edit this file directly — no parallel copy in AGENTS.md.
 
-Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) are user-facing: 1-3 and 6 are **enforceable** (agents auto-fail PRs that violate them); 4 is **aspirational** today (flagged in `docs/self-improvement/AGENT_SELF_IMPROVEMENT.md` category `process`, not a merge block, until the supporting infrastructure lands). **Engineering Pillars** (5: DRY) govern code-maintainability and are enforced like UX 1-3.
+Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) are user-facing: 1-3 and 6 are **enforceable** (agents auto-fail PRs that violate them); 4 is **aspirational** today (flagged as `process` entries under the project's `docs/self-improvement/categories/process/`, not a merge block, until the supporting infrastructure lands). **Engineering Pillars** (5: DRY) govern code-maintainability and are enforced like UX 1-3.
 
 ## 1. Performance — sustain ≈ 144 Hz
 
@@ -46,7 +46,7 @@ Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) 
 
 ## 4. Accessibility — aspirational (locked scope)
 
-**Pillar 4**: keyboard nav, font-size / zoom, WCAG AA contrast. No auto-fail gates today. Agents flag missing a11y to `docs/self-improvement/AGENT_SELF_IMPROVEMENT.md` (category `process`) so it accumulates evidence; pillar hardens once the supporting infra lands.
+**Pillar 4**: keyboard nav, font-size / zoom, WCAG AA contrast. No auto-fail gates today. Agents flag missing a11y as a `process` entry under the project's `docs/self-improvement/categories/process/` so it accumulates evidence; pillar hardens once the supporting infra lands.
 
 **Locked in-scope (work on these when adjacent to current task):**
 - **Keyboard navigation**: every actionable widget reachable without mouse. Tab order sane, focus indicators visible, `Ctrl+Shift+P` Command Palette as the keyboard entry point to every registered command.

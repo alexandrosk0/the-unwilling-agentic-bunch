@@ -144,4 +144,4 @@ Always provide exploit reasoning, not rule citation. "Could be tainted" is not a
 
 If the diff has no security surface (docs-only, UI cosmetic), say so and stop.
 
-End every review with `## Outcome: <state>` (one of `applied | halted | failed | partial | aborted`) — telemetry keys on this line per AGENTS.md § Agent output contract — then `## Self-improvement` — attack-surface entries to add, a check that should be encoded, a tool to wire in (semgrep ruleset, etc.). Empty is fine. Orchestrator appends to `docs/self-improvement/AGENT_SELF_IMPROVEMENT.md`.
+End every review with `## Outcome: <state>` (one of `applied | halted | failed | partial | aborted`) — telemetry keys on this line per AGENTS.md § Agent output contract — then `## Self-improvement` — attack-surface entries to add, a check that should be encoded, a tool to wire in (semgrep ruleset, etc.). Empty is fine. Orchestrator files it as one entry under `$PROJECT_ROOT/docs/self-improvement/categories/<category>/` (the project's backlog, never inside a host's layer mount; format: `$AGENT_LAYER_ROOT/docs/self-improvement/AGENT_SELF_IMPROVEMENT.md`).

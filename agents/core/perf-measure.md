@@ -83,7 +83,7 @@ Per AGENTS.md § Agent output contract § Helper class — these sections must a
   Pre-existing dominant rows: <list>  (context — what perf_temp: markers are competing against)
   ```
 - `## Outcome: <state>` — one of `applied | halted | failed | partial | aborted`. Telemetry keys on this line per AGENTS.md § Agent output contract.
-- `## Self-improvement` — only if a scenario was missing, the CLI didn't expose a needed field, or the fallback path took multiple round-trips. Empty is fine. Orchestrator appends to `docs/self-improvement/AGENT_SELF_IMPROVEMENT.md`.
+- `## Self-improvement` — only if a scenario was missing, the CLI didn't expose a needed field, or the fallback path took multiple round-trips. Empty is fine. Orchestrator files it as one entry under `$PROJECT_ROOT/docs/self-improvement/categories/<category>/` (the project's backlog, never inside a host's layer mount; format: `$AGENT_LAYER_ROOT/docs/self-improvement/AGENT_SELF_IMPROVEMENT.md`).
 
 ## Fallback — CLI unavailable
 
