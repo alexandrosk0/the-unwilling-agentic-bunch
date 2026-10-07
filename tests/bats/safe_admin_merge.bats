@@ -483,6 +483,9 @@ _cr_waiver_blockers() {
     run _cr_waiver_blockers '["cr-out-of-band"]' $'Waiver.\ncr-disposition: rate-limit-acked\n'
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+    run _cr_waiver_blockers '["cr-out-of-band"]' $'Waiver.\r\n  - cr-disposition: rate-limit-acked\r\n'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
     # The placeholder, a blank suffix or a bare prefix does not.
     local label
     for label in 'cr-disposition:<reason>' 'cr-disposition: ' 'cr-disposition:'; do
@@ -493,6 +496,14 @@ _cr_waiver_blockers() {
     run _cr_waiver_blockers '["cr-out-of-band"]' $'Use cr-disposition:<reason> to waive.\n'
     [ "$status" -eq 0 ]
     [[ "$output" == *"CR findings"* ]]
+    # A blank body marker does not borrow the next line as its reason.
+    run _cr_waiver_blockers '["cr-out-of-band"]' $'cr-disposition:\nUnrelated text\n'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CR findings"* ]]
+    # Prose that mentions the token mid-line is not a marker.
+    run _cr_waiver_blockers '["cr-out-of-band"]' $'Rate limit hit; no cr-disposition: needed here.\n'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CR findings"* ]]
 }
 
 @test "the poller takes the same cr-disposition predicate as safe-admin-merge" {
@@ -501,7 +512,7 @@ _cr_waiver_blockers() {
     local root label body
     root="$(git rev-parse --show-toplevel)"
     label='any(test("^cr-disposition:[^[:space:]<]"))'
-    body='test("cr-disposition:[[:space:]]*[^[:space:]<]"; "i")'
+    body='test("(^|\n)[[:blank:]]*([-*][[:blank:]]+)?cr-disposition:[[:blank:]]*[^[:space:]<]"; "i")'
     grep -qF "$label" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
     grep -qF "$body" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
     [ "$(grep -cF "$label" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 2 ]

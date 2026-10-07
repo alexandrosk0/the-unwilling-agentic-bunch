@@ -285,7 +285,7 @@ evaluate_rollup() {
         # ($crdisposition). Body-only waivers (documented in merge-gates.md) must
         # not leave safe-admin-merge blocking CR findings* forever.
         | (($labels | any(test("^cr-disposition:[^[:space:]<]")))
-           or ((.body // "") | test("cr-disposition:[[:space:]]*[^[:space:]<]"; "i"))) as $crDisp
+           or ((.body // "") | test("(^|\n)[[:blank:]]*([-*][[:blank:]]+)?cr-disposition:[[:blank:]]*[^[:space:]<]"; "i"))) as $crDisp
         | (sam_latest) as $latest
         # Resolve each deduped rollup row to a (name, green?) pair; bind as $rows so
         # the absent-required cross-check below can see which names are present.
@@ -472,7 +472,7 @@ downgraded_red_checks() {
         | ($labels | any(. == "plan-lock-out-of-band")) as $planlockOob
         | ($labels | any(. == "cr-out-of-band")) as $crOob
         | (($labels | any(test("^cr-disposition:[^[:space:]<]")))
-           or ((.body // "") | test("cr-disposition:[[:space:]]*[^[:space:]<]"; "i"))) as $crDisp
+           or ((.body // "") | test("(^|\n)[[:blank:]]*([-*][[:blank:]]+)?cr-disposition:[[:blank:]]*[^[:space:]<]"; "i"))) as $crDisp
         | (sam_latest) as $latest
         | $latest[]
         | sam_name as $name
