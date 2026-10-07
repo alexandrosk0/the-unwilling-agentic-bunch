@@ -93,7 +93,15 @@ while [ $# -gt 0 ]; do
         # two-arg form above (shell-lint FLAG_PARITY requires a `=` twin for any
         # value-taking flag; it is also the form that survives being pasted into a
         # CI `run:` line without arg-splitting surprises).
-        --range=*) LO="${1#*=}"; HI="${LO#*[-,]}"; LO="${LO%%[-,]*}"; shift ;;
+        --range=*)
+            # Same validation as the two-arg form: both bounds, separated by `-` or `,`. Without a
+            # separator the strips below would make LO == HI and read `--range=5` as a one-PR range.
+            LO="${1#*=}"
+            case "$LO" in
+                ?*[-,]?*) ;;
+                *) echo "historical-review-worklist: --range=<lo>-<hi> needs both bounds, separated by - or ," >&2; exit 2 ;;
+            esac
+            HI="${LO#*[-,]}"; LO="${LO%%[-,]*}"; shift ;;
         --merged-list) need_args 2 "$1" "$@"; MERGED_LIST="$2"; shift 2 ;;
         --merged-list=*) MERGED_LIST="${1#*=}"; shift ;;
         --against) need_args 2 "$1" "$@"; AGAINST="$2"; shift 2 ;;
@@ -158,7 +166,10 @@ is_merge_commit() {
 }
 
 if [ "$MODE" = "range" ]; then
-    case "$LO$HI" in ''|*[!0-9]*) echo "historical-review-worklist: --range <lo> <hi> required (integers)" >&2; exit 2 ;; esac
+    # Each bound on its own: a check on "$LO$HI" passes `--range "" 59` as the integer 59.
+    for bound in "$LO" "$HI"; do
+        case "$bound" in ''|*[!0-9]*) echo "historical-review-worklist: --range <lo> <hi> required (integers)" >&2; exit 2 ;; esac
+    done
     if ! git rev-parse --verify -q "${AGAINST}^{commit}" >/dev/null 2>&1; then
         echo "historical-review-worklist: '$AGAINST' does not resolve — fetch first" >&2; exit 2
     fi
@@ -470,16 +481,25 @@ rm -rf "$repoD"
 # Fixture E — a value-taking flag left short at the end is a usage error. The parser runs
 # without errexit, so a failed `shift N` used to loop forever; `timeout` turns a hang into a FAIL.
 # selftest: asserts-failure — every short trailing value-taking flag must exit 2, not loop.
+skipE=""
 if command -v timeout >/dev/null 2>&1; then
-    for argsE in "--range" "--range 5" "--merged-list" "--against" "--range 1 2 --merge-oids"; do
+    for argsE in "--range" "--range 5" "--merged-list" "--against" "--range 1 2 --merge-oids" "--range=5" "--range=5-" "--range=-5"; do
         # shellcheck disable=SC2086  # word-split the fixture on purpose
         timeout 10 bash "$self" $argsE >/dev/null 2>&1
         rcE=$?
         [ "$rcE" = "2" ] || { echo "FAIL(E): '$argsE' exit $rcE, want 2 (124 = hung)"; fail=1; }
     done
 else
+    skipE=" (arg parsing SKIPPED: no timeout command)"
     echo "SKIP(E): no timeout command, so the short-trailing-flag cases are not run"
 fi
 
-if [ "$fail" = "0" ]; then echo "historical-review-worklist --selftest: PASS (4 e2e fixtures + arg parsing)"; exit 0; fi
+if [ "$fail" = "0" ]; then
+    if [ -n "$skipE" ]; then
+        echo "historical-review-worklist --selftest: PASS (4 e2e fixtures)$skipE"
+    else
+        echo "historical-review-worklist --selftest: PASS (4 e2e fixtures + arg parsing)"
+    fi
+    exit 0
+fi
 echo "historical-review-worklist --selftest: FAIL"; exit 1
