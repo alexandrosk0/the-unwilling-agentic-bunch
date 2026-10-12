@@ -710,15 +710,67 @@ set_fixture() {
     rm -f "$f"
 }
 
-@test "CR COMMENTED on current head with empty body -> pass (no Actionable header, conservative pass)" {
+@test "CR blank-bodied COMMENTED on current head is a thread reply, not a review -> no pass" {
+    # Replying to a review thread creates a blank-bodied review on the head the
+    # reply was posted at. It used to read as "COMMENTED (no Actionable header)"
+    # and pass a head CR never reviewed (the-unwilling-agentic-bunch#5 at 97ac481:
+    # CR's only node on the head was its reply to a fixed thread).
     local f
     f="$(fixture_override "$FIXTURES_DIR/merge_gates_cr_current_clean.json" \
         "data.repository.pullRequest.reviews.nodes.0.body" \
-        '""')"
+        '"  \n"')"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"CodeRabbit: NONE+pending"* ]]
+    [[ "$output" != *"COMMENTED (no Actionable header)"* ]]
+    rm -f "$f"
+}
+
+@test "CR thread reply on the head after findings on a prior head -> STALE_WITH_FINDINGS block" {
+    # The common shape: CR found 5 issues on the old head, the fix was pushed, and
+    # CR answered a reply on its thread. The answer is not a review of the fix.
+    local f
+    f="$(mktemp)"
+    jq '.data.repository.pullRequest.reviews.nodes += [{
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            "state": "COMMENTED", "submittedAt": "2026-05-21T11:00:00Z",
+            "commit": {"oid": "headSHAnew"}, "body": ""}]' \
+        "$FIXTURES_DIR/merge_gates_cr_stale_findings.json" > "$f"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"STALE_WITH_FINDINGS (5 actionable"* ]]
+    rm -f "$f"
+}
+
+@test "CR thread reply after a findings review on the same head keeps the Actionable count -> block" {
+    # The later blank reply used to displace the review body, hiding the count.
+    local f
+    f="$(mktemp)"
+    jq '.data.repository.pullRequest.reviews.nodes += [{
+            "author": {"login": "coderabbitai[bot]", "__typename": "Bot"},
+            "state": "COMMENTED", "submittedAt": "2026-05-21T11:00:00Z",
+            "commit": {"oid": "headSHA999"}, "body": ""}]' \
+        "$FIXTURES_DIR/merge_gates_cr_findings.json" > "$f"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"COMMENTED (3 actionable"* ]]
+    rm -f "$f"
+}
+
+@test "CR APPROVED on current head with a blank body is still a review -> pass" {
+    # The blank-body filter is for COMMENTED replies only; an approval is a verdict.
+    local f
+    f="$(mktemp)"
+    jq '.data.repository.pullRequest.reviews.nodes[0] += {"state": "APPROVED", "body": ""}' \
+        "$FIXTURES_DIR/merge_gates_cr_current_clean.json" > "$f"
     set_fixture "$f"
     run poll_merge_gates org repo 1
     [ "$status" -eq 0 ]
-    [[ "$output" == *"COMMENTED (no Actionable header)"* ]]
+    [[ "$output" == *"CodeRabbit: APPROVED"* ]]
     rm -f "$f"
 }
 
@@ -801,6 +853,30 @@ set_fixture() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"NONE+status-SUCCESS+inline-evidence"* ]]
     [[ "$output" == *"GATES_PASSED"* ]]
+    rm -f "$f"
+    unset MERGE_GATES_CR_INSTALLED
+}
+
+@test "C4 prong 2: a CR reply in a thread a human opened is not inline evidence -> block during grace" {
+    # Only a thread CR opened on the head shows CR reviewed it. A CR answer to a
+    # human question on the head says nothing about the rest of the diff.
+    local f
+    f="$(mktemp)"
+    jq '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes
+            += [{"__typename":"StatusContext","context":"CodeRabbit","state":"SUCCESS","isRequired":false}]
+        | .data.repository.pullRequest.reviewThreads.nodes
+            += [{"isResolved": true, "isOutdated": false,
+                 "comments": {"pageInfo": {"hasNextPage": false},
+                              "nodes": [{"author": {"login":"someuser", "__typename":"User"},
+                                         "commit": {"oid":"abc123"}},
+                                        {"author": {"login":"coderabbitai[bot]", "__typename":"Bot"},
+                                         "commit": {"oid":"abc123"}}]}}]' \
+        "$FIXTURES_DIR/merge_gates_pass.json" > "$f"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"NONE+status-SUCCESS-waiting-for-inline"* ]]
     rm -f "$f"
     unset MERGE_GATES_CR_INSTALLED
 }
@@ -3283,6 +3359,24 @@ blocked_with_bot_threads() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"GATES_PASSED"* ]]
     [[ "$output" == *"Bugbot: COMMENTED (clean)"* ]]
+}
+
+@test "Bugbot (6b) a blank-bodied cursor[bot] reply on the head is not a review -> STALE grace wait" {
+    # Bugbot reviewed a prior commit; its only node on the head is a thread reply.
+    # Same rule as CodeRabbit: the reply does not make the head reviewed.
+    local f
+    f="$(mktemp)"
+    jq '.data.repository.pullRequest as $pr
+        | .data.repository.pullRequest.reviews.nodes += [{
+            "author": {"login": "cursor[bot]", "__typename": "Bot"},
+            "state": "COMMENTED", "submittedAt": "2099-01-01T00:00:00Z",
+            "commit": {"oid": $pr.headRefOid}, "body": ""}]' \
+        "$FIXTURES_DIR/merge_gates_bb_stale.json" > "$f"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Bugbot: STALE-grace"* ]]
+    rm -f "$f"
 }
 
 @test "Bugbot (7) bugbot-out-of-band label with no review on head yet -> PASS (waiver short-circuits grace)" {
