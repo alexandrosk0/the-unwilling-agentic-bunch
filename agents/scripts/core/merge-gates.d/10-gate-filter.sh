@@ -245,7 +245,14 @@ _MG_GATE_FILTER_TEMPLATE="$_MG_JQ_DISPOSITION_DEF"'
 # 33/34 so the poll loop can print an actionable WARN instead of a silent
 # block.
 | ($labelReactiveRed - $downgraded) as $staleOverride
-| ([$pr.reviews.nodes[] | select(.author.login == "coderabbitai" or .author.login == "coderabbitai[bot]")]) as $crall
+# $crall skips blank-bodied COMMENTED reviews by CR. A reply to a review thread
+# creates one, on whatever head was current when the reply was posted; it is a
+# reply, not a review of that head. Counted, a reply after a push read as
+# "COMMENTED (no Actionable header)" and passed a head CR never reviewed, and a
+# reply after a real review on the same head displaced that review body and hid
+# its Actionable count. The host CR finding gate applies the same rule (#1996).
+| ([$pr.reviews.nodes[] | select((.author.login == "coderabbitai" or .author.login == "coderabbitai[bot]")
+      and (.state != "COMMENTED" or ((.body // "") | test("[^[:space:]]"))))]) as $crall
 | (if ($crall | length) == 0 then "NONE"
    else (([$crall[] | select(.commit.oid == $sha)]) as $cur
          | if ($cur | length) == 0 then "STALE" else ($cur | sort_by(.submittedAt) | .[-1].state) end) end) as $crstate
@@ -388,7 +395,10 @@ _MG_GATE_FILTER_TEMPLATE="$_MG_JQ_DISPOSITION_DEF"'
 # signal into one token — decision order is load-bearing (see the bash bucket):
 # a head review wins, else TERMINAL (no-wedge), else STALE (prior-commit review
 # → grace), else ABSENT (Bugbot-free / not engaged → never waited on).
-| ([$pr.reviews.nodes[] | select(.author.login == "cursor" or .author.login == "cursor[bot]")]) as $bball
+# Like $crall, $bball skips blank-bodied COMMENTED nodes: a thread reply, not a
+# review of the head it lands on.
+| ([$pr.reviews.nodes[] | select((.author.login == "cursor" or .author.login == "cursor[bot]")
+      and (.state != "COMMENTED" or ((.body // "") | test("[^[:space:]]"))))]) as $bball
 | ([$pr.comments.nodes[]?
     | select(.author.login == "cursor" or .author.login == "cursor[bot]")
     | (.body // "")]
@@ -440,7 +450,10 @@ _MG_GATE_FILTER_TEMPLATE="$_MG_JQ_DISPOSITION_DEF"'
               and (.conclusion != null))
           then (if ((.conclusion) | IN("SUCCESS","NEUTRAL","SKIPPED")) then "SUCCESS" else .conclusion end)
         else empty end] | (.[0] // "ABSENT")),
-    ([$pr.reviewThreads.nodes[]? | .comments.nodes[]?
+    # Threads CR opened on the head: only the first comment of a thread. A CR
+    # reply in a thread someone else opened is not evidence that CR reviewed
+    # the head, the same rule as the blank-body filter on $crall.
+    ([$pr.reviewThreads.nodes[]? | .comments.nodes[0]? // empty
       | select((.author.login == "coderabbitai" or .author.login == "coderabbitai[bot]") and (.commit.oid // "") == $sha)] | length),
     (([$pr.comments.nodes[] | select(.author.__typename != "Bot" and ((.author.login // "") | ascii_downcase) != ("__ORCH_USER__" | ascii_downcase))] | length)
      + ([$pr.reviewThreads.nodes[] | select(.isResolved == false and .isOutdated == false

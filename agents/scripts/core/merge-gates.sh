@@ -1174,9 +1174,10 @@ poll_merge_gates() {
         # NONE) needlessly burned the full CR_GRACE_POLLS window instead of fast-passing.
         # SUCCESS is a positive signal; "ABSENT" if neither shape is present yet.
         local cr_status_state="${fields[13]}"
-        # C4 prong 2: count of CR review-thread comments anchored to the current
-        # head — positive evidence CR actively reviewed this commit (vs a bare
-        # placeholder StatusContext). The NONE branch uses it to gate the pass.
+        # C4 prong 2: count of review threads CR opened on the current head (a
+        # thread's first comment; CR replies do not count) — positive evidence CR
+        # actively reviewed this commit (vs a bare placeholder StatusContext). The
+        # NONE branch uses it to gate the pass.
         local cr_thread_comments_on_head="${fields[14]:--1}"
         # 1 when a CodeRabbit context (StatusContext OR CheckRun, ANY state incl.
         # in-progress) is present on the head — i.e. CR is already engaged (reviewing
