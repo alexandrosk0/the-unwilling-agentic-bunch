@@ -18,23 +18,26 @@
 # `<prefix>:<reason>` marker LINE in the PR body. Prepended to the gate filter
 # below and to safe-admin-merge.sh's jq programs, so the poller and the admin
 # path accept exactly the same attestations. A marker counts only when:
-#   * it starts its line (leading whitespace and a `-`/`*`/`+` list bullet are
+#   * it starts its line (leading blanks and a `-`/`*` list bullet are
 #     tolerated) — prose or a quoted error text that merely mentions the prefix
 #     does not attest anything;
 #   * it sits outside an HTML comment (a template placeholder never counts);
-#   * its reason is non-empty and not a `<...>` placeholder: pasting the gate's
-#     own error text (`plan-lock-disposition:<reason>`) is not a reason.
-# Labels follow the same reason rule. (NB: no apostrophes in these
-# single-quoted jq strings.)
+#   * its reason, on that same line, is non-empty and does not start with `<`:
+#     pasting the playbook placeholder or the gate's own error text
+#     (`plan-lock-disposition:<reason>`) is not a reason.
+# A label's reason must start right after the colon, neither blank nor `<`.
+# The body is split into lines before the match, so a blank marker never
+# borrows the next line as its reason. The host's CR finding gate applies the
+# same rule. (NB: no apostrophes in these single-quoted jq strings.)
 # shellcheck disable=SC2016  # single-quoted jq literal — $-refs are jq vars, not bash
 _MG_JQ_DISPOSITION_DEF='
 def disposition($labels; $body; $prefix):
   def _reason_filled:
     gsub("^[[:space:]]+|[[:space:]]+$"; "") as $r
-    | ($r | length) > 0 and ($r | test("^<[^>]*>") | not);
-  ("^[[:space:]]*([-*+][[:space:]]+)?" + $prefix + ":") as $lead
+    | ($r | length) > 0 and ($r | startswith("<") | not);
+  ("^[[:blank:]]*([-*][[:blank:]]+)?" + $prefix + ":") as $lead
   | ($labels | any(startswith($prefix + ":")
-                   and (.[(($prefix | length) + 1):] | _reason_filled)))
+                   and (.[(($prefix | length) + 1):] | test("^[^[:space:]<]"))))
     or (($body // "")
         | gsub("<!--[\\s\\S]*?-->"; "") | gsub("<!--[\\s\\S]*$"; "")
         | [splits("\r?\n")]

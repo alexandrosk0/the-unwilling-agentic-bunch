@@ -243,6 +243,32 @@ STUB
     [[ "$output" == *"Could not close Issue #40"* ]]
 }
 
+@test "a failed reconcile listing warns, closes nothing, and still exits 0" {
+    cat > "$STUB_BIN/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+    "auth status") exit 0 ;;
+    "repo view")   printf '%s\n' "${GH_REPO_SLUG-test/repo}" ;;
+    "issue list")
+        # The label-scoped reconcile listing fails (rate limit / API error).
+        if printf '%s\n' "$@" | grep -qx -- '--label'; then
+            echo "HTTP 502" >&2
+            exit 1
+        fi
+        printf '%s\n' "${GH_EXISTING_ISSUE-}"
+        ;;
+    "issue close") printf 'CLOSE %s\n' "$*" >> "$GH_LOG" ;;
+esac
+exit 0
+STUB
+    chmod +x "$STUB_BIN/gh"
+    make_lock quiet 1
+    sweep
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Could not list open plan-lock-stale Issues"* ]]
+    [ ! -f "$GH_LOG" ]
+}
+
 @test "an empty reconcile listing closes nothing" {
     make_lock quiet 1
     sweep

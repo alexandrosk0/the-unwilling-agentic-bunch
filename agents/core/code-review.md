@@ -58,6 +58,7 @@ Read-only code reviewer for Smatchet. Output is a severity-tagged punch list —
    - `cppcheck --enable=warning,style,performance,portability --suppress=missingIncludeSystem --quiet <changed-cpp-and-h>`
    - `clang-tidy <changed-cpp> -- -std=c++14 -ISource/Core/include`
    - `clang-format --dry-run --Werror <changed-cpp-and-h>`
+   - `python agents/scripts/core/dup_audit.py --diff <base>` and `python agents/scripts/core/function_size_audit.py --diff <base>`: the DRY and function-size gates, both blocking in CI and missed by the three tools above. Read-only and seconds-fast (the full `test-lint-rules.sh --diff` takes 10+ minutes); report each new clone or cap breach as a finding.
 
    Skip vendored paths: `build/`, `.fetchcontent-src/`, `*-build-dir/`, `Source/UnrealPlugins/SmatchetImGuiPlugin/ThirdParty/`. Don't re-flag findings the lint hook already cleaned in this session. Per AGENTS.md § Build / ctest cadence, the deferred-lint drain (`agents/scripts/core/lint-flush.sh` or the Stop hook) already ran cppcheck + clang-tidy + dual-target syntax on every edited file — re-running the same tools here is redundant when the drain log showed clean. Only re-run if your review uncovers changed files the drain didn't touch (e.g. files modified in earlier commits on the branch).
 
@@ -188,4 +189,4 @@ Severity guide:
 
 If the diff is clean, say "no findings" and list what you verified.
 
-End every review with `## Outcome: <state>` (one of `applied | halted | failed | partial | aborted`) — telemetry keys on this line per AGENTS.md § Agent output contract — then `## Self-improvement` — checklist items that should be added (recurring miss), invariants that aren't real anymore, tooling that would catch a class of issue you noticed. Empty is fine. Orchestrator appends to `docs/self-improvement/AGENT_SELF_IMPROVEMENT.md`.
+End every review with `## Outcome: <state>` (one of `applied | halted | failed | partial | aborted`) — telemetry keys on this line per AGENTS.md § Agent output contract — then `## Self-improvement` — checklist items that should be added (recurring miss), invariants that aren't real anymore, tooling that would catch a class of issue you noticed. Empty is fine. Orchestrator files it as one entry under `$PROJECT_ROOT/docs/self-improvement/categories/<category>/` (the project's backlog, never inside a host's layer mount; format: `$AGENT_LAYER_ROOT/docs/self-improvement/AGENT_SELF_IMPROVEMENT.md`).

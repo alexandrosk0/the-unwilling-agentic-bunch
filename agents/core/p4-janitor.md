@@ -81,7 +81,7 @@ Only after the user reviews the dry-run output should any `--apply` (or destruct
 
 ## Cron variant (deferred — not yet wired)
 
-The plan lists a daily checkpoint scheduled task (`p4d -jc`) as Phase 0 Step 6, deferred. The janitor pass can sit alongside it on the same schedule. Concrete script + scheduled-task spec → backlog `docs/self-improvement/categories/tooling.md` ("automate p4-janitor weekly pass via Windows Scheduled Task").
+The plan lists a daily checkpoint scheduled task (`p4d -jc`) as Phase 0 Step 6, deferred. The janitor pass can sit alongside it on the same schedule. Concrete script + scheduled-task spec → backlog entry `docs/self-improvement/categories/tooling/<YYYY-MM-DD>-<slug>.md` ("automate p4-janitor weekly pass via Windows Scheduled Task").
 
 ## Output contract
 
@@ -92,7 +92,7 @@ Per AGENTS.md § Agent output contract § Maintenance class — these sections m
 - `## Regression gate` — post-run sanity: `p4 verify -q //smatchet/...` output (silent on success, prints `BAD!` / `MISSING!` on damage). Plus a `p4 streams` + `p4 counters` re-inventory to confirm the destructive ops landed as intended.
 - `## Residue requiring user action` — items the agent refused to touch and is handing back: `p4 obliterate` requests (always refused; user resolves), force-delete-of-pending-stream requests (refused; user submits or reverts the pending CL first), env-var gaps (`P4PORT` / `P4USER` unset → user follows `docs/perforce/SETUP.md` § 1), archive damage detected by `p4 verify`. `"None"` is a valid value.
 - `## Outcome: <state>` — one of `applied | halted | failed | partial | aborted`. Telemetry keys on this line per AGENTS.md § Agent output contract.
-- `## Self-improvement` — friction notes from this pass that should propagate back to the agent prompt, the GC script, or the runbook. Empty is fine. Orchestrator appends to `docs/self-improvement/AGENT_SELF_IMPROVEMENT.md`.
+- `## Self-improvement` — friction notes from this pass that should propagate back to the agent prompt, the GC script, or the runbook. Empty is fine. Orchestrator files it as one entry under `$PROJECT_ROOT/docs/self-improvement/categories/<category>/` (the project's backlog, never inside a host's layer mount; format: `$AGENT_LAYER_ROOT/docs/self-improvement/AGENT_SELF_IMPROVEMENT.md`).
 
 ## Cross-links
 

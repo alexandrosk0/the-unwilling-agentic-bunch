@@ -137,6 +137,15 @@ def main():
                          "Run `git fetch --unshallow` (a plain `git fetch` stays shallow) and re-run.\n"
                          % args.repo)
         return 2
+    # The manifest's pathspecs are relative to the repository top, and git resolves a
+    # pathspec against the -C directory: from a subdirectory every spec would match
+    # nothing and the sweep would report an empty, clean-looking inventory.
+    top = subprocess.run(["git", "-C", args.repo, "rev-parse", "--show-toplevel"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if top.returncode != 0:
+        sys.stderr.write("seed-audit-sweep: cannot resolve the work-tree top of %s\n" % args.repo)
+        return 2
+    args.repo = top.stdout.decode("utf-8", "replace").strip()
 
     rng = ("%s..HEAD" % args.since) if args.since else "HEAD"
     inv = Inventory(specs)
@@ -178,9 +187,15 @@ def main():
         else:
             inv.scan(line, sha, "<commit-message>")
 
+    # Checked in both modes: with --since an empty history is a legitimate "nothing new", so only
+    # the manifest's own match against HEAD can show the sweep was looking at real paths.
+    head_files = [f for f in git_lines(args.repo, ["ls-files", "--"] + specs) if f]
+    if not head_files:
+        sys.stderr.write("seed-audit-sweep: the manifest matched no tracked file in %s, so there is "
+                         "nothing the coverage check could prove\n" % args.repo)
+        return 2
     unseen = []
     if not args.since:
-        head_files = [f for f in git_lines(args.repo, ["ls-files", "--"] + specs) if f]
         unseen = sorted(set(head_files) - seen)
 
     out = sys.stdout

@@ -244,14 +244,19 @@ closed_count=0
 issue_listing=""
 if [ "$locks_authoritative" -eq 1 ]; then
     # --limit well above the plausible number of concurrent locks; gh's default
-    # of 30 would silently leave the overflow open forever.
-    issue_listing=$(gh issue list \
+    # of 30 would silently leave the overflow open forever. A failed listing
+    # warns: otherwise it reads as "nothing to close" (closed=0) and a lasting
+    # failure would leave every resolved lock's Issue open with no trace.
+    if ! issue_listing=$(gh issue list \
         --repo "$REPO" \
         --state open \
         --label "plan-lock-stale" \
         --limit 200 \
         --json number,title \
-        --jq '.[] | "\(.number)\t\(.title)"' 2>/dev/null || true)
+        --jq '.[] | "\(.number)\t\(.title)"' 2>/dev/null); then
+        issue_listing=""
+        echo "::warning::Could not list open plan-lock-stale Issues; skipping Issue auto-close this run."
+    fi
 fi
 
 # Heredoc rather than a pipe so `closed_count` survives the loop (a pipeline
