@@ -21,6 +21,11 @@
           },
           {
             "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/layer-run.sh\" agents/scripts/core/merge-snapshot-holes.sh --nudge",
+            "timeout": 10000
+          },
+          {
+            "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/layer-run.sh\" agents/scripts/core/followup-due-nudge.sh --nudge",
             "timeout": 10000
           },
@@ -157,6 +162,16 @@
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretool-workflow-fleet-preflight.sh\"",
             "timeout": 15000
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|PowerShell|mcp__.*__(enable_pr_auto_merge|set_auto_merge)|set_auto_merge",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-auto-merge-arm.sh\"",
+            "timeout": 3000
           }
         ]
       }

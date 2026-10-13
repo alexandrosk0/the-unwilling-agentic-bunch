@@ -46,8 +46,10 @@ teardown() {
     # alpha + charlie survive (untouched since A); bravo does NOT (B rewrote it).
     echo "$output" | grep -q "alpha"
     echo "$output" | grep -q "charlie"
-    ! echo "$output" | grep -q "bravo"          # original line 2 gone
-    ! echo "$output" | grep -q "BRAVO-FIXED"    # B's line is not A's survivor
+    # Counted, not `! grep`: bats ignores a negated status anywhere but the last
+    # line of a test, which made these two absence checks no-ops.
+    [ "$(grep -c "bravo" <<<"$output")" -eq 0 ]         # original line 2 gone
+    [ "$(grep -c "BRAVO-FIXED" <<<"$output")" -eq 0 ]   # B's line is not A's survivor
     echo "$output" | grep -q "2/3 introduced line(s) still alive"
 }
 

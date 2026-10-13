@@ -45,6 +45,22 @@ if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
     printf '%s\n' "$*" >> "${MERGE_SENTINEL:?}"
     exit 0
 fi
+# `gh pr diff <pr> --repo <o/r> --name-only` — the stale-red Plan-lock
+# re-check's changed-file list: $SAM_STUB_PR_DIFF (unset → no output).
+if [ "$1" = "pr" ] && [ "$2" = "diff" ]; then
+    [ -n "${SAM_STUB_PR_DIFF:-}" ] && printf '%s\n' "$SAM_STUB_PR_DIFF"
+    exit 0
+fi
+# The re-check reads why the red Plan-lock run failed: its run id, then its
+# annotation messages ($SAM_STUB_ANNOTATIONS; unset → unreadable).
+if [ "$1" = "api" ]; then
+    case "$2" in
+        */commits/*/check-runs*) echo 4242; exit 0 ;;
+        */check-runs/*/annotations)
+            [ -n "${SAM_STUB_ANNOTATIONS+x}" ] || exit 1
+            printf '%s\n' "$SAM_STUB_ANNOTATIONS"; exit 0 ;;
+    esac
+fi
 # `gh pr view` should never be reached when SAFE_ADMIN_MERGE_STUB_ROLLUP is set;
 # fail loudly if it is, so a test that forgets the stub can't pass silently.
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
@@ -59,6 +75,7 @@ STUB
 
 teardown() {
     rm -rf "$STUB_BIN_DIR"
+    unset SAM_STUB_PR_DIFF LTC_ROWS_OVERRIDE SAM_STUB_ANNOTATIONS
 }
 
 # A green rollup: every required + allow-listed check SUCCESS.
@@ -74,10 +91,10 @@ JSON
 
 # ----------------------------------------------------------------------------
 
-@test "--selftest passes (24/24) and dogfoods the gate" {
+@test "--selftest passes (26/26) and dogfoods the gate" {
     run bash "$SCRIPT" --selftest
     [ "$status" -eq 0 ]
-    [[ "$output" == *"PASS — safe-admin-merge --selftest (24/24)"* ]]
+    [[ "$output" == *"PASS — safe-admin-merge --selftest (26/26)"* ]]
 }
 
 @test "dedup-to-latest: older CANCELLED run with a newer SUCCESS run reads GREEN (exit 0, merge fires)" {
@@ -203,6 +220,78 @@ JSON
       {"__typename":"CheckRun","name":"Intent section","status":"COMPLETED","conclusion":"FAILURE"}]}'
     run bash "$SCRIPT" 1180
     [ "$status" -eq 0 ]
+    [ -f "$MERGE_SENTINEL" ]
+}
+
+# plan-lock-out-of-band parity with the poller (merge-gates.sh): the label is
+# honoured only with a plan-lock-disposition, and a red the poller's own
+# re-check finds stale is refused. LTC_ROWS_OVERRIDE injects the lock table
+# (branch<TAB>epoch<TAB>slug<TAB>path); the gh stub serves the PR diff.
+planlock_rollup() {
+    # Usage: planlock_rollup <labels JSON> [<body>]
+    jq -nc --argjson labels "$1" --arg body "${2:-}" '{
+        state: "OPEN", labels: $labels, body: $body,
+        url: "https://github.com/o/r/pull/2300",
+        headRefName: "feat/planlock", headRefOid: "abc123",
+        statusCheckRollup: [
+          {__typename: "StatusContext", context: "Windows + MSVC", state: "SUCCESS"},
+          {__typename: "StatusContext", context: "Test-delta gate", state: "SUCCESS"},
+          {__typename: "CheckRun", name: "Plan-lock gate", status: "COMPLETED", conclusion: "FAILURE"}]}'
+}
+
+@test "plan-lock-out-of-band ALONE does NOT downgrade a RED Plan-lock gate (disposition required: exit 1, no merge)" {
+    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"}]')"
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP
+    run bash "$SCRIPT" 2300
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Plan-lock gate"* ]]
+    [ ! -f "$MERGE_SENTINEL" ]
+}
+
+@test "plan-lock-out-of-band + a <reason> placeholder body line is not a disposition (exit 1, no merge)" {
+    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"}]' \
+        "plan-lock-disposition:<reason>")"
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP
+    run bash "$SCRIPT" 2300
+    [ "$status" -eq 1 ]
+    [ ! -f "$MERGE_SENTINEL" ]
+}
+
+@test "plan-lock-out-of-band + disposition with a LIVE collision on re-check downgrades (exit 0, merge fires)" {
+    local rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/other-branch\t%s\tlive-lock\tdocs/plans/INDEX.md\n' "$(date -u +%s)" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows" SAM_STUB_PR_DIFF="docs/plans/INDEX.md"
+    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:coordinated"}]')"
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP
+    run bash "$SCRIPT" 2300
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"stale red"* ]]
+    [ -f "$MERGE_SENTINEL" ]
+}
+
+@test "plan-lock-out-of-band + disposition over a STALE red (lock aged out) is REFUSED (exit 1, no merge)" {
+    local rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/other-branch\t%s\taged-out\tdocs/plans/INDEX.md\n' \
+        "$(( $(date -u +%s) - 20 * 24 * 3600 ))" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows" SAM_STUB_PR_DIFF="docs/plans/INDEX.md"
+    # The red the gate posted was a collision (its annotation) — the only kind
+    # of red a clean re-check can call stale.
+    export SAM_STUB_ANNOTATIONS="plan-lock-gate: 'docs/plans/INDEX.md' overlaps the write set of plan-lock 'aged-out', held by a different branch."
+    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"}]' \
+        $'## Intent\nx\n\nplan-lock-disposition: crossed aged-out (orphaned lock)\n')"
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP
+    run bash "$SCRIPT" 2300
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"stale red — re-run"* ]]
+    [ ! -f "$MERGE_SENTINEL" ]
+}
+
+@test "plan-lock-out-of-band + disposition with re-check inputs unavailable -> WARN, downgrade stands (exit 0)" {
+    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:coordinated"}]')"
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP
+    run bash "$SCRIPT" 2300
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not re-evaluate the Plan-lock gate red"* ]]
     [ -f "$MERGE_SENTINEL" ]
 }
 
@@ -520,16 +609,30 @@ _cr_waiver_blockers() {
 }
 
 @test "the poller takes the same cr-disposition predicate as safe-admin-merge" {
-    # The poller's filter is one jq program inside the merge-gates pipeline, so it is pinned to
-    # the exact predicate text the behavioural test above exercises through safe-admin-merge.
-    local root label body
+    # One attestation rule across the layer: the poller and all three safe-admin-merge CR checks
+    # read cr-disposition through the poller's own disposition() reader, with no inline copy
+    # left to drift, so the behavioural test above covers the poller too.
+    local root
     root="$(git rev-parse --show-toplevel)"
-    label='any(test("^cr-disposition:[^[:space:]<]"))'
-    body='test("(^|\n)[[:blank:]]*([-*][[:blank:]]+)?cr-disposition:[[:blank:]]*[^[:space:]<]"; "i")'
-    grep -qF "$label" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
-    grep -qF "$body" "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
-    # safe-admin-merge keeps one copy, in its shared jq defs, used by all three CR checks.
-    [ "$(grep -cF "$label" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 1 ]
-    [ "$(grep -cF "$body" "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 1 ]
+    grep -qF 'disposition($labels; $pr.body; "cr-disposition")' "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
+    grep -qF 'def sam_cr_disposition: disposition([.labels[]?.name]; .body; "cr-disposition");' \
+        "$root/agents/scripts/core/safe-admin-merge.sh"
     [ "$(grep -cF 'sam_cr_disposition as $crDisp' "$root/agents/scripts/core/safe-admin-merge.sh")" -eq 3 ]
+    run grep -nE 'test\("\^?cr-disposition|startswith\("cr-disposition' \
+        "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh" "$root/agents/scripts/core/safe-admin-merge.sh"
+    [ "$status" -eq 1 ]
+    # The reader itself: a filled-in reason attests, a blank one or a `<` placeholder does not.
+    # shellcheck source=/dev/null
+    . "$root/agents/scripts/core/merge-gates.d/10-gate-filter.sh"
+    reads() { jq -n --argjson l "$1" --arg b "$2" "$_MG_JQ_DISPOSITION_DEF"' disposition($l; $b; "cr-disposition")'; }
+    [ "$(reads '["cr-disposition:follow-up"]' '')" = true ]
+    [ "$(reads '["cr-disposition:"]' '')" = false ]
+    [ "$(reads '["cr-disposition:<reason>"]' '')" = false ]
+    [ "$(reads '["cr-disposition:<reason"]' '')" = false ]
+    [ "$(reads '["cr-disposition: follow-up"]' '')" = false ]
+    [ "$(reads '[]' 'cr-disposition: acked in #12')" = true ]
+    [ "$(reads '[]' '* cr-disposition: acked in #12')" = true ]
+    [ "$(reads '[]' 'cr-disposition: <reason>')" = false ]
+    [ "$(reads '[]' $'cr-disposition:\nUnrelated text')" = false ]
+    [ "$(reads '[]' '<!-- cr-disposition: in a comment -->')" = false ]
 }

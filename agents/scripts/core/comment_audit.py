@@ -15,6 +15,7 @@ See docs/plans/shipped/reduce-source-comment-bloat.md.
 """
 
 import argparse
+import collections
 import json
 import os
 import re
@@ -363,19 +364,70 @@ def _merge_base_or_ref(ref):
     return ref
 
 
+def _in_sweep_scope(path):
+    """True for a first-party C++ path the comment sweep covers."""
+    return path.endswith(CPP_EXT) and path.startswith(SWEEP_ROOTS) \
+        and not any(s in path for s in EXCLUDE_SUBSTR)
+
+
+def _removed_comment_counter(diff):
+    """Counter of (new-side path, `.strip()`-normalised text) for the full-line comments REMOVED
+    in a unified diff (in-scope files only). A comment that is moved or re-indented within a file
+    (clang-format reflow, relocation into a less-nested helper) shows up as one removed + one added
+    line with the same stripped text in the same file. Keying by the file's NEW-side path follows a
+    rename (`--- a/<old>` / `+++ b/<new>`, the diff is generated with -M) while a comment removed
+    from file A never excuses an identical new one in file B, and a deleted file (`+++ /dev/null`)
+    excuses nothing."""
+    removed = collections.Counter()
+    in_header = False
+    new_path = None
+    for ln in diff.splitlines():
+        if ln.startswith("diff --git "):
+            in_header, new_path = True, None
+        elif in_header and ln.startswith("+++ "):
+            new_path = ln[6:] if ln.startswith("+++ b/") else None
+        elif ln.startswith("@@"):
+            in_header = False
+        elif not in_header and ln.startswith("-") and new_path and _in_sweep_scope(new_path):
+            body = ln[1:]
+            kinds = cl.classify_line_kinds(body + "\n")
+            if kinds and kinds[0] == "full_comment":
+                removed[(new_path, body.strip())] += 1
+    return removed
+
+
+def _drop_relocated(hits, removed):
+    """Drop each added-line hit whose (path, stripped text) matches a still-unconsumed REMOVED
+    comment of the same file in the same diff, consuming one count per match: a relocated /
+    re-indented pre-existing comment is grandfathered, while a genuinely NEW copy beyond what was
+    removed — or one whose original lived in another file — still flags."""
+    left = collections.Counter(removed)
+    kept = []
+    for hit in hits:
+        key = (hit[0], hit[4].strip())
+        if left[key] > 0:
+            left[key] -= 1
+            continue
+        kept.append(hit)
+    return kept
+
+
 def _scan_added_noise(ref):
     """Scan lines ADDED vs the merge-base of <ref>; return the noise-bucket hits as
     [(path, line_no, bucket, rule_id, body), ...]. `line_no` is the working-tree (new-side)
     line number; `bucket` is the classify_comment id; `rule_id` is the gate rule name.
-    Deviation-suppressed lines are excluded. Shared by --diff (report) and --fix (strip) so
-    both see an identical set."""
+    Deviation-suppressed lines are excluded, as are added lines that merely relocate or
+    re-indent a comment the same diff removed (_drop_relocated). Shared by --diff (report) and
+    --fix (strip) so both see an identical set."""
     ref = _merge_base_or_ref(ref)
     rule_for = {
         "cut-blank": "comment-blank-run",
         "cut-decorative": "comment-decorative-banner",
         "flag-commented-code": "comment-commented-out-code",
     }
-    diff = _git(["diff", "--unified=0", ref, "--", *[r + "**" for r in SWEEP_ROOTS]])
+    # -M: a renamed file pairs its removed comments with their re-added copies (see
+    # _removed_comment_counter) whatever the caller's diff.renames config says.
+    diff = _git(["diff", "-M", "--unified=0", ref, "--", *[r + "**" for r in SWEEP_ROOTS]])
     cur_file = None
     cur_line = 0
     hits = []
@@ -435,8 +487,7 @@ def _scan_added_noise(ref):
             cur_line = int(m.group(1)) if m else 0
         elif ln.startswith("+") and not ln.startswith("+++"):
             body = ln[1:]
-            if cur_file and cur_file.endswith(CPP_EXT) and cur_file.startswith(SWEEP_ROOTS) \
-                    and not any(s in cur_file for s in EXCLUDE_SUBSTR):
+            if cur_file and _in_sweep_scope(cur_file):
                 kinds = cl.classify_line_kinds(body + "\n")
                 if kinds and kinds[0] == "full_comment":
                     b = classify_comment(body.strip(), body)
@@ -445,7 +496,7 @@ def _scan_added_noise(ref):
                             and not (b == "cut-blank" and allowed_separator(cur_file, cur_line)):
                         hits.append((cur_file, cur_line, b, rule_for[b], body))
             cur_line += 1
-    return hits
+    return _drop_relocated(hits, _removed_comment_counter(diff))
 
 
 def run_diff_mode(ref):
@@ -643,10 +694,82 @@ def run_selftest():
                   % (expected, got, lines))
             fails += 1
 
+    # Relocation/re-indent grandfathering: a comment the SAME diff removed and re-added (moved
+    # into a less-nested helper, or re-indented) is not new noise — one removed line consumes
+    # exactly one matching added hit; a second, genuinely new copy still flags. Removed CODE
+    # lines and out-of-scope files never feed the counter.
+    reloc_diff = "\n".join([
+        "diff --git a/Source/Core/src/A.cpp b/Source/Core/src/A.cpp",
+        "--- a/Source/Core/src/A.cpp",
+        "+++ b/Source/Core/src/A.cpp",
+        "@@ -10 +9,0 @@",
+        "-    // int legacy = compute();",
+        "-    int live = 0;",
+        "@@ -0,0 +20,2 @@",
+        "+        // int legacy = compute();",
+        "+        // int legacy = compute();",
+        "diff --git a/Source/Core/ThirdParty/x.cpp b/Source/Core/ThirdParty/x.cpp",
+        "--- a/Source/Core/ThirdParty/x.cpp",
+        "+++ b/Source/Core/ThirdParty/x.cpp",
+        "@@ -1 +0,0 @@",
+        "-// int vendored = 1;",
+    ])
+    removed = _removed_comment_counter(reloc_diff)
+    if dict(removed) != {("Source/Core/src/A.cpp", "// int legacy = compute();"): 1}:
+        print("FAIL: _removed_comment_counter expected one in-scope removed comment, got %r" % dict(removed))
+        fails += 1
+    reloc_hits = [("Source/Core/src/A.cpp", 20, "flag-commented-code", "comment-commented-out-code",
+                   "        // int legacy = compute();"),
+                  ("Source/Core/src/A.cpp", 21, "flag-commented-code", "comment-commented-out-code",
+                   "        // int legacy = compute();")]
+    kept = _drop_relocated(reloc_hits, removed)
+    if [h[1] for h in kept] != [21]:
+        print("FAIL: _drop_relocated expected only the second (new) copy to flag, kept %r" % kept)
+        fails += 1
+    # selftest: asserts-failure — a banner removed from file A (or a deleted file) must NOT
+    # excuse an identical new banner in file B; a renamed file's moved banner IS excused.
+    banner = "// ======================================"
+    xfile_diff = "\n".join([
+        "diff --git a/Source/Core/src/A.cpp b/Source/Core/src/A.cpp",
+        "--- a/Source/Core/src/A.cpp",
+        "+++ b/Source/Core/src/A.cpp",
+        "@@ -5 +4,0 @@",
+        "-" + banner,
+        "diff --git a/Source/Core/src/Gone.cpp b/Source/Core/src/Gone.cpp",
+        "deleted file mode 100644",
+        "--- a/Source/Core/src/Gone.cpp",
+        "+++ /dev/null",
+        "@@ -1 +0,0 @@",
+        "-" + banner,
+        "diff --git a/Source/Core/src/Old.cpp b/Source/Core/src/New.cpp",
+        "similarity index 90%",
+        "rename from Source/Core/src/Old.cpp",
+        "rename to Source/Core/src/New.cpp",
+        "--- a/Source/Core/src/Old.cpp",
+        "+++ b/Source/Core/src/New.cpp",
+        "@@ -3 +2,0 @@",
+        "-" + banner,
+        "@@ -0,0 +7 @@",
+        "+    " + banner,
+    ])
+    xremoved = _removed_comment_counter(xfile_diff)
+    want = {("Source/Core/src/A.cpp", banner): 1, ("Source/Core/src/New.cpp", banner): 1}
+    if dict(xremoved) != want:
+        print("FAIL: _removed_comment_counter expected per-file keys following the rename, got %r"
+              % dict(xremoved))
+        fails += 1
+    xhits = [("Source/Core/src/B.cpp", 3, "cut-decorative", "comment-decorative-banner", banner),
+             ("Source/Core/src/New.cpp", 7, "cut-decorative", "comment-decorative-banner", "    " + banner)]
+    xkept = _drop_relocated(xhits, xremoved)
+    if [(h[0], h[1]) for h in xkept] != [("Source/Core/src/B.cpp", 3)]:
+        print("FAIL: _drop_relocated must flag the cross-file copy and excuse only the renamed one, kept %r"
+              % xkept)
+        fails += 1
+
     if fails:
         print("comment_audit --selftest: FAIL (%d)" % fails)
         return 1
-    print("comment_audit --selftest: PASS (%d flag + %d prose fixtures + strip-helper + %d separator + %d deviation-wrap)"
+    print("comment_audit --selftest: PASS (%d flag + %d prose fixtures + strip-helper + %d separator + %d deviation-wrap + relocation + cross-file/rename)"
           % (len(flag), len(prose), len(sep_ok), len(dev_cases)))
     return 0
 

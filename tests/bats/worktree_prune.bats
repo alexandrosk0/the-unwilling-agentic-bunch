@@ -22,14 +22,30 @@ setup() {
     ( cd "$MAIN" && echo seed > s && git add -A && git commit -qm seed )
     WT="$(mktemp -d)/wt-x"
     git -C "$MAIN" worktree add -q -b feat/x "$WT" >/dev/null 2>&1
+    # A just-created worktree is "active" under the default 24 h idle guard; age
+    # it so the reap paths below exercise the default threshold.
+    age_worktree "$WT" 48
     STUB="$(mktemp -d)"
-    printf '#!/usr/bin/env bash\nprintf "feat/x\\tMERGED\\n"\n' > "$STUB/gh"
+    # The stub PR is MERGED at the worktree's current tip (headRefOid), the shape
+    # a reap requires; the moved-tip case below commits past it.
+    PR_HEAD_OID="$(git -C "$WT" rev-parse HEAD)"
+    printf '#!/usr/bin/env bash\nprintf "feat/x\\tMERGED\\t%s\\n"\n' "$PR_HEAD_OID" > "$STUB/gh"
     chmod +x "$STUB/gh"
+    # Pin the protected-branch config to a fixture (rung 0 of project-config.sh)
+    # so the real project.config.json never leaks into these assertions.
+    printf '{"vcs": {"protected_branches": ["asset-store"]}}\n' > "$STUB/project.config.json"
+    export PC_CONFIG_FILE="$STUB/project.config.json"
 }
 teardown() { rm -rf "$MAIN" "$WT" "$STUB" 2>/dev/null || true; }
 
 # Run the script in $MAIN with gh stubbed (real PATH preserved for git/awk/etc).
 prune() { ( cd "$MAIN" && PATH="$STUB:$PATH" bash "$SCRIPT" "$@" ); }
+
+# Backdate a worktree's HEAD, index and HEAD reflog by <hours>.
+age_worktree() {  # <worktree> <hours>
+    local gd; gd="$(git -C "$1" rev-parse --absolute-git-dir)"
+    touch -d "@$(( $(date +%s) - $2 * 3600 ))" "$gd/HEAD" "$gd/index" "$gd/logs/HEAD"
+}
 
 @test "--selftest passes" {
     run bash "$SCRIPT" --selftest
@@ -65,10 +81,132 @@ prune() { ( cd "$MAIN" && PATH="$STUB:$PATH" bash "$SCRIPT" "$@" ); }
     [ -d "$WT" ]
 }
 
+@test "--apply SKIPS a merged worktree holding only UNTRACKED files (dirty, not FAILED)" {
+    # `git worktree remove` refuses untracked files, so before they counted as
+    # dirty this surfaced as a FAILED reap with rc=1.
+    echo scratch > "$WT/untracked.txt"
+    run prune --apply
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skip(dirty)"*"feat/x"* ]]
+    [[ "$output" != *"FAILED"* ]]
+    [ -f "$WT/untracked.txt" ]
+}
+
+@test "a merged worktree touched inside the idle threshold is skipped as active" {
+    age_worktree "$WT" 2
+    run prune --apply
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skip(active)"*"feat/x"* ]]
+    [ -d "$WT" ]
+    # A tighter threshold makes the same worktree idle enough to reap.
+    run prune --apply --idle-hours 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reaped"*"feat/x"* ]]
+    [ ! -d "$WT" ]
+}
+
+# selftest: asserts-failure — the data-loss case: a clean, idle, MERGED worktree
+# whose branch carries a committed-but-unpushed follow-up commit. Reaping ran
+# `git branch -D` and destroyed that commit; the tip guard must skip it.
+@test "--apply SKIPS a merged worktree whose HEAD moved past the merged PR head" {
+    ( cd "$WT" && echo follow-up > f && git add f && git commit -qm "follow-up after merge" )
+    local follow; follow="$(git -C "$WT" rev-parse HEAD)"
+    [ "$follow" != "$PR_HEAD_OID" ]
+    age_worktree "$WT" 48
+    run prune --apply
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skip(moved)"*"feat/x"* ]]
+    [[ "$output" == *"reaped=0  skipped=1"* ]]
+    [ -d "$WT" ]
+    [ "$(git -C "$MAIN" rev-parse feat/x)" = "$follow" ]
+    # Dry-run reports the same skip, never a would-reap.
+    run prune
+    [[ "$output" == *"skip(moved)"*"feat/x"* ]]
+    [[ "$output" == *"would-reap=0  skipped=1"* ]]
+}
+
+@test "a merged worktree is skipped as moved when the PR head is unknown" {
+    printf '#!/usr/bin/env bash\nprintf "feat/x\\tMERGED\\n"\n' > "$STUB/gh"
+    run prune --apply
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skip(moved)"*"feat/x"* ]]
+    [ -d "$WT" ]
+}
+
+@test "--idle-hours 0 turns the idle guard off" {
+    age_worktree "$WT" 0
+    run prune --idle-hours 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would-reap"*"feat/x"* ]]
+    run prune --idle-hours=0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would-reap"*"feat/x"* ]]
+}
+
+@test "--idle-hours rejects a non-number" {
+    run prune --idle-hours soon
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"whole number"* ]]
+}
+
+@test "a branch in project.config.json vcs.protected_branches is never reaped" {
+    printf '{"vcs": {"protected_branches": ["feat/x"]}}\n' > "$PC_CONFIG_FILE"
+    run prune --apply
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"reaped"*"feat/x"* ]]
+    [ -d "$WT" ]
+    run git -C "$MAIN" branch --list feat/x
+    [ -n "$output" ]
+}
+
 @test "the develop integration tree is never reaped" {
     run prune --apply
     [ "$status" -eq 0 ]
     [ -d "$MAIN/.git" ]
+}
+
+# --- --branches: mid-session local-branch prune (tooling 2026-05-30) ----------
+# One branch of each kind next to the worktree-held feat/x: merged + free
+# (the only deletable one), OPEN, no PR, protected by config, and merged but
+# carrying a commit made after the merge.
+branches_fixture() {
+    local seed later b
+    seed="$(git -C "$MAIN" rev-parse develop)"
+    for b in feat/done feat/open feat/nopr asset-store; do git -C "$MAIN" branch "$b"; done
+    later="$(git -C "$MAIN" commit-tree "develop^{tree}" -p develop -m after-merge)"
+    git -C "$MAIN" branch feat/moved "$later"
+    {
+        printf '#!/usr/bin/env bash\ncat <<"PRS"\n'
+        printf '%s\tMERGED\t%s\n' feat/x "$seed" feat/done "$seed" feat/moved "$seed" asset-store "$seed"
+        printf 'feat/open\tOPEN\t%s\n' "$seed"
+        printf 'PRS\n'
+    } > "$STUB/gh"
+}
+has_branch() { [ -n "$(git -C "$MAIN" branch --list "$1")" ]; }
+
+@test "--branches dry-run names only the merged branch no worktree holds" {
+    branches_fixture
+    run prune --branches
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would-delete  feat/done"* ]]
+    [[ "$output" == *"skip(moved)   feat/moved"* ]]
+    [[ "$output" != *"feat/x"* ]]
+    [[ "$output" != *"feat/open"* ]]
+    [[ "$output" != *"feat/nopr"* ]]
+    [[ "$output" != *"asset-store"* ]]
+    [[ "$output" == *"would-delete=1  skip-moved=1"* ]]
+    for b in feat/done feat/moved feat/x feat/open feat/nopr asset-store; do has_branch "$b"; done
+}
+
+@test "--branches --apply deletes it and leaves held / OPEN / no-PR / protected / moved alone" {
+    branches_fixture
+    run prune --branches --apply
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"deleted       feat/done"* ]]
+    run has_branch feat/done
+    [ "$status" -ne 0 ]
+    for b in feat/moved feat/x feat/open feat/nopr asset-store develop; do has_branch "$b"; done
+    [ -d "$WT" ]   # branch mode never touches a worktree
 }
 
 # --- cmd_resync self-filter (finding #1958) ---------------------------------
