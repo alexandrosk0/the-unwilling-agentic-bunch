@@ -713,7 +713,7 @@ set_fixture() {
 @test "CR blank-bodied COMMENTED on current head is a thread reply, not a review -> no pass" {
     # Replying to a review thread creates a blank-bodied review on the head the
     # reply was posted at. It used to read as "COMMENTED (no Actionable header)"
-    # and pass a head CR never reviewed (the-unwilling-agentic-bunch#5 at 97ac481:
+    # and pass a head CR never reviewed (this repository's PR #5 at 97ac481:
     # CR's only node on the head was its reply to a fixed thread).
     local f
     f="$(fixture_override "$FIXTURES_DIR/merge_gates_cr_current_clean.json" \
