@@ -192,6 +192,26 @@ run_selftest() {
     _case "reports a drained queue" "HOLD queue drained" \
         "now\t1000000\nqueue\t1995\nrequested\t1995\t100\nconfirmed\t1995\n"
 
+    # ASSERTS-FAILURE: a CR thread reply is not a review. Counting one would skip the
+    # backfill for a PR CR never reviewed.
+    if command -v jq >/dev/null 2>&1; then
+        _ids() { # <name> <expected-count> <reviews-json>
+            got="$(printf '%s' "$3" | jq -r "$CR_REVIEW_IDS_JQ" | grep -c .)"
+            if [ "$got" = "$2" ]; then
+                echo "ok   — $1"
+            else
+                echo "FAIL — $1: expected $2 review(s), got $got" >&2
+                fails=$((fails + 1))
+            fi
+        }
+        _ids "a CR thread reply is not a review" 0 \
+            '[{"id":1,"user":{"login":"coderabbitai[bot]"},"state":"COMMENTED","body":" \n"}]'
+        _ids "a CR review with a body counts" 1 \
+            '[{"id":1,"user":{"login":"coderabbitai[bot]"},"state":"COMMENTED","body":"Actionable comments posted: 0"},{"id":2,"user":{"login":"someone"},"state":"COMMENTED","body":"x"}]'
+        _ids "a blank-bodied CR approval counts" 1 \
+            '[{"id":1,"user":{"login":"coderabbitai[bot]"},"state":"APPROVED","body":""}]'
+    fi
+
     if [ "$fails" -eq 0 ]; then
         echo "cr-oob-review-backfill --selftest: all cases passed"
         return 0
@@ -326,6 +346,11 @@ if line:
 ' 2>/dev/null
 }
 
+# The CR review nodes that are reviews (REST /pulls/N/reviews shape, one id per line).
+# A blank-bodied COMMENTED node is CR replying in a thread, not a review, so it does
+# not count; merge-gates and the host CR finding gate skip the same nodes.
+CR_REVIEW_IDS_JQ='.[]|select(.user.login=="coderabbitai[bot]")|select(.state!="COMMENTED" or ((.body//"")|test("[^[:space:]]")))|.id'
+
 # A merged head that already carries a completed CR review owes nothing — the
 # label waived the FINDINGS, not the review, and re-requesting spends a slot the
 # queue needs.
@@ -334,7 +359,7 @@ owes_review() {
     # Paginated for the same reason as marker_scan: a first-page-only read can
     # miss a later review and re-request one that already happened.
     n="$(gh api --paginate "repos/$REPO_SLUG/pulls/$pr/reviews?per_page=100" \
-           --jq '.[]|select(.user.login=="coderabbitai[bot]")|.id' 2>/dev/null | grep -c . )"
+           --jq "$CR_REVIEW_IDS_JQ" 2>/dev/null | grep -c . )"
     [ "${n:-0}" -eq 0 ]
 }
 
