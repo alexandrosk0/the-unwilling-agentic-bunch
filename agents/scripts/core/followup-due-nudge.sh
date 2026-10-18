@@ -20,7 +20,8 @@
 #   date:<YYYY-MM-DD>                                 — calendar deadline reached
 #   plan-shipped:<slug>                              — docs/plans/shipped/<slug>.md exists
 #   file-age:<path>;days=<N>                          — <path> last touched (git) >= N days ago
-# An entry whose `fired=` is a real date is suppressed (already acted on).
+# An entry whose `fired=` is a real date, alone or followed by a space and a
+# note, is suppressed (already acted on).
 # Entries with no `Triggered-follow-up:` line are invisible (fully backward-compat).
 #
 # Modes: --nudge (default; SessionStart block, silent when nothing due) / --list
@@ -153,6 +154,17 @@ _field() {  # _field "<line>" "<key>" "<next-key-or-empty>" → value
     printf '%s' "$v"
 }
 
+# _fired_done "<fired-value>" → 0 when the follow-up was acted on: a date, alone
+# or followed by a space and a note (`fired=2026-10-05 (what was found)`).
+# Anything else — `never`, empty, a malformed date — keeps it live.
+_fired_done() {
+    case "$1" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) return 0 ;;
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' '*) return 0 ;;
+    esac
+    return 1
+}
+
 # --- scan the category files, collect DUE entries ---------------------------
 due=()    # "P<n>\t<file>\t<action>\t<baseline>"
 warns=()  # "<file>: MALFORMED Triggered-follow-up: <when>"
@@ -180,10 +192,8 @@ scan() {
             action="$(_field "$line" action baseline)"
             baseline="$(_field "$line" baseline fired)"
             fired="$(_field "$line" fired '')"
-            # Suppress entries already acted on (fired= is a real date).
-            case "$fired" in
-                [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) continue ;;
-            esac
+            # Suppress entries already acted on (fired= starts with a real date).
+            _fired_done "$fired" && continue
             [ -n "$when" ] || { warns+=("$f: empty when= in Triggered-follow-up"); continue; }
             verdict="$(eval_trigger "$when")"
             case "$verdict" in
@@ -254,6 +264,14 @@ st "field when"  'pr-count:base=develop;since=2026-06-05;n=10' "$(_field "$_L" w
 st "field action" 'do the thing' "$(_field "$_L" action baseline)"
 st "field baseline" '3.2 heads/PR' "$(_field "$_L" baseline fired)"
 st "field fired"  'never'          "$(_field "$_L" fired '')"
+# fired= suppression: a date, alone or with a trailing note, is acted on
+_fd() { _fired_done "$1" && echo acted || echo live; }
+st "fired bare date"       acted "$(_fd '2026-10-05')"
+st "fired date + note"     acted "$(_fd '2026-10-05 (lock-cleanup.yml now releases by branch)')"
+st "fired never"           live "$(_fd 'never')"
+st "fired empty"           live "$(_fd '')"
+st "fired date glued text" live "$(_fd '2026-10-05x')"
+st "fired malformed date"  live "$(_fd '2026-1-05')"
 echo "followup-due-nudge selftest — Passed: $ST_PASS  Failed: $ST_FAIL"
 [ "$ST_FAIL" -eq 0 ] || exit 1
 exit 0
