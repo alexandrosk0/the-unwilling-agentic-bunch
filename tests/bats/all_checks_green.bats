@@ -149,6 +149,30 @@ GREEN_EDIT='setrun("Bucket-E UI tests (Mesa headless GL)"; "success") | setstatu
     done
 }
 
+@test "a cancelled twin in a NEWER suite stays red and its line names the run to re-run" {
+    # #2296: two labels added at once fired a workflow twice; its concurrency group
+    # cancelled the run in the newer suite. GitHub's required-check evaluation reads
+    # that newest run too (405 ... is cancelled), so the verdict stays red; the line
+    # must say how to clear it, since re-running this aggregate alone cannot.
+    replay final "$GREEN_EDIT | .check_runs += [{name: \"TSan Linux subset (Clang)\", status: \"completed\",
+        conclusion: \"cancelled\", id: 999999999999, check_suite: {id: 999999999999},
+        details_url: \"https://github.com/o/r/actions/runs/42/job/43\"}]"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"RED         TSan Linux subset (Clang) (cancelled in a newer workflow run, which GitHub evaluates; re-run that run: https://github.com/o/r/actions/runs/42/job/43"* ]]
+    [[ "$output" == *"405 ... is cancelled recovery"* ]]
+}
+
+@test "a lone cancelled run, or one over an older cancelled twin, keeps the plain cancelled line" {
+    replay final "$GREEN_EDIT | setrun(\"TSan Linux subset (Clang)\"; \"cancelled\")
+        | .check_runs += [{name: \"TSan Linux subset (Clang)\", status: \"completed\", conclusion: \"cancelled\",
+                           id: 999999999999, check_suite: {id: 999999999999}}]"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"RED         TSan Linux subset (Clang) (cancelled)"* ]]
+    [[ "$output" != *"re-run that run"* ]]
+}
+
 @test "neutral / skipped conclusions and a success status pass" {
     replay final "$GREEN_EDIT | setrun(\"TSan Linux subset (Clang)\"; \"neutral\") | setrun(\"Pillar 2 scanner\"; \"skipped\")"
     run bash "$ACG" --fixture "$SNAP"
