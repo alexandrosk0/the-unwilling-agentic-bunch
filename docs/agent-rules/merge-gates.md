@@ -256,7 +256,12 @@ errors and the gate returns `GH_API_DOWN` — failing closed on every merge. A
 If a merge is refused with `405 Required status check "<name>" is cancelled` while
 the board reads green, a stale cancelled context under that name is the cause. The
 gate emits a `WARN: N check name(s) carry a blocking context from an older workflow
-run …` line naming them before the merge is attempted.
+run …` line naming them before the merge is attempted. The `All checks green`
+aggregate reads the same newest run, so it stays red on this shape; its `RED` line
+says `cancelled in a newer workflow run, which GitHub evaluates; re-run that run:`
+followed by that run's URL. Re-running the aggregate alone cannot clear it. Two
+labels added at once can produce the shape: each `labeled` event starts the
+workflow, and its concurrency group may cancel the run in the newer suite.
 
 Fix: **re-run the workflow run that owns the stale check-run.**
 

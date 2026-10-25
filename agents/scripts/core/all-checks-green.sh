@@ -20,7 +20,11 @@
 #     order: the REST stand-in for the filter's checkSuite.createdAt), then the
 #     newest run in it (run id, also creation order — unlike started_at it is set
 #     on a still-queued re-run); a re-run supersedes, a cancelled concurrency
-#     twin in an older suite does not count. Runs are fetched with filter=all so
+#     twin in an older suite does not count. A cancelled twin in a NEWER suite
+#     does count, and stays red: GitHub's required-check evaluation reads the
+#     newest run too (`405 ... is cancelled`). Its red line names the run to
+#     re-run (merge-gates.md § The 405 ... is cancelled recovery), since a re-run
+#     of this aggregate alone cannot clear it. Runs are fetched with filter=all so
 #     a queued / in-progress re-run attempt is never hidden behind the completed
 #     attempt it replaces;
 #   * red = a completed run concluding failure / timed_out / cancelled /
@@ -165,12 +169,17 @@ ACG_FILTER="$_MG_JQ_DISPOSITION_DEF"'
 | ([$req[] | select(. != $self)]) as $reqNames
 | ([.check_runs[]? | select((.name // "") != $self)]
    | group_by(.name // "")
-   | map(sort_by([(.check_suite.id // 0), (.id // 0)]) | .[-1])
+   | map(sort_by([(.check_suite.id // 0), (.id // 0)]) as $g
+         | $g[-1] + {staleTwin: ((($g[-1].conclusion // "") == "cancelled")
+                                 and ($g[0:-1] | any((.check_suite.id // 0) != ($g[-1].check_suite.id // 0)
+                                                     and (.conclusion // "") != "cancelled")))})
    | map({kind: "check", name: (.name // ""), id: (.id // 0),
           state: (if (.status // "") != "completed" then "pending"
                   elif ((.conclusion // "") | IN("failure", "timed_out", "cancelled", "action_required", "startup_failure")) then "fail"
                   else "pass" end),
-          detail: (if (.status // "") != "completed" then (.status // "queued") else (.conclusion // "none") end)})) as $runs
+          detail: (if (.status // "") != "completed" then (.status // "queued")
+                   elif .staleTwin then "cancelled in a newer workflow run, which GitHub evaluates; re-run that run: \(.details_url // "its details page"), see merge-gates.md § The 405 ... is cancelled recovery"
+                   else (.conclusion // "none") end)})) as $runs
 | ([.statuses[]? | select((.context // "") != $self)]
    | group_by(.context // "")
    | map(sort_by([(.updated_at // .created_at // ""), (.id // 0)]) | .[-1])
@@ -378,7 +387,7 @@ fetch_list() {
 # fetch_checks — the head's check runs + commit statuses (every page) into $WORK.
 fetch_checks() {
     fetch_list runs "repos/$REPO/commits/$SHA/check-runs?filter=all" check_runs \
-        '{id, name, status, conclusion, started_at, completed_at, check_suite: {id: .check_suite.id}}' || return
+        '{id, name, status, conclusion, started_at, completed_at, details_url, check_suite: {id: .check_suite.id}}' || return
     fetch_list stats "repos/$REPO/commits/$SHA/status" statuses \
         '{id, context, state, created_at, updated_at}' || return
 }
