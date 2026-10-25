@@ -576,6 +576,45 @@ run_from_host() {
     [[ "$output" == *"::error title=All checks green — blocking red::Bucket-E UI tests (Mesa headless GL) (failure)"* ]]
 }
 
+@test "live: a cancelled run whose newer twin registers during the grace re-poll does not fail" {
+    # Smatchet#2364: a two-label add started perf-pr-fast twice and its concurrency group
+    # cancelled the older run; the aggregate read the head before the newer run's check
+    # run was listed, and failed at once on a red the newer (green) run superseded.
+    stub_gh; serve_pr "$HEAD_SHA"
+    replay final "$GREEN_EDIT | setrun(\"TSan Linux subset (Clang)\"; \"cancelled\")"
+    serve runs.1; serve status
+    replay final "$GREEN_EDIT | setrun(\"TSan Linux subset (Clang)\"; \"cancelled\")
+                  | .check_runs += [{name: \"TSan Linux subset (Clang)\", status: \"completed\", conclusion: \"success\",
+                                     id: 999999999999, check_suite: {id: 999999999999}}]"
+    serve runs
+    run_live
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"only cancelled check(s) are red: TSan Linux subset (Clang) (cancelled)"* ]]
+    [[ "$output" == *"PASS — every other check is terminal and green"* ]]
+}
+
+@test "live: a cancelled run still newest after the grace re-poll is red" {
+    stub_gh; serve_pr "$HEAD_SHA"
+    replay final "$GREEN_EDIT | setrun(\"TSan Linux subset (Clang)\"; \"cancelled\")"
+    serve runs; serve status
+    run_live ACG_SLEEP_BIN="$STUB/bin/sleeplog" ACG_SETTLE_SECONDS=7
+    [ "$status" -eq 1 ]
+    [ "$(cat "$STUB/runs.count")" -eq 2 ]
+    grep -qx 7 "$STUB/sleeps"
+    [[ "$output" == *"::error title=All checks green — blocking red::TSan Linux subset (Clang) (cancelled)"* ]]
+}
+
+@test "live: a cancelled red next to any other red still fails fast" {
+    stub_gh; serve_pr "$HEAD_SHA"
+    replay final "$GREEN_EDIT | setrun(\"TSan Linux subset (Clang)\"; \"cancelled\")
+                  | setrun(\"Bucket-E UI tests (Mesa headless GL)\"; \"failure\")"
+    serve runs; serve status
+    run_live
+    [ "$status" -eq 1 ]
+    [ "$(cat "$STUB/runs.count")" -eq 1 ]
+    [[ "$output" != *"only cancelled check(s) are red"* ]]
+}
+
 @test "live: all green passes only after a settle re-poll sees the same set" {
     stub_gh; replay final "$GREEN_EDIT"; serve runs; serve status; serve_pr "$HEAD_SHA"
     run_live
