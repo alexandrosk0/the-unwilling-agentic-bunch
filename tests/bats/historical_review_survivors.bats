@@ -211,3 +211,19 @@ teardown() {
     # ...but the binary never appears as a reviewable file.
     ! echo "$output" | grep -q "=== img.png ==="
 }
+
+@test "a submodule pointer (gitlink) in the commit is skipped, not fatal" {
+    # git blame on a gitlink exits 128 ("no such path"); under pipefail that used
+    # to abort the whole digest for any commit that also moved a submodule
+    # pointer, so its real files were never reviewed.
+    printf 'alpha\nbravo\n' > f.txt
+    git add f.txt
+    git update-index --add --cacheinfo "160000,$(git hash-object -t blob --stdin </dev/null),sub"
+    git commit -qm "A: add source and a submodule pointer"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"=== f.txt ==="* ]]
+    [[ "$output" == *"2/2 introduced line(s) still alive"* ]]
+    [ "$(grep -c "=== sub ===" <<<"$output")" -eq 0 ]
+}

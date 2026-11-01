@@ -245,10 +245,16 @@ for f in "${FILES[@]}"; do
     # surfaces LOUDLY instead of silently dropping a live file:
     #   nonzero rc      -> the check itself errored: warn, do NOT skip
     #   rc 0 + empty    -> genuinely absent at the ref (deleted/renamed): skip
-    #   rc 0 + nonempty -> present at the ref: review it
-    if ! present="$(git ls-tree --name-only "$REVIEW_REF" -- "$f" 2>/dev/null)"; then
+    #   rc 0 + nonempty -> present at the ref: review it, unless it is a gitlink
+    # A gitlink (mode 160000, a submodule pointer) has no lines: `git blame` on it
+    # exits 128 ("no such path"), and under pipefail that aborted the whole
+    # digest for any PR that also moved a submodule pointer. Skip it, like a
+    # binary path; the pointer move itself is the submodule repo's history.
+    if ! present="$(git ls-tree "$REVIEW_REF" -- "$f" 2>/dev/null)"; then
         echo "historical-review-survivors: WARNING — existence check for '$f' at '$REVIEW_REF' errored; NOT skipping it (possible path-mangling regression — review '$f' manually)." >&2
     elif [ -z "$present" ]; then
+        continue
+    elif [ "${present%% *}" = "160000" ]; then
         continue
     fi
 
