@@ -8,8 +8,8 @@
 # cross-edit-cached liveness probe, never a per-edit tax on BLOCKING.
 #
 # When >=1 other session is live AND the edited path is NOT covered by a
-# refs/locks/* claim whose `branch` == this worktree's HEAD branch (this
-# session's own seed), DENY with a copy-paste lock-claim.sh remediation. Solo
+# refs/locks/* claim whose `branch` == the session's own checkout's HEAD branch
+# (this session's own seed; the checkout comes from the payload's `cwd`), DENY with a copy-paste lock-claim.sh remediation. Solo
 # (0 siblings) -> allow. Identity is keyed on BRANCH, never owner/AGENT_ID
 # (unprovisioned in prod). Same-tree-same-branch contention is out of scope (the
 # tree guards own that); plan-locks target cross-BRANCH parallel work.
@@ -94,13 +94,18 @@ case "$count" in ''|*[!0-9]*) exit 0 ;; esac
 # off-by-one trap is that "excluding self" pairs with a threshold of >=1, not 2).
 [ "$count" -ge 1 ] || exit 0
 
-# The checkout that owns the edited file. A session working in a linked worktree
-# of this repo (e.g. <project>/.claude/worktrees/<id>/) still gets CLAUDE_PROJECT_DIR
-# = the main tree, whose HEAD is some other branch; keying on it named that branch
-# and a ".claude/worktrees/<id>/..." path, which no lock can cover, so every
-# contended worktree edit was denied. When the file sits in a worktree sharing this
-# repo's git common dir, gate against THAT worktree. Anything else (a submodule, an
-# unrelated repo, a not-yet-created dir) keeps the project dir.
+# Claude Code sets CLAUDE_PROJECT_DIR to the main tree even for a session working
+# in a linked worktree (e.g. <project>/.claude/worktrees/<id>/). Keying both the
+# branch and the path on it named the main tree's branch and a
+# ".claude/worktrees/<id>/..." path, which no lock can cover, so every contended
+# worktree edit was denied. Two checkouts matter instead, each resolved to a
+# worktree only when it shares this repo's git common dir (a submodule, an
+# unrelated repo or an unresolvable dir keeps the project dir):
+#   CHECKOUT    — owns the edited file; the lock path is relative to it.
+#   SESSION_CO  — the session's own checkout, from the payload's `cwd`; its branch
+#                 is the identity. Keying identity on the FILE's checkout would let
+#                 a session edit a sibling worktree's file under the sibling's lock.
+#                 A payload without `cwd` falls back to CHECKOUT.
 # Normalize separators so a Windows backslash path strips cleanly.
 FP_N="${FP//\\//}"
 common_dir() { # $1 = dir in a checkout -> canonical git common dir (empty on error)
@@ -108,27 +113,35 @@ common_dir() { # $1 = dir in a checkout -> canonical git common dir (empty on er
   d="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" || return 0
   (cd "$1" && cd "$d" 2>/dev/null && pwd -P)
 }
-CHECKOUT="$PROJ"
-fdir="${FP_N%/*}"
-while [ -n "$fdir" ] && [ ! -d "$fdir" ]; do
-  up="${fdir%/*}"
-  [ "$up" = "$fdir" ] && break
-  fdir="$up"
-done
-if [ -n "$fdir" ] && [ -d "$fdir" ]; then
-  ftop="$(git -C "$fdir" rev-parse --show-toplevel 2>/dev/null)"
-  if [ -n "$ftop" ]; then
-    fcommon="$(common_dir "$ftop")"
-    pcommon="$(common_dir "$PROJ")"
-    if [ -n "$fcommon" ] && [ "$fcommon" = "$pcommon" ]; then
-      CHECKOUT="$ftop"
-    fi
-  fi
+PROJ_COMMON="$(common_dir "${PROJ//\\//}")"
+sibling_checkout() { # $1 = path (file or dir) -> its worktree top if it shares this repo, else empty
+  local d top c
+  d="${1//\\//}"
+  while [ -n "$d" ] && [ ! -d "$d" ]; do
+    [ "${d%/*}" = "$d" ] && return 0
+    d="${d%/*}"
+  done
+  [ -n "$d" ] || return 0
+  top="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  [ -n "$top" ] || return 0
+  c="$(common_dir "$top")"
+  # -ef compares directory identity, so drive-letter case / separator spelling
+  # differences between the two paths cannot break the match.
+  [ -n "$c" ] && [ -n "$PROJ_COMMON" ] && [ "$c" -ef "$PROJ_COMMON" ] && printf '%s' "$top"
+}
+CHECKOUT="$(sibling_checkout "${FP_N%/*}")"
+[ -n "$CHECKOUT" ] || CHECKOUT="$PROJ"
+SCWD="$(json_field '.cwd' 'cwd')"
+if [ -n "$SCWD" ]; then
+  SESSION_CO="$(sibling_checkout "$SCWD")"
+  [ -n "$SESSION_CO" ] || SESSION_CO="$PROJ"
+else
+  SESSION_CO="$CHECKOUT"
 fi
 
-# Discriminator is the owning checkout's HEAD branch (my own seed lock). Detached /
+# Discriminator is the session checkout's HEAD branch (my own seed lock). Detached /
 # unresolvable -> fail-open allow (an unattributable session can't be keyed).
-mybr="$(git -C "$CHECKOUT" symbolic-ref --short HEAD 2>/dev/null)" || exit 0
+mybr="$(git -C "$SESSION_CO" symbolic-ref --short HEAD 2>/dev/null)" || exit 0
 [ -n "$mybr" ] || exit 0
 
 # Resolve the edited path to checkout-relative; an edit OUTSIDE this repo is not
