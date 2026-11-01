@@ -62,7 +62,10 @@
 #     or on a rate-limited 403/429, polling pauses until X-RateLimit-Reset (the
 #     check stays pending meanwhile; the wait budget still bounds it).
 # Failure modes:
-#   * first blocking red -> exit 1 at once (fail fast);
+#   * first blocking red -> exit 1 at once (fail fast), except when every red is a
+#     cancelled check run: a concurrency-cancelled run's newer twin can register
+#     seconds later, so that exact set gets one ACG_SETTLE_SECONDS re-poll, and
+#     is red only if it is still the newest afterwards;
 #   * all terminal + green -> re-poll after ACG_SETTLE_SECONDS (default 60) and
 #     pass only if the check set is unchanged (late checks: a dependent job, the
 #     code-scanning result check, a label-triggered re-run);
@@ -173,7 +176,7 @@ ACG_FILTER="$_MG_JQ_DISPOSITION_DEF"'
          | $g[-1] + {staleTwin: ((($g[-1].conclusion // "") == "cancelled")
                                  and ($g[0:-1] | any((.check_suite.id // 0) != ($g[-1].check_suite.id // 0)
                                                      and (.conclusion // "") != "cancelled")))})
-   | map({kind: "check", name: (.name // ""), id: (.id // 0),
+   | map({kind: "check", name: (.name // ""), id: (.id // 0), cancelled: ((.conclusion // "") == "cancelled"),
           state: (if (.status // "") != "completed" then "pending"
                   elif ((.conclusion // "") | IN("failure", "timed_out", "cancelled", "action_required", "startup_failure")) then "fail"
                   else "pass" end),
@@ -212,6 +215,8 @@ ACG_FILTER="$_MG_JQ_DISPOSITION_DEF"'
    absent: $absent,
    downgraded: [$all[] | select(.state == "fail" and (exempt | not) and downgraded) | show],
    exempt: [$all[] | select(.state != "pass" and exempt) | show],
+   cancel_grace_fp: (if ($failing | length) > 0 and ($failing | all(.cancelled == true))
+                     then ([$failing[] | "\(.name)|\(.id)"] | sort | join("\n")) else "" end),
    total: ($all | length),
    fingerprint: ([$all[] | "\(.kind)|\(.name)|\(.id)|\(.detail)"] | sort | join("\n"))}
 '
@@ -502,6 +507,7 @@ DEADLINE=$(( START + MAX_WAIT ))
 poll=0
 api_fail=0
 settle_fp=""
+cancel_grace_fp=""
 echo "all-checks-green: PR #$PR head ${SHA:0:12} — every other check must end green (poll ${POLL}s, settle ${SETTLE}s, budget ${MAX_WAIT}s)."
 while :; do
     poll=$(( poll + 1 ))
@@ -552,6 +558,17 @@ while :; do
     elapsed=$(( $(date +%s) - START ))
     case "$verdict" in
         failure)
+            # A run its workflow's concurrency group cancelled always has a newer run behind
+            # it, whose check runs can appear seconds later. When every red is a cancelled
+            # check, give that exact set one settle interval to be superseded; the same set
+            # still newest after it is a real red.
+            cfp="$(jq -r .cancel_grace_fp <<<"$v")"
+            if [ -n "$cfp" ] && [ "$cfp" != "$cancel_grace_fp" ] && [ "$(date +%s)" -lt "$DEADLINE" ]; then
+                cancel_grace_fp="$cfp"
+                echo "all-checks-green: poll $poll (+${elapsed}s) — only cancelled check(s) are red: $(jq -r '.failing | join("; ")' <<<"$v"); re-polling in ${SETTLE}s in case a newer run of the same workflow has not registered yet."
+                nap "$SETTLE"
+                continue
+            fi
             report "$v"
             echo "::error title=All checks green — blocking red::$(jq -r '.failing | join("; ")' <<<"$v")"
             exit 1
