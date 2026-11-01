@@ -94,16 +94,48 @@ case "$count" in ''|*[!0-9]*) exit 0 ;; esac
 # off-by-one trap is that "excluding self" pairs with a threshold of >=1, not 2).
 [ "$count" -ge 1 ] || exit 0
 
-# Discriminator is this worktree's HEAD branch (my own seed lock). Detached /
+# The checkout that owns the edited file. A session working in a linked worktree
+# of this repo (e.g. <project>/.claude/worktrees/<id>/) still gets CLAUDE_PROJECT_DIR
+# = the main tree, whose HEAD is some other branch; keying on it named that branch
+# and a ".claude/worktrees/<id>/..." path, which no lock can cover, so every
+# contended worktree edit was denied. When the file sits in a worktree sharing this
+# repo's git common dir, gate against THAT worktree. Anything else (a submodule, an
+# unrelated repo, a not-yet-created dir) keeps the project dir.
+# Normalize separators so a Windows backslash path strips cleanly.
+FP_N="${FP//\\//}"
+common_dir() { # $1 = dir in a checkout -> canonical git common dir (empty on error)
+  local d
+  d="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" || return 0
+  (cd "$1" && cd "$d" 2>/dev/null && pwd -P)
+}
+CHECKOUT="$PROJ"
+fdir="${FP_N%/*}"
+while [ -n "$fdir" ] && [ ! -d "$fdir" ]; do
+  up="${fdir%/*}"
+  [ "$up" = "$fdir" ] && break
+  fdir="$up"
+done
+if [ -n "$fdir" ] && [ -d "$fdir" ]; then
+  ftop="$(git -C "$fdir" rev-parse --show-toplevel 2>/dev/null)"
+  if [ -n "$ftop" ]; then
+    fcommon="$(common_dir "$ftop")"
+    pcommon="$(common_dir "$PROJ")"
+    if [ -n "$fcommon" ] && [ "$fcommon" = "$pcommon" ]; then
+      CHECKOUT="$ftop"
+    fi
+  fi
+fi
+
+# Discriminator is the owning checkout's HEAD branch (my own seed lock). Detached /
 # unresolvable -> fail-open allow (an unattributable session can't be keyed).
-mybr="$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null)" || exit 0
+mybr="$(git -C "$CHECKOUT" symbolic-ref --short HEAD 2>/dev/null)" || exit 0
 [ -n "$mybr" ] || exit 0
 
-# Resolve the edited path to repo-relative; an edit OUTSIDE this repo is not ours
-# to gate. Normalize separators so a Windows backslash path strips cleanly.
-PROJ_TOP="$(git -C "$PROJ" rev-parse --show-toplevel 2>/dev/null)" || exit 0
+# Resolve the edited path to checkout-relative; an edit OUTSIDE this repo is not
+# ours to gate.
+PROJ_TOP="$(git -C "$CHECKOUT" rev-parse --show-toplevel 2>/dev/null)" || exit 0
 [ -n "$PROJ_TOP" ] || exit 0
-FP_N="${FP//\\//}"; TOP_N="${PROJ_TOP//\\//}"
+TOP_N="${PROJ_TOP//\\//}"
 case "$FP_N" in
   "$TOP_N"/*) rel="${FP_N#"$TOP_N"/}" ;;
   *) exit 0 ;;

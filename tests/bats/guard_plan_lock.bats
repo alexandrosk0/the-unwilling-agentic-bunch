@@ -171,3 +171,52 @@ run_hook_abs() { # $1 = absolute path
     [[ "$output" == *"lock-claim.sh"* ]]
     [[ "$output" == *"SMATCHET_REQUIRE_PLAN_LOCK=0"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# Worktree resolution: CLAUDE_PROJECT_DIR is the main tree (branch develop) even
+# when the session edits a linked worktree. The hook must key on the checkout
+# that owns the file — its branch and its relative path — not on the main tree.
+# ---------------------------------------------------------------------------
+
+# A worktree nested under the project dir, the .claude/worktrees/<id>/ layout.
+mk_nested_wt() {
+    NWT="$PROJ/.claude/worktrees/nested"
+    git -C "$PROJ" worktree add -q -b feat/nested "$NWT" >/dev/null 2>&1
+}
+
+@test "nested worktree: an edit covered by the WORKTREE branch's lock is ALLOWED" {
+    reg "$REGDIR" sibling-a
+    mk_nested_wt
+    printf 'feat/nested\t1781049600\tnested\tSource/Core/src/Sync/Wt.cpp\n' >> "$ROWS"
+    run run_hook ".claude/worktrees/nested/Source/Core/src/Sync/Wt.cpp"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "nested worktree: the main tree's lock is NOT the worktree's cover -> DENY naming the worktree branch + path" {
+    reg "$REGDIR" sibling-a
+    mk_nested_wt
+    # Source/Core/src/Sync/Foo.cpp is covered by a develop (main-tree) lock only.
+    run run_hook ".claude/worktrees/nested/Source/Core/src/Sync/Foo.cpp"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    [[ "$output" == *"on branch 'feat/nested'"* ]]
+    [[ "$output" == *"covering 'Source/Core/src/Sync/Foo.cpp'"* ]]
+}
+
+@test "linked worktree outside the project dir: its own branch's lock is the cover" {
+    reg "$REGDIR" sibling-a
+    printf 'feat/wt\t1781049600\twt\tSource/Core/src/Sync/Wt.cpp\n' >> "$ROWS"
+    run run_hook_abs "$WT/Source/Core/src/Sync/Wt.cpp"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a separate repo inside the project dir (e.g. a submodule) keeps project-dir gating" {
+    reg "$REGDIR" sibling-a
+    git init -q -b main "$PROJ/sub"
+    run run_hook "sub/file.txt"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    [[ "$output" == *"covering 'sub/file.txt' on branch 'develop'"* ]]
+}
