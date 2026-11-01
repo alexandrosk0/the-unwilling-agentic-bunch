@@ -255,16 +255,23 @@ for f in "${FILES[@]}"; do
     # exits 128 ("no such path"), and under pipefail that aborted the whole
     # digest for any PR that also moved a submodule pointer. Skip it, like a
     # binary path; the pointer move itself is the submodule repo's history.
+    # The path's entry in this commit's own tree (after the change), for the two
+    # "gone since" checks below. A failed lookup warns and reads as absent, which
+    # counts nothing as gone: the verdict then stays OPEN, the safe side.
+    at_sha=""
+    if ! at_sha="$(git ls-tree "$SHA" -- "$f" 2>/dev/null)"; then
+        echo "historical-review-survivors: WARNING — tree lookup for '$f' at $SHA errored; not counting it as superseded." >&2
+        at_sha=""
+    fi
     if ! present="$(git ls-tree "$REVIEW_REF" -- "$f" 2>/dev/null)"; then
         echo "historical-review-survivors: WARNING — existence check for '$f' at '$REVIEW_REF' errored; NOT skipping it (possible path-mangling regression — review '$f' manually)." >&2
     elif [ -z "$present" ]; then
         # Gone since, unless this commit is the one that deleted it (a pure deletion
-        # leaves nothing to supersede).
-        [ -n "$(git ls-tree "$SHA" -- "$f" 2>/dev/null)" ] && gone_paths=$((gone_paths + 1))
+        # leaves nothing to supersede) or it was a gitlink (no lines to supersede).
+        [ -n "$at_sha" ] && [ "${at_sha%% *}" != "160000" ] && gone_paths=$((gone_paths + 1))
         continue
     elif [ "${present%% *}" = "160000" ]; then
         # A gitlink now. If this commit wrote a file there, later work replaced it.
-        at_sha="$(git ls-tree "$SHA" -- "$f" 2>/dev/null)" || at_sha=""
         [ -n "$at_sha" ] && [ "${at_sha%% *}" != "160000" ] && gone_paths=$((gone_paths + 1))
         continue
     fi

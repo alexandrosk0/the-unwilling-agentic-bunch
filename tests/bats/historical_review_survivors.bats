@@ -286,6 +286,21 @@ teardown() {
     ! echo "$output" | grep -q "FULLY SUPERSEDED"
 }
 
+@test "a submodule pointer added and later removed is NOTHING TO ASSESS" {
+    printf 'alpha\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    git update-index --add --cacheinfo "160000,$(git hash-object -t blob --stdin </dev/null),sub"
+    git commit -qm "A: add a pointer"
+    A="$(git rev-parse HEAD)"
+    git rm -q --cached sub
+    git commit -qm "B: drop it"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
 @test "a file later replaced by a submodule pointer is FULLY SUPERSEDED" {
     printf 'alpha\n' > keep.txt
     git add keep.txt
