@@ -270,8 +270,9 @@ for f in "${FILES[@]}"; do
         # leaves nothing to supersede) or it was a gitlink (no lines to supersede).
         [ -n "$at_sha" ] && [ "${at_sha%% *}" != "160000" ] && gone_paths=$((gone_paths + 1))
         continue
-    elif [ "${present%% *}" = "160000" ]; then
-        # A gitlink now. If this commit wrote a file there, later work replaced it.
+    elif [ "${present%% *}" = "160000" ] || [ "${present%% *}" = "040000" ]; then
+        # A gitlink or a directory now: neither has lines to blame (`git blame` would
+        # exit 128). If this commit wrote a file there, later work replaced it.
         [ -n "$at_sha" ] && [ "${at_sha%% *}" != "160000" ] && gone_paths=$((gone_paths + 1))
         continue
     fi

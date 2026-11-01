@@ -301,6 +301,24 @@ teardown() {
     ! echo "$output" | grep -q "FULLY SUPERSEDED"
 }
 
+@test "a file later replaced by a directory is FULLY SUPERSEDED, not fatal" {
+    printf 'alpha\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    printf 'bravo\n' > thing
+    git add thing
+    git commit -qm "A: add thing as a file"
+    A="$(git rev-parse HEAD)"
+    git rm -q thing
+    mkdir thing
+    printf 'charlie\n' > thing/inner.txt
+    git add thing/inner.txt
+    git commit -qm "B: thing becomes a directory"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FULLY SUPERSEDED"* ]]
+}
+
 @test "a file later replaced by a submodule pointer is FULLY SUPERSEDED" {
     printf 'alpha\n' > keep.txt
     git add keep.txt
