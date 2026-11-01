@@ -271,3 +271,35 @@ teardown() {
     [[ "$output" == *"FULLY SUPERSEDED"* ]]
     ! echo "$output" | grep -q "NOTHING TO ASSESS"
 }
+
+@test "a commit that only deletes a file is NOTHING TO ASSESS, not superseded" {
+    printf 'alpha\n' > keep.txt
+    printf 'bravo\n' > doomed.txt
+    git add keep.txt doomed.txt
+    git commit -qm "base"
+    git rm -q doomed.txt
+    git commit -qm "A: delete only"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a file later replaced by a submodule pointer is FULLY SUPERSEDED" {
+    printf 'alpha\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    printf 'bravo\n' > sub
+    git add sub
+    git commit -qm "A: add sub as a file"
+    A="$(git rev-parse HEAD)"
+    git rm -q --cached sub
+    rm sub
+    git update-index --add --cacheinfo "160000,$(git hash-object -t blob --stdin </dev/null),sub"
+    git commit -qm "B: replace it with a pointer"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FULLY SUPERSEDED"* ]]
+    ! echo "$output" | grep -q "NOTHING TO ASSESS"
+}

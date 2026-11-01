@@ -258,9 +258,14 @@ for f in "${FILES[@]}"; do
     if ! present="$(git ls-tree "$REVIEW_REF" -- "$f" 2>/dev/null)"; then
         echo "historical-review-survivors: WARNING — existence check for '$f' at '$REVIEW_REF' errored; NOT skipping it (possible path-mangling regression — review '$f' manually)." >&2
     elif [ -z "$present" ]; then
-        gone_paths=$((gone_paths + 1))
+        # Gone since, unless this commit is the one that deleted it (a pure deletion
+        # leaves nothing to supersede).
+        [ -n "$(git ls-tree "$SHA" -- "$f" 2>/dev/null)" ] && gone_paths=$((gone_paths + 1))
         continue
     elif [ "${present%% *}" = "160000" ]; then
+        # A gitlink now. If this commit wrote a file there, later work replaced it.
+        at_sha="$(git ls-tree "$SHA" -- "$f" 2>/dev/null)" || at_sha=""
+        [ -n "$at_sha" ] && [ "${at_sha%% *}" != "160000" ] && gone_paths=$((gone_paths + 1))
         continue
     fi
 
