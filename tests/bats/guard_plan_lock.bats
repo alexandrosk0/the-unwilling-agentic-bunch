@@ -60,15 +60,15 @@ teardown() {
 reg() { printf 'ppid=1\nts=%s\n' "$(date -u +%s)" > "$1/$2"; }
 
 # Run the hook for an edit to <repo-relative-path> (made absolute under PROJ).
+# HOOK_CWD, when set, is sent as the payload's `cwd` (the session's checkout).
 run_hook() { # $1 = repo-relative path
-    jq -cn --arg fp "$PROJ/$1" \
-        '{tool_name:"Edit", tool_input:{file_path:$fp}, session_id:"mysid"}' \
-        | bash "$HOOK"
+    run_hook_abs "$PROJ/$1"
 }
 # Run the hook with an explicit absolute file_path (for out-of-repo tests).
 run_hook_abs() { # $1 = absolute path
-    jq -cn --arg fp "$1" \
-        '{tool_name:"Edit", tool_input:{file_path:$fp}, session_id:"mysid"}' \
+    jq -cn --arg fp "$1" --arg cwd "${HOOK_CWD:-}" \
+        '{tool_name:"Edit", tool_input:{file_path:$fp}, session_id:"mysid"}
+         + (if $cwd == "" then {} else {cwd:$cwd} end)' \
         | bash "$HOOK"
 }
 
@@ -170,4 +170,92 @@ run_hook_abs() { # $1 = absolute path
     echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
     [[ "$output" == *"lock-claim.sh"* ]]
     [[ "$output" == *"SMATCHET_REQUIRE_PLAN_LOCK=0"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Worktree resolution: CLAUDE_PROJECT_DIR is the main tree (branch develop) even
+# when the session edits a linked worktree. The hook must key on the checkout
+# that owns the file — its branch and its relative path — not on the main tree.
+# ---------------------------------------------------------------------------
+
+# A worktree nested under the project dir, the .claude/worktrees/<id>/ layout.
+mk_nested_wt() {
+    NWT="$PROJ/.claude/worktrees/nested"
+    git -C "$PROJ" worktree add -q -b feat/nested "$NWT" >/dev/null 2>&1
+    [ -d "$NWT" ] || { echo "mk_nested_wt: git worktree add failed" >&2; return 1; }
+}
+
+@test "nested worktree: an edit covered by the WORKTREE branch's lock is ALLOWED" {
+    reg "$REGDIR" sibling-a
+    mk_nested_wt
+    printf 'feat/nested\t1781049600\tnested\tSource/Core/src/Sync/Wt.cpp\n' >> "$ROWS"
+    run run_hook ".claude/worktrees/nested/Source/Core/src/Sync/Wt.cpp"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "nested worktree: the main tree's lock is NOT the worktree's cover -> DENY naming the worktree branch + path" {
+    reg "$REGDIR" sibling-a
+    mk_nested_wt
+    # Source/Core/src/Sync/Foo.cpp is covered by a develop (main-tree) lock only.
+    run run_hook ".claude/worktrees/nested/Source/Core/src/Sync/Foo.cpp"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    [[ "$output" == *"on branch 'feat/nested'"* ]]
+    [[ "$output" == *"covering 'Source/Core/src/Sync/Foo.cpp'"* ]]
+}
+
+@test "linked worktree outside the project dir: its own branch's lock is the cover" {
+    reg "$REGDIR" sibling-a
+    printf 'feat/wt\t1781049600\twt\tSource/Core/src/Sync/Wt.cpp\n' >> "$ROWS"
+    run run_hook_abs "$WT/Source/Core/src/Sync/Wt.cpp"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "linked worktree outside the project dir: a main-tree lock is NOT its cover -> DENY naming its branch" {
+    reg "$REGDIR" sibling-a
+    # Only develop holds Wt.cpp. The pre-fix hook allowed this (path outside PROJ).
+    printf 'develop\t1781049600\tmine\tSource/Core/src/Sync/Wt.cpp\n' >> "$ROWS"
+    run run_hook_abs "$WT/Source/Core/src/Sync/Wt.cpp"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    [[ "$output" == *"covering 'Source/Core/src/Sync/Wt.cpp' on branch 'feat/wt'"* ]]
+}
+
+@test "session cwd in the worktree: the worktree branch's lock is the cover" {
+    reg "$REGDIR" sibling-a
+    mk_nested_wt
+    printf 'feat/nested\t1781049600\tnested\tSource/Core/src/Sync/Wt.cpp\n' >> "$ROWS"
+    HOOK_CWD="$NWT" run run_hook ".claude/worktrees/nested/Source/Core/src/Sync/Wt.cpp"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "session cwd in the main tree: a SIBLING worktree's lock does not let it edit that worktree's file" {
+    reg "$REGDIR" sibling-a
+    mk_nested_wt
+    printf 'feat/nested\t1781049600\tnested\tSource/Core/src/Sync/Wt.cpp\n' >> "$ROWS"
+    HOOK_CWD="$PROJ" run run_hook ".claude/worktrees/nested/Source/Core/src/Sync/Wt.cpp"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    [[ "$output" == *"on branch 'develop'"* ]]
+}
+
+@test "session cwd with backslash separators resolves to the same worktree" {
+    reg "$REGDIR" sibling-a
+    mk_nested_wt
+    printf 'feat/nested\t1781049600\tnested\tSource/Core/src/Sync/Wt.cpp\n' >> "$ROWS"
+    HOOK_CWD="${NWT//\//\\}" run run_hook_abs "${NWT//\//\\}\\Source\\Core\\src\\Sync\\Wt.cpp"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a separate repo inside the project dir (e.g. a submodule) keeps project-dir gating" {
+    reg "$REGDIR" sibling-a
+    git init -q -b main "$PROJ/sub"
+    run run_hook "sub/file.txt"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    [[ "$output" == *"covering 'sub/file.txt' on branch 'develop'"* ]]
 }
