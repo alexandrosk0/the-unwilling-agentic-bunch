@@ -235,6 +235,11 @@ PY
 total_introduced=0
 total_alive=0
 files_with_survivors=0
+# Paths the change touched that are gone at the review ref. Zero gone paths and zero
+# introduced lines means the change added nothing reviewable (gitlinks, binaries, pure
+# deletions, renames),
+# which is not the same as "later work replaced it".
+gone_paths=0
 
 for f in "${FILES[@]}"; do
     # Existence guard against the review ref. Use `ls-tree` (separate <ref> and
@@ -253,6 +258,7 @@ for f in "${FILES[@]}"; do
     if ! present="$(git ls-tree "$REVIEW_REF" -- "$f" 2>/dev/null)"; then
         echo "historical-review-survivors: WARNING — existence check for '$f' at '$REVIEW_REF' errored; NOT skipping it (possible path-mangling regression — review '$f' manually)." >&2
     elif [ -z "$present" ]; then
+        gone_paths=$((gone_paths + 1))
         continue
     elif [ "${present%% *}" = "160000" ]; then
         continue
@@ -295,6 +301,11 @@ superseded=$((total_introduced - total_alive))
 [ "$superseded" -lt 0 ] && superseded=0
 echo "# Summary: $files_with_survivors file(s) with survivors; ~$total_alive/$total_introduced introduced line(s) still alive (~$superseded superseded)."
 echo "#"
+if [ "$files_with_survivors" -eq 0 ] && [ "$total_introduced" -eq 0 ] && [ "$gone_paths" -eq 0 ]; then
+    echo "# NOTHING TO ASSESS — this change added no reviewable lines (submodule"
+    echo "# pointers, binaries, pure deletions or renames). It is not superseded."
+    exit 0
+fi
 if [ "$files_with_survivors" -eq 0 ]; then
     echo "# FULLY SUPERSEDED — every line this change introduced has since been"
     echo "# modified or removed. Nothing to review."

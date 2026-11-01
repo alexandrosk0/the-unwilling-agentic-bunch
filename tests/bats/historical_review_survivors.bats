@@ -227,3 +227,47 @@ teardown() {
     [[ "$output" == *"2/2 introduced line(s) still alive"* ]]
     [ "$(grep -c "=== sub ===" <<<"$output")" -eq 0 ]
 }
+
+@test "a commit that only moves a submodule pointer is NOTHING TO ASSESS, not superseded" {
+    # Zero introduced lines because nothing reviewable was there must not read as
+    # "every line was since replaced": the ledger reconcile drops a finding on that banner.
+    printf 'alpha\n' > f.txt
+    git add f.txt
+    git commit -qm "base"
+    git update-index --add --cacheinfo "160000,$(git hash-object -t blob --stdin </dev/null),sub"
+    git commit -qm "A: pointer bump only"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a binary-only commit is NOTHING TO ASSESS" {
+    printf 'alpha\n' > f.txt
+    git add f.txt
+    git commit -qm "base"
+    printf '\x00\x01\x02' > blob.bin
+    git add blob.bin
+    git commit -qm "A: binary only"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+}
+
+@test "lines added to a file deleted since are still FULLY SUPERSEDED, not NOTHING TO ASSESS" {
+    printf 'alpha\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    printf 'bravo\n' > gone.txt
+    git add gone.txt
+    git commit -qm "A: add gone.txt"
+    A="$(git rev-parse HEAD)"
+    git rm -q gone.txt
+    git commit -qm "B: delete it"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FULLY SUPERSEDED"* ]]
+    ! echo "$output" | grep -q "NOTHING TO ASSESS"
+}
