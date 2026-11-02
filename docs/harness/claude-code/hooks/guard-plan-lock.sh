@@ -10,7 +10,8 @@
 # When >=1 other session is live AND the edited path is NOT covered by a
 # refs/locks/* claim whose `branch` == the session's own checkout's HEAD branch
 # (this session's own seed; the checkout comes from the payload's `cwd`), DENY with a copy-paste lock-claim.sh remediation. Solo
-# (0 siblings) -> allow. Identity is keyed on BRANCH, never owner/AGENT_ID
+# (0 siblings) -> allow. An untracked gitignored path is never gated (it cannot
+# reach another branch). Identity is keyed on BRANCH, never owner/AGENT_ID
 # (unprovisioned in prod). Same-tree-same-branch contention is out of scope (the
 # tree guards own that); plan-locks target cross-BRANCH parallel work.
 #
@@ -154,6 +155,14 @@ case "$FP_N" in
   *) exit 0 ;;
 esac
 [ -n "$rel" ] || exit 0
+
+# An untracked, gitignored path (.review-findings.json, .review-ack, build/ scratch)
+# is never committed, so no other branch can collide on it: Layers B and C only
+# ever see tracked changes. Gating it blocked the review-artifact writes the
+# commit/push gates require. `git check-ignore` skips tracked files by default, so
+# a tracked file that happens to match an ignore pattern is still gated. Exit 0 =
+# ignored; 1 (not ignored) and 128 (error) fall through to the lock check.
+git -C "$PROJ_TOP" check-ignore -q -- "$rel" 2>/dev/null && exit 0
 
 # Allow iff covered by a lock whose branch == mine. rc: 0 covered, 1 not, 2
 # undetermined (table unavailable -> fail-open allow).

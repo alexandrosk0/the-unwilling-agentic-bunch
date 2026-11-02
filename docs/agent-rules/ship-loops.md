@@ -147,7 +147,7 @@ Logical-feature granularity is the band between the two: few enough PRs to respe
 
 ## Plan-lock seed
 
-When a plan-doc exists, the `[seed plan-lock]` step files a `refs/locks/<slug>` from its **§Files-to-modify** at ship-loop start, BEFORE editing (so Layer A's contention guard finds the lock when a sibling is live). Eager + non-blocking; a single ref push, never a deny path.
+When a plan-doc exists, the `[seed plan-lock]` step files a `refs/locks/<slug>` from its **§Files-to-modify** at ship-loop start, BEFORE editing (so Layer A's contention guard finds the lock when a sibling is live). Eager + non-blocking; a single ref push, never a deny path. Gitignored scratch (`.review-findings.json`, `.review-ack`, `build/`) needs no lock: Layer A never gates an untracked ignored path, since it cannot be committed and so cannot collide across branches.
 
 **Extraction is a RULE the orchestrator applies inline — do NOT build an extractor script** (an LLM reads freeform plan markdown more reliably than a brittle parser, and a new script would owe its own gate for a system that tolerates imperfect extraction). The rule: take the **first** backtick-delimited token on each **numbered (`N.`)** §Files-to-modify line → strip a trailing `:line-range`, ` (new)`, and ` — description`; skip non-numbered lines (bold `**…**` sub-headers, blanks). The "first token per numbered line" skips the cross-reference paths later in an item's prose (the plan-doc convention is that each item *leads* with its write target). Emit a bare path, or a `dir/` prefix (trailing slash) where the item targets a directory — the trailing slash is load-bearing for dir-prefix coverage. **Imperfection is safe**: an over-include is a harmless reservation, a miss self-heals via deny→file.
 

@@ -13,7 +13,8 @@
 # MY-BRANCH lock (exact or dir-prefix) -> allow; an OTHER-branch lock is not my
 # cover (the branch-key / owner-collision canary); union-of-distinct sibling
 # count dedups a sid across regdirs; bypass + detached-HEAD + out-of-repo all
-# fail open.
+# fail open; an untracked gitignored path is never gated, but a tracked file
+# matching an ignore pattern still is.
 # ----------------------------------------------------------------------------
 
 setup() {
@@ -258,4 +259,65 @@ mk_nested_wt() {
     [ "$status" -eq 0 ]
     [[ "$output" == *'"permissionDecision":"deny"'* ]]
     [[ "$output" == *"covering 'sub/file.txt' on branch 'develop'"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Untracked gitignored paths are never gated: they cannot be committed, so no
+# other branch can collide on them. These are the review artifacts the commit /
+# push gates require (.review-findings.json, .review-ack) and build scratch.
+# ---------------------------------------------------------------------------
+
+commit_gitignore() { # $1 = checkout
+    printf '.review-findings.json\n.review-ack\nbuild/\n' > "$1/.gitignore"
+    git -C "$1" add .gitignore
+    git -C "$1" commit -qm ignore
+}
+
+@test "gitignored: contended + untracked ignored file (review artifact) is ALLOWED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    run run_hook ".review-findings.json"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "gitignored: contended + new file under an ignored dir is ALLOWED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    run run_hook "build/run-1/findings/charter.jsonl"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "gitignored: a TRACKED file matching an ignore pattern is still DENIED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    mkdir -p "$PROJ/build"
+    echo x > "$PROJ/build/tracked.txt"
+    git -C "$PROJ" add -f build/tracked.txt
+    git -C "$PROJ" commit -qm tracked
+    run run_hook "build/tracked.txt"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    [[ "$output" == *"covering 'build/tracked.txt'"* ]]
+}
+
+@test "gitignored: the main tree's ignore rules do not exempt a worktree whose branch lacks them" {
+    reg "$REGDIR" sibling-a
+    mk_nested_wt
+    # .gitignore lands on develop AFTER the worktree branched, so feat/nested has
+    # no ignore rule: the worktree's .review-ack is an ordinary untracked file there.
+    commit_gitignore "$PROJ"
+    HOOK_CWD="$NWT" run run_hook ".claude/worktrees/nested/.review-ack"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+}
+
+@test "gitignored: nested worktree + untracked file ignored by the worktree's own rules is ALLOWED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    mk_nested_wt   # branches from the commit that carries .gitignore
+    HOOK_CWD="$NWT" run run_hook ".claude/worktrees/nested/.review-ack"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
