@@ -30,7 +30,8 @@ The setup command:
 7. Prints the remaining payload-dependent Claude-Code-only runtime gaps.
 
 The setup script preserves user-modified `.codex/config.toml` and
-`.codex/hooks.json` on re-run. Regenerated `.codex/agents/*.toml` files are
+`.codex/hooks.json` on re-run; an unmodified copy of an earlier template version
+is upgraded. Regenerated `.codex/agents/*.toml` files are
 adapter output; edit the canonical markdown prompts instead.
 
 ## Trust Step

@@ -72,8 +72,9 @@ Harnesses:
                 own hooks dir to the relative, per-worktree form.
 
 Idempotent — re-running is safe. Edits to .claude/settings.json (or other
-templates) survive: the script skips copies if the local file differs from
-the tracked template.
+templates) survive: a copy that differs from the tracked template is replaced
+only when it is a verbatim copy of an earlier version of that template in the
+layer's git history ("upgrade"); otherwise it is skipped ("skip-copy").
 
 After clone, run the script for the harness you use. See
 docs/harness/SETUP.md for the full mapping.
@@ -253,15 +254,60 @@ gen_subsystem_claude_shims() {
   echo "  subsystem-shims  $count new CLAUDE.md shim(s) beside Source/Core/src/*/AGENTS.md (gitignored)"
 }
 
+# _template_history_match <layer-rel-src> <dst>
+# Print the short sha of the layer commit that introduced the version of <src>
+# byte-identical to <dst> (newest first), and succeed; fail when none does or the
+# history cannot be read (no git, not a repo, a git error). A shallow clone
+# searches the commits it has: a match is still a version the layer shipped,
+# so the only cost of missing history is a skip, never an overwrite.
+# <dst> is hashed twice, raw and through the template's own checkout filters,
+# so a copy taken from a CRLF checkout still matches its LF blob.
+_template_history_match() {
+  local rel="$1" dst="$2" raw clean c
+  git_cmd -C "$ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1 || return 1
+  raw="$(git_cmd -C "$ROOT" hash-object --no-filters --stdin < "$dst" 2>/dev/null)" || return 1
+  clean="$(git_cmd -C "$ROOT" hash-object --stdin --path="$rel" < "$dst" 2>/dev/null)" || clean="$raw"
+  # One log pass: each commit that touched <src>, followed by its --raw line,
+  # whose 4th field is the blob that commit left at the path. ./ keeps the
+  # pathspec relative to $ROOT even when $ROOT is not the repo top.
+  c="$(git_cmd -C "$ROOT" log --no-renames --format='C %H' --raw --no-abbrev -- "./$rel" 2>/dev/null |
+       awk -v a="$raw" -v b="$clean" '$1 == "C" { c = $2; next }
+                                      /^:/ && ($4 == a || $4 == b) { print c; exit }')" || true
+  [[ -n "$c" ]] || return 1
+  git_cmd -C "$ROOT" rev-parse --short "$c" 2>/dev/null
+}
+
+# Copy a layer template to <dst>, never clobbering a local edit. An existing
+# <dst> that differs from the template is upgraded only when it is a verbatim
+# copy of an earlier version of that template in the layer's git history (so it
+# holds no local content); anything else — a real edit, or a layer whose history
+# cannot be read — is left alone with a skip-copy.
 copy_template() {
-  local src dst="$2"
+  local src dst="$2" was
   src="$(_layer_src "$1")"
   mkdir -p "$(dirname "$dst")"
   if [[ -e "$dst" ]]; then
     if cmp -s "$src" "$dst"; then
       return 0
     fi
-    echo "  skip-copy  $dst (user-modified — not overwriting)"
+    # Only a layer-relative source has layer history (the absolute pi package
+    # source is not the layer's to trace), and only a regular file is upgraded:
+    # a symlink in <dst>'s place is never written through.
+    was=""
+    case "$1" in
+      /*|[A-Za-z]:[\\/]*) ;;
+      *) if [[ -f "$dst" && ! -L "$dst" ]]; then
+           was="$(_template_history_match "$1" "$dst")" || was=""
+         fi ;;
+    esac
+    if [[ -z "$was" ]]; then
+      echo "  skip-copy  $dst (differs from the template and matches no earlier version of it — a local edit, or layer history unavailable; not overwriting)"
+      echo "             compare: git diff --no-index -- \"$src\" \"$dst\""
+      return 0
+    fi
+    cp "$src" "$dst"
+    case "$src" in *.sh) chmod +x "$dst" ;; esac
+    echo "  upgrade    $dst (was $was)"
     return 0
   fi
   cp "$src" "$dst"
