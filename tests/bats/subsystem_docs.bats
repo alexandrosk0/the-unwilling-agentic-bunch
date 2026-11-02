@@ -13,6 +13,11 @@
 # ----------------------------------------------------------------------------
 
 setup() {
+    # The host's test-all.sh runs layer suites with PROJECT_ROOT pointed at the
+    # layer and SMATCHET_PROJECT_ROOT_OVERRIDE=1; the sandbox below is its own
+    # project, so no inherited root or config may redirect the gate under test.
+    unset PROJECT_ROOT AGENT_LAYER_ROOT PC_PROJECT_ROOT PC_AGENT_LAYER_ROOT
+    unset SMATCHET_PROJECT_ROOT_OVERRIDE SMATCHET_PROJECT_CONFIG
     REPO_ROOT="$(git rev-parse --show-toplevel)"
     GATE_SRC="$REPO_ROOT/agents/scripts/project/test-subsystem-docs.sh"
     SANDBOX="$(mktemp -d)"
