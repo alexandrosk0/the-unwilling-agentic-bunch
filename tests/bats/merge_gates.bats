@@ -3971,8 +3971,8 @@ blocked_with_bot_threads() {
 }
 
 @test "Bugbot (9) field-count guard fires on a mis-sized tuple (fail-closed canary)" {
-    # An embedded newline in a tuple field inflates the field count past 42; the
-    # -ne 42 fail-closed assertion must catch it (the tuple-order regression guard
+    # An embedded newline in a tuple field inflates the field count past 43; the
+    # -ne 43 fail-closed assertion must catch it (the tuple-order regression guard
     # that the appended Bugbot + selfImpOnly + pureDocs/crRateLimited/crDisposition
     # + thread-count + stale-override + dup-masked fields rely on).
     local f
@@ -3982,7 +3982,7 @@ blocked_with_bot_threads() {
     set_fixture "$f"
     run poll_merge_gates org repo 1
     [ "$status" -ne 0 ]
-    [[ "$output" == *"expected 42"* ]]
+    [[ "$output" == *"expected 43"* ]]
     [[ "$output" != *"GATES_PASSED"* ]]
     rm -f "$f"
 }
@@ -4773,4 +4773,154 @@ STUB
     [[ "$output" == *"GATES_PASSED"* ]]
     [[ "$output" != *"blocking context from an older workflow run"* ]]
     rm -f "$f"
+}
+
+# ---------- CodeRabbit check run as the clean verdict (crRunClean, field 42) ----------
+
+cr_run_fixture() {
+    # Usage: cr_run_fixture <base fixture> <CodeRabbit CheckRun nodes JSON array>
+    # Replaces the head rollup with a required green build plus the given
+    # CodeRabbit check runs. The base fixture keeps its reviews and threads.
+    local base="$1" runs="$2"
+    fixture_override "$base" \
+        "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
+        "$(jq -cn --argjson r "$runs" '[{"__typename":"CheckRun","name":"build","conclusion":"SUCCESS","status":"COMPLETED","isRequired":true}] + $r')"
+}
+
+cr_run() {
+    # Usage: cr_run <databaseId> <status> <conclusion|null> [app-slug]
+    jq -cn --argjson id "$1" --arg s "$2" --argjson c "$3" --arg app "${4:-coderabbitai}" \
+        '{"__typename":"CheckRun","name":"CodeRabbit","databaseId":$id,"status":$s,"conclusion":$c,"isRequired":false,"checkSuite":{"createdAt":"2026-11-02T10:00:00Z","app":{"slug":$app}}}'
+}
+
+stale_no_header_fixture() {
+    # A prior-commit CR review whose body has no Actionable header (CR's current
+    # "Follow-up Comments" shape) -> STALE_UNKNOWN unless the head run is clean.
+    fixture_override "$FIXTURES_DIR/merge_gates_cr_stale_clean.json" \
+        "data.repository.pullRequest.reviews.nodes.0.body" '"## Follow-up Comments"'
+}
+
+@test "crRunClean: NONE + CodeRabbit check run SUCCESS on head -> pass now, no grace wait" {
+    local f
+    f="$(cr_run_fixture "$FIXTURES_DIR/merge_gates_pass.json" "[$(cr_run 125503922956 COMPLETED '"SUCCESS"')]")"
+    export MERGE_GATES_CR_INSTALLED=true MERGE_GATES_CR_GRACE_POLLS=10
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"CodeRabbit: NONE+checkrun-clean"* ]]
+    rm -f "$f"
+}
+
+@test "crRunClean: a SKIPPED, NEUTRAL, FAILURE, ACTION_REQUIRED or in-progress run is not clean" {
+    local f run_json
+    export MERGE_GATES_CR_INSTALLED=true MERGE_GATES_CR_GRACE_POLLS=10
+    for run_json in "$(cr_run 9 COMPLETED '"SKIPPED"')" "$(cr_run 9 COMPLETED '"NEUTRAL"')" \
+                    "$(cr_run 9 COMPLETED '"FAILURE"')" "$(cr_run 9 COMPLETED '"ACTION_REQUIRED"')" \
+                    "$(cr_run 9 IN_PROGRESS null)"; do
+        f="$(cr_run_fixture "$FIXTURES_DIR/merge_gates_pass.json" "[$run_json]")"
+        set_fixture "$f"
+        run poll_merge_gates org repo 1
+        [[ "$output" != *"checkrun-clean"* ]]
+        rm -f "$f"
+    done
+}
+
+@test "crRunClean: a CodeRabbit-named run from another app is not clean" {
+    local f
+    f="$(cr_run_fixture "$FIXTURES_DIR/merge_gates_pass.json" "[$(cr_run 9 COMPLETED '"SUCCESS"' github-actions)]")"
+    export MERGE_GATES_CR_INSTALLED=true MERGE_GATES_CR_GRACE_POLLS=10
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [[ "$output" != *"checkrun-clean"* ]]
+    rm -f "$f"
+}
+
+@test "crRunClean: the newest run decides (an older SUCCESS under a newer FAILURE is not clean)" {
+    local f
+    f="$(cr_run_fixture "$FIXTURES_DIR/merge_gates_pass.json" \
+        "[$(cr_run 125503922999 COMPLETED '"FAILURE"'),$(cr_run 125503922956 COMPLETED '"SUCCESS"')]")"
+    export MERGE_GATES_CR_INSTALLED=true MERGE_GATES_CR_GRACE_POLLS=10
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [[ "$output" != *"checkrun-clean"* ]]
+    rm -f "$f"
+    f="$(cr_run_fixture "$FIXTURES_DIR/merge_gates_pass.json" \
+        "[$(cr_run 125503922956 COMPLETED '"SKIPPED"'),$(cr_run 125503922999 COMPLETED '"SUCCESS"')]")"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [[ "$output" == *"NONE+checkrun-clean"* ]]
+    rm -f "$f"
+}
+
+@test "crRunClean: STALE review without an Actionable header + clean head run -> pass (the #2379 shape)" {
+    local base f
+    base="$(stale_no_header_fixture)"
+    f="$(cr_run_fixture "$base" "[$(cr_run 9 COMPLETED '"SUCCESS"')]")"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"CodeRabbit: STALE+checkrun-clean"* ]]
+    rm -f "$f" "$base"
+}
+
+@test "crRunClean: STALE + clean head run still blocks while a CR thread is open" {
+    local base b2 f
+    base="$(stale_no_header_fixture)"
+    b2="$(fixture_override "$base" "data.repository.pullRequest.reviewThreads.nodes" \
+        '[{"isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"coderabbitai[bot]","__typename":"Bot"},"commit":{"oid":"headSHAOLD"}}]}}]')"
+    f="$(cr_run_fixture "$b2" "[$(cr_run 9 COMPLETED '"SUCCESS"')]")"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" != *"checkrun-clean"* ]]
+    rm -f "$f" "$b2" "$base"
+}
+
+@test "crRunClean: STALE + a non-clean head run stays STALE_UNKNOWN (block)" {
+    local base f
+    base="$(stale_no_header_fixture)"
+    f="$(cr_run_fixture "$base" "[$(cr_run 9 COMPLETED '"ACTION_REQUIRED"')]")"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"STALE_UNKNOWN"* ]]
+    rm -f "$f" "$base"
+}
+
+@test "crRunClean: a head review with findings still blocks despite a clean run" {
+    local f
+    f="$(fixture_override "$FIXTURES_DIR/merge_gates_cr_stale_clean.json" "data.repository.pullRequest.reviews.nodes.0.commit.oid" '"headSHAcleanNew"')"
+    local b2
+    b2="$(fixture_override "$f" "data.repository.pullRequest.reviews.nodes.0.body" '"**Actionable comments posted: 2**"')"
+    local f3
+    f3="$(cr_run_fixture "$b2" "[$(cr_run 9 COMPLETED '"SUCCESS"')]")"
+    export MERGE_GATES_CR_INSTALLED=true
+    set_fixture "$f3"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"COMMENTED (2 actionable — block)"* ]]
+    rm -f "$f" "$b2" "$f3"
+}
+
+@test "STALE auto-nudge is off by default (no @coderabbitai review post)" {
+    grep -qF 'local STALE_REREVIEW_POLLS="${MERGE_GATES_STALE_REREVIEW_POLLS:-0}"' "$REPO_ROOT/agents/scripts/core/merge-gates.sh"
+    local base
+    base="$(stale_no_header_fixture)"
+    export MERGE_GATES_CR_INSTALLED=true
+    export MERGE_GATES_PRIOR_STALE_HEAD="$(jq -r '.data.repository.pullRequest.headRefOid' "$base")"
+    export MERGE_GATES_PRIOR_STALE_STREAK=50
+    export MERGE_GATES_STUB_COMMENT_COUNTER="${BATS_TEST_TMPDIR:-${BATS_TMPDIR:-/tmp}}/cr-nudge-${BATS_TEST_NUMBER}"
+    rm -f "$MERGE_GATES_STUB_COMMENT_COUNTER"
+    set_fixture "$base"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [ ! -s "$MERGE_GATES_STUB_COMMENT_COUNTER" ]
+    rm -f "$MERGE_GATES_STUB_COMMENT_COUNTER" "$base"
+    unset MERGE_GATES_PRIOR_STALE_HEAD MERGE_GATES_PRIOR_STALE_STREAK
 }

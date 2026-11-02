@@ -139,7 +139,7 @@
 #   MERGE_GATES_CR_INSTALLED     — override CR-installed auto-detection
 #   MERGE_GATES_STALE_REREVIEW_POLLS — consecutive STALE polls on same HEAD
 #                                  before auto-posting `@coderabbitai review`
-#                                  (default 5; 0 disables the STALE nudge only).
+#                                  (default 0 = DISABLED; > 0 re-enables the STALE nudge).
 #   MERGE_GATES_NONE_NUDGE_POLLS — consecutive blocking-NONE polls on same HEAD
 #                                  before auto-posting `@coderabbitai review`
 #                                  (default 0 = DISABLED; auto_review already
@@ -232,7 +232,7 @@ MERGE_GATES_CONFIG_FILE="${MERGE_GATES_CONFIG_FILE:-${PC_CONFIG_FILE:-$SCRIPT_DI
 # (NOT a glob) — mirrors agents/scripts/project/lint-rules.d/. The modules carry:
 #   00-common.sh      — the meant-to-block allow-list constant, the prompt-shim
 #                        lazy-source, and gh_pr_ready_idempotent (top-level).
-#   10-gate-filter.sh — the one giant GATE_FILTER jq program (the 42-field
+#   10-gate-filter.sh — the one giant GATE_FILTER jq program (the 43-field
 #                        projection) as a template emitter; run by standalone
 #                        `jq -f`, or by `gh api graphql --jq` when jq is absent.
 # The four gate-condition verdicts (CI / CodeRabbit / Bugbot / user-comments)
@@ -578,11 +578,13 @@ poll_merge_gates() {
     local QUERY_FILE="${MERGE_GATES_QUERY_FILE:-$DEFAULT_QUERY_FILE}"
     # When CR state is STALE_WITH_FINDINGS / STALE_UNKNOWN on the same HEAD for
     # this many consecutive polls, post `@coderabbitai review` once per HEAD to
-    # nudge CR into re-reviewing. Default 5 polls (~5 min at default interval).
-    # Set to 0 to disable the STALE auto-trigger. (The CR=NONE early-nudge is a
+    # nudge CR into re-reviewing. Default 0 = DISABLED: on the shared login the
+    # nudge posts as the operator, and every PR comment re-runs comment-triggered
+    # gates (#2379 lost its green CR finding gate to one). A clean re-review now
+    # passes via crRunClean instead of waiting on a nudge. Set > 0 to re-enable. (The CR=NONE early-nudge is a
     # SEPARATE knob — MERGE_GATES_NONE_NUDGE_POLLS, below — so the redundant
     # first-poll NONE nudge can be off while this STALE backstop stays on.)
-    local STALE_REREVIEW_POLLS="${MERGE_GATES_STALE_REREVIEW_POLLS:-5}"
+    local STALE_REREVIEW_POLLS="${MERGE_GATES_STALE_REREVIEW_POLLS:-0}"
     if ! [[ "$STALE_REREVIEW_POLLS" =~ ^[0-9]+$ ]]; then
         echo "poll_merge_gates: MERGE_GATES_STALE_REREVIEW_POLLS must be a non-negative integer (got: $STALE_REREVIEW_POLLS)" >&2
         return 3
@@ -802,7 +804,7 @@ poll_merge_gates() {
     start=$(date +%s)
 
     # One filter computes every gate field and emits them as a fixed-order,
-    # one-per-line stream (42 lines) that the poll loop reads with `mapfile`.
+    # one-per-line stream (43 lines) that the poll loop reads with `mapfile`.
     # It runs under standalone `jq -r -f <file>` when jq is on PATH, else under
     # gh's bundled engine (`gh api --jq`) — see gate_jq_engine below. The exact
     # jq sub-expressions are the same ones the per-field `jq` calls used
@@ -846,7 +848,7 @@ poll_merge_gates() {
     # may be empty) · 34 staleOverrideCount (their count).
     # The trailing fields must all be non-empty so the `data=$(gh …)` command
     # substitution (trailing-newline collapse) never strips one and deflates the
-    # 42-field count (tripping the fail-closed assertion). reqAbsentCount (22),
+    # 43-field count (tripping the fail-closed assertion). reqAbsentCount (22),
     # crReviewSkipped (23), bbState (24, ABSENT-default), bbOpen (25, numeric),
     # bbOob (26), selfImpOnly (27), pureDocs (28), crRateLimited (29),
     # crDisposition (30), the two numeric thread counts (31/32) and
@@ -872,8 +874,11 @@ poll_merge_gates() {
     # ci_pend; non-empty, safe at the tail) ·
     # 41 crManualOnly (bool: the head CodeRabbit status is the OSS manual-trigger
     # skip — "manual review required" / "available on request" — so a SUCCESS
-    # state is NOT a review; non-empty, safe at the tail).
-    # GATE_FILTER — the 42-field jq projection (see field-order map above).
+    # state is NOT a review; non-empty) · 42 crRunClean (bool: CodeRabbit's own
+    # newest "CodeRabbit" check run on the head, app slug coderabbitai, is
+    # COMPLETED + SUCCESS — CR finished a clean review of this head and posts no
+    # review object for it; non-empty, safe at the tail).
+    # GATE_FILTER — the 43-field jq projection (see field-order map above).
     # Copied byte-for-byte from the _MG_GATE_FILTER_TEMPLATE global that
     # merge-gates.d/10-gate-filter.sh defines (single-quoted literal → no
     # command-substitution newline trim); placeholders spliced below as before.
@@ -1003,7 +1008,7 @@ poll_merge_gates() {
         fi
         gh_fails=0
 
-        # Parse the filter's field stream — 42 fixed-order lines (see GATE_FILTER
+        # Parse the filter's field stream — 43 fixed-order lines (see GATE_FILTER
         # field map above). Filter errors (either engine) already routed through
         # the gh-fail path above; this guards a truncated/partial body → fail
         # closed (retry).
@@ -1013,11 +1018,11 @@ poll_merge_gates() {
         # "OPEN\r" != "OPEN" → spurious return-4).
         data="${data//$'\r'/}"
         mapfile -t fields <<<"$data"
-        if [ "${#fields[@]}" -ne 42 ]; then
-            # Exactly 42 expected. Any other count (a field value with an embedded
+        if [ "${#fields[@]}" -ne 43 ]; then
+            # Exactly 43 expected. Any other count (a field value with an embedded
             # newline would inflate it, misaligning fields[n]) → fail closed (CR #511).
             gh_fails=$((gh_fails+1))
-            echo "Poll $((p+1)): gate filter returned ${#fields[@]} fields (expected 42); transient ($gh_fails/3)"
+            echo "Poll $((p+1)): gate filter returned ${#fields[@]} fields (expected 43); transient ($gh_fails/3)"
             if [ "$gh_fails" -ge 3 ]; then echo "GH_API_DOWN"; return 3; fi
             local elapsed_short=$(( $(date +%s) - start ))
             if [ "$elapsed_short" -ge "$TIMEOUT_SECONDS" ]; then echo "GATES_TIMEOUT"; return 2; fi
@@ -1261,6 +1266,10 @@ poll_merge_gates() {
         # manual-trigger skip, so its SUCCESS state is not a review and must
         # never ride the status-only grace-then-pass. Empty/parse-miss → false.
         local cr_manual_only="${fields[41]:-false}"
+        # cr_run_clean — field 42: CR's own newest CodeRabbit check run on the
+        # head finished SUCCESS. CR posts no review for a clean head, so this is
+        # its clean verdict for the head. Empty/parse-miss → false.
+        local cr_run_clean="${fields[42]:-false}"
         # dependabot_actions_bump — Dependabot-authored PR on a
         # dependabot/github_actions/* head (field 37). CR never reviews bot PRs,
         # so this is the one shape whose silent CR keeps the grace-then-pass
@@ -1354,9 +1363,20 @@ poll_merge_gates() {
                 # signals (open=0 AND status=SUCCESS) — open=0 alone could mean the
                 # user manually resolved (no CR judgement); status=SUCCESS alone could
                 # be a stale placeholder. Together they're a CR-driven accept.
+                #
+                # STALE+checkrun-clean — CR's own CodeRabbit check run on the
+                # CURRENT head finished SUCCESS and no CR thread is open: CR
+                # reviewed this head and found nothing, so it posted no review
+                # object and the prior commit's body (often no Actionable header
+                # in CR's current format) no longer speaks for the head. Without
+                # this arm every clean re-review after a first review read
+                # STALE_UNKNOWN and blocked (#2379 / #2378).
                 if [ "$cr_actionable" -gt 0 ] && [ "$cr_open" -eq 0 ] && [ "$cr_status_state" = "SUCCESS" ]; then
                     cr_pass=true
                     cr_state_print="STALE_RESOLVED (${cr_actionable} actionable on prior commit, all threads resolved + status SUCCESS — pass)"
+                elif [ "$cr_run_clean" = true ] && [ "$cr_open" -eq 0 ]; then
+                    cr_pass=true
+                    cr_state_print="STALE+checkrun-clean (CodeRabbit check run SUCCESS on head, no open CR thread — pass)"
                 elif [ "$cr_actionable" -gt 0 ]; then
                     cr_pass=false
                     cr_state_print="STALE_WITH_FINDINGS (${cr_actionable} actionable on prior commit — block + surface review)"
@@ -1407,6 +1427,17 @@ poll_merge_gates() {
                     cr_size_skip_block=true
                     cr_state_print="NONE+size-skip (CR skipped review — too many files)"
                     echo "BLOCK: CodeRabbit skipped review — too many files (exceeds CR file limit); split the PR (coderabbit review --dir <path> / --base) or apply the 'cr-out-of-band' label to merge without CR review." >&2
+                elif [ "$cr_run_clean" = true ] && [ "$cr_open" -eq 0 ]; then
+                    # CR's own CodeRabbit check run on the head finished SUCCESS:
+                    # CR reviewed this head and found nothing, so it posts no
+                    # review object. A completed run is the verdict, not a
+                    # placeholder (the C4 concern is the StatusContext that
+                    # fires before any review), so pass now instead of waiting
+                    # out the status-SUCCESS grace. Ahead of the rate-limit arm:
+                    # a rate-limit notice from an earlier ask is superseded by a
+                    # finished review of this head.
+                    cr_pass=true
+                    cr_state_print="NONE+checkrun-clean (CodeRabbit check run SUCCESS on head — pass)"
                 elif [ "$cr_rate_limited" = "true" ] && [ "$pure_docs" != "true" ]; then
                     # CR rate-limited a CODE PR and has no review object on any
                     # commit: the rate-limit notice is CR stating, in its own
