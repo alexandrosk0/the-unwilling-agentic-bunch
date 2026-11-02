@@ -253,8 +253,8 @@ file_obligation_stub() {
             printf '      - %s\n' "$p"
         done <<<"$trust_paths"
         printf '  Concrete next action: add the missing test/perf coverage for the changed\n'
-        printf '    trust-boundary surface (route to test-rig / test-author / perf-gatekeeper\n'
-        printf '    per the touched zone), then archive this stub to applied.md.\n'
+        printf '    trust-boundary surface (the test-authoring skill for tests, the perf-gatekeeper\n'
+        printf '    skill for perf), then archive this stub to applied.md.\n'
         printf '  Status: open\n'
         printf '  Last-reviewed: %s\n' "$date"
     } > "$out" || { echo "safe-merge: cannot write obligation stub $out" >&2; return 1; }

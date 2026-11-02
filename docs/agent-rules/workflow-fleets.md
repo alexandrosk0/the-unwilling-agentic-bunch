@@ -1,8 +1,76 @@
-# Workflow fleets — authoring multi-agent fan-outs (load on-demand)
+# Workflow fleets — when to fan out, and how (load on-demand)
 
-Trigger: **authoring a multi-agent `Workflow` fan-out or background agent fleet** (survey swarms, audit fleets, salvage miners — anything that spawns several subagents over one task). Stub in [`AGENTS.md`](../../AGENTS.md) § Project rules § On-demand rule-docs points here.
+Trigger: **authoring a multi-agent `Workflow` fan-out or background agent fleet** (survey swarms, audit fleets, salvage miners — anything that spawns several subagents over one task), or choosing between a `Workflow`, a plain `Agent` batch and inline work. Stub in [`AGENTS.md`](../../AGENTS.md) § Project rules § On-demand rule-docs points here; [`delegation.md`](delegation.md) § Parallel dispatch routes here for deterministic fan-out.
 
-Every rule below is a written-down diagnosis from the 2026-06-10/11 audit-fleet debacle (a 4.1M-token fleet died on a session limit with zero durable output, then three salvage waves each died of a different cause) plus the survey-fleet compaction incident (2 of 5 agents ballooned to ~130k tokens; one auto-compaction took 5.4 min and threw away 115k of paid context). Violating one of these is no longer "bad luck" — it is a rule violation.
+**Claude-Code-specific** — the `Workflow` tool is a Claude Code capability; other harnesses (Codex / Cursor / Aider) fall back to manual [`delegation.md`](delegation.md) § Parallel dispatch.
+
+## What a Workflow is
+
+A `Workflow` is a deterministic JS script that fans subagents out via `agent()` / `parallel()` / `pipeline()` and collects structured results — control flow (loops, conditionals, fan-out, barriers) lives in the script, not in the model. It invokes the repo's own agents via `agentType=<name>` (e.g. `agentType: 'code-review'`) or the built-in ones (`agentType: 'Explore'`), so no new agent code is needed. Saved scripts live in tracked `agents/_shared/workflows/*.js` and are linked into the gitignored `.claude/workflows/` by `setup-harness.sh`; the Workflow tool resolves them by name (`Workflow({name: 'pre-merge-review'})`).
+
+## Decision rule — Workflow vs plain Agent vs inline
+
+| Situation | Use |
+|---|---|
+| One bounded task for one agent | a single `Agent` call |
+| 2–4 independent contracts, one batch, no orchestration logic | [`delegation.md`](delegation.md) § Parallel dispatch (multiple `Agent` calls in one block) — simpler than a Workflow |
+| Deterministic **fan-out → barrier → synthesize**, a **pipeline** over a work-list, **loop-until-dry / loop-until-count**, or **adversarial-verify** (N skeptics per finding) | a **Workflow** |
+| The control flow needs cross-item dedup, early-exit on zero, or a judge stage over all results | a **Workflow** (barrier or judge stage) |
+| A single-fact lookup you can do yourself | inline — no agent at all |
+
+Reach for a Workflow when the *structure* of the work (how it fans out, what verifies, what synthesizes) is worth encoding deterministically. For an ad-hoc 2-agent batch, plain § Parallel dispatch is lighter.
+
+## Fan-out-safe roster — read-only agents
+
+Default wide fan-out is restricted to agents that touch no files, so any number run concurrently with **zero write-set collision**, no worktree, no lock:
+
+- `architect` · `code-review` · `security-review` — each declares `read-only: true`.
+- Built-in `Explore` — read-only by its tool set; the default reader for a survey, locate or code-reading sweep.
+- Built-in `general-purpose` — only with a prompt that confines it to reading; it holds write tools, so prefer `Explore` and treat an edit by it as a write fan-out (Boundary 1).
+
+Any **write** fan-out (parallel editors mutating disjoint zones) is NOT default-safe — see Boundary 1.
+
+## The two boundaries (hard rules)
+
+1. **Write fan-out needs isolation + a lock check.** Two agents editing the same shared clone in parallel clobber each other. A workflow that mutates files gives each writer its own git worktree (`isolation: 'worktree'` per `agent()`) AND passes `bash agents/scripts/core/locks-show.sh` (plan-lock collision check, [`delegation.md`](delegation.md) § Orchestrator delegation packet) before dispatch. Default to read-only fan-out; write fan-out only with disjoint zones + worktree + lock pass.
+2. **The gated ship-loop tail stays orchestrator-owned.** Workflows are scoped to **diagnose / review / analyze** phases. `commit → push → open PR → gate-check → squash-merge → git-janitor cleanup` is sequential, determinism-critical, and **never** wrapped in a Workflow ([`ship-loops.md`](ship-loops.md)). A workflow produces findings; the orchestrator acts on them through the gated tail.
+
+## Cost guardrails
+
+The token budget is a **shared pool** across the main loop and all workflows (`budget.spent()` is global). Opus-dominated fan-out is the expensive case.
+
+- **Opus concurrency cap 4–6.** Workflows that recruit Opus subagents keep effective concurrency ≤ 6 (the runtime caps at `min(16, cores-2)`; stay well under for Opus). Wide sweeps (10+ agents) run read-only on a smaller pinned model (§ Model pinning).
+- **Escalate before unbounded loops.** Any `loop-until-dry`, `loop-until-count`, or multi-sample perf workflow that could spend a large, hard-to-predict amount gets a cost-estimate `AskUserQuestion` **first** (`AI_POLICY.md` § Escalate, don't assume — cost-unbounded → escalate). A `budget.total`-guarded loop is the encoded form: `while (budget.total && budget.remaining() > <floor>) { … }`.
+- **Cost is observable.** `.claude/.agent-tokens.jsonl` + `agent-tokens-report.py` (SubagentStop hook) record per-workflow spend; check it after a wide run.
+
+## Saved workflows
+
+Canonical home is tracked `agents/_shared/workflows/*.js` (NOT `.claude/workflows/`, which is gitignored). `setup-harness.sh` links each into `.claude/workflows/` so the Workflow tool resolves it by name. To add one: drop the `.js` under `agents/_shared/workflows/` and re-run `bash agents/scripts/core/setup-harness.sh claude-code`.
+
+**Portable vs project-scoped.** `agents/_shared/workflows/` is purity-gated (`test-portable-purity`) — a script there embeds **no** project literals (paths, subsystem names, repo-specific commands). A workflow that must name project internals lives in the host's **`agents/project/workflows/`** instead (excluded from the purity scan); `setup-harness.sh` links that dir into the same `.claude/workflows/`, so both resolve identically by name.
+
+| Workflow | Home | Shape | Use |
+|---|---|---|---|
+| `pre-merge-review` | `_shared` | parallel-barrier `code-review` + `security-review` → judge `agent()` (schema-forced) → one ranked deduped verdict + advisory verifier scores | pre-merge review of a PR / local branch diff. `args = {pr: N}` / `{base: 'origin/develop'}` / no-arg = local diff vs `origin/develop` |
+| `subsystem-invariant-audit` | `_shared` | discover leaf-AGENTS.md zones at runtime (delegated to a discovery agent — the JS runtime has no shell) → one read-only `code-review` agent per zone vs ONLY that leaf's rules → aggregate into one ranked drift report | drift audit of each subsystem against its own leaf-AGENTS.md invariants. `args = {}` (all zones) / `{zones: [...]}` (named dirs). Portable: zero project literal in the `.js` |
+| `historical-review-sweep` | `project` | fan-out: one `code-review` agent per merged PR over its survivor digest (`historical-review-survivors.sh`) → severity-tagged findings, aggregated | historical code-review of a merged-PR batch. `args = [<PR numbers>]` (real JSON array, required). Pairs with the `historical-code-review` skill + ledger |
+
+The `.js` is the single source of truth; this doc excerpts it, never re-copies the body. The judge-after-barrier shape:
+
+```js
+// agents/_shared/workflows/pre-merge-review.js (excerpt)
+const reviews = await parallel([
+  () => agent(reviewPrompt(target), { agentType: 'code-review',     schema: FINDINGS }),
+  () => agent(reviewPrompt(target), { agentType: 'security-review', schema: FINDINGS }),
+])                                              // barrier: both read-only → zero collision
+const verdict = await agent(judgePrompt(reviews.filter(Boolean)),
+                            { schema: VERDICT })  // plain agent(): default model, schema-forced
+return verdict                                   // ranked, deduped — orchestrator acts via the gated tail
+```
+
+## Fleet failure rules
+
+Every rule below is a written-down diagnosis from the 2026-06-10/11 audit-fleet debacle (a 4.1M-token fleet died on a session limit with zero durable output, then three salvage waves each died of a different cause) plus the survey-fleet compaction incident (2 of 5 agents ballooned to ~130k tokens; one auto-compaction took 5.4 min and threw away 115k of paid context). Violating one of these is a rule violation, not bad luck.
 
 ## Failure inventory (what actually killed fleets)
 
@@ -64,7 +132,7 @@ Before launching, measure every file an agent is told to Read. Anything over ~�
 
 ## Work-list — pass it via `args`, never hard-code it in the body
 
-A fan-out's per-item work-list (PR numbers, file paths, ticket ids) belongs in **`args`**, not a `const LIST = [...]` baked into the script. A baked list goes stale every run and forces a script edit per batch (the friction that motivated persisting [`historical-review-sweep`](workflow-orchestration.md)). Two rules make `args` reliable:
+A fan-out's per-item work-list (PR numbers, file paths, ticket ids) belongs in **`args`**, not a `const LIST = [...]` baked into the script. A baked list goes stale every run and forces a script edit per batch (the friction that motivated persisting `historical-review-sweep`, § Saved workflows). Two rules make `args` reliable:
 
 - **`args` always reaches the script as a string — `JSON.parse` is mandatory, not optional.** Even when you pass a real JSON array (`args: [1180, 1181]`), this harness serialises it: inside the script `typeof args === 'string'`, `Array.isArray(args)` is `false`, and `args` is the literal text `"[1180, 1181]"`. Proven by a 0-agent probe: `{argType:'string', isArray:false, rawValue:'[1180, 1181, 1182]', parsedIsArray:true}`. So the body must `JSON.parse` before any `.map`/`.length`/`.slice`; skipping it gives the classic "0-agent 14 ms no-op that looks like success".
 - **Defensive parse + loud empty-guard in the script.** `parsed = typeof args === 'string' ? JSON.parse(args) : args`, then accept array · `{items:[…]}`, and **`throw`** on an empty resolved list with the correct invocation in the message — never `return` quietly, or a misrouted list reads as a clean success.

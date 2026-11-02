@@ -17,9 +17,9 @@ If your `.cursor/rules` already exists as a single file (some tools write to it 
 Cursor auto-loads `.mdc` files from `.cursor/rules/` and applies them based on the rule's frontmatter (globs + `alwaysApply`). The shipped `agents.mdc` template:
 
 - Sets `alwaysApply: true` so the rule is always in context.
-- Points Cursor at `AGENTS.md` (project rules + delegation table) and the agent definitions: the layer's `agents/core/*.md`, plus a host project's own `agents/project/*.md`.
+- Points Cursor at `AGENTS.md` (project rules + the on-demand trigger → rule-doc / skill table), the three agent definitions in the layer's `agents/core/*.md` (plus a host project's own `agents/project/*.md`), and the skills under `agents/_shared/skills/`.
 
-That's the whole adapter — Cursor's built-in file-search + the rule's pointer are enough for the agent files to be discovered.
+That's the whole adapter — Cursor's built-in file-search + the rule's pointer are enough for the agent and skill files to be discovered. Cursor does not auto-load skills: the on-demand table row names the `SKILL.md` to read.
 
 ## Template source
 

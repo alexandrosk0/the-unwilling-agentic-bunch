@@ -1,7 +1,11 @@
 # pi (earendil-works/pi-coding-agent) — adapter
 
-How the canonical `agents/{core,project}/*.md` tree is made loadable by **pi**'s
-subagent extension, and the two mismatches the adapter resolves.
+How the canonical agents — the layer's three in `agents/core/*.md` (`architect`,
+`code-review`, `security-review`), plus a host project's own `agents/project/*.md`
+when it has any — are made loadable by **pi**'s subagent extension, and the two
+mismatches the adapter resolves. pi does not discover the skills under
+`agents/_shared/skills/`: it reaches each one through its row in the on-demand
+table in `AGENTS.md` § Project rules.
 
 ## TL;DR — bring-up
 
@@ -44,7 +48,7 @@ in the script and re-run).
 
 ### 2. Format + directory mismatch
 The canonical agents are Claude-Code-shaped: nested `core/` + `project/` dirs,
-`capabilities:` tags, `harness-hints:`, `triggers:`, `delegates-to:`, banners.
+`capabilities:` tags, `harness-hints:`, `triggers:`.
 pi discovers a **flat** `.pi/agents/*.md` and its parser reads only
 `name` / `description` / `tools` / `model`. The generator bridges this:
 
@@ -58,16 +62,19 @@ pi discovers a **flat** `.pi/agents/*.md` and its parser reads only
   just prose.
 - **`model:`** resolved from a tier→pi-model map (see below); unmapped ⇒ omit so
   the subagent inherits your default pi model.
-- the **body** (system prompt, banners, the richer orchestrator contract) passes
+- the **body** (system prompt, the `## Outcome:` output contract) passes
   through unchanged — pi won't *enforce* the extra frontmatter, but the prose
   rules still steer the subagent.
 
 ## Model tiers
 
 Canonical agents carry a tier (`opus`/`sonnet`/`haiku`) under
-`harness-hints.claude-code.model`. pi's default provider may not be Anthropic, so
-the generator leaves `model:` **off** unless you map the tiers — every subagent
-then runs on your configured default pi model. To tier them, either:
+`harness-hints.claude-code.model`. The generator leaves `model:` **off** for an
+unmapped tier, so the subagent runs on your configured default pi model. The
+committed map leaves `opus` empty on purpose: the three agents run the session's
+model, so pi inherits your default instead of pinning an ageing ID (pi's default
+provider may not be Anthropic either). `sonnet` / `haiku` stay mapped for an
+explicitly cheaper spawn of mechanical work. To change a tier, either:
 
 - edit `docs/harness/pi/model-map.json` (committed) — set `opus`/`sonnet`/`haiku`
   to concrete pi `--model` patterns (e.g. `"anthropic/claude-sonnet-4-5"`), or
@@ -84,6 +91,6 @@ Re-run `bash agents/scripts/core/setup-harness.sh pi` after any change.
   to `grep`/`read` fallbacks (degraded but workable — more round-trips).
 - `web-fetch` is dropped (no pi built-in web tool here).
 - `.pi/` is gitignored; never hand-edit `.pi/agents/*.md` (each carries a
-  GENERATED banner) — edit the canonical `agents/{core,project}/*.md` and re-run.
+  GENERATED banner) — edit the canonical agent file and re-run.
 - If the pi package can't be auto-located, set `PI_PACKAGE_DIR=<path>` and re-run;
   the agent files are still generated regardless.

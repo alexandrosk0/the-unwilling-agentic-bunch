@@ -116,7 +116,7 @@ cmake --build --preset <asan> --target <target>
 cmake --list-presets | grep -i -E 'asan|tsan'        # the other sanitizer presets
 ```
 
-The MSVC ASan preset is ASan only (MSVC has no UBSan); the Clang ASan preset is ASan + UBSan; TSan has a Linux preset over a threading subset. Without a preset for the sanitizer you need, set `-D<PREFIX>_SANITIZER=asan|tsan|msan` on a Clang preset — MSVC does not support TSan, and MSan is Clang-only (needs `clang` / `clang++` on PATH; `winget install LLVM.LLVM`). Wiring: `cmake/Sanitizers.cmake`. Sanitizer runtime DLLs (`libasan-*`, `libtsan-*`, `libubsan-*`, `libclang_rt.msan*`) must be on `PATH` at launch — "DLL not found" on a sanitized exe is the runtime, not the build. Preset failures or a new sanitizer request: [`build.md`](../../../../docs/agent-rules/build.md).
+The MSVC ASan preset is ASan only (MSVC has no UBSan), and so is a Clang ASan preset on Windows: `clang-cl` takes the MSVC branch of the sanitizer wiring, so UBSan is applied only by native Linux Clang. TSan has a Linux preset over a threading subset; an MSVC-ABI compiler (MSVC or `clang-cl`) warns and ignores `tsan`. Without a preset for the sanitizer you need, set `-D<PREFIX>_SANITIZER=asan|tsan|msan` on a native Clang preset — MSan has no preset, fails configure on a non-Clang compiler, and LLVM ships its runtime for Linux only. Wiring: `cmake/Sanitizers.cmake`. On Windows the ASan runtime (`clang_rt.asan_dynamic-<arch>.dll`) must be on `PATH` at launch — "DLL not found" on a sanitized exe is the runtime, not the build. Preset failures or a new sanitizer request: [`build.md`](../../../../docs/agent-rules/build.md) § Fix discipline + the host build reference (root `BUILD.md` § Troubleshooting).
 
 ## Scenario reuse + add
 

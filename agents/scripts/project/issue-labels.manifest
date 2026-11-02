@@ -23,7 +23,7 @@ P3|0e8a16|Low — cosmetic / minor
 src:code-review|5319e7|Filed by an agent (CodeRabbit / code-review), not a user report
 
 # --- area:<subsystem> — mirrors the area-map routes ---
-area:tracker-backend|1d76db|Tracker backend — Jira/Plane/GitHub clients, HTTP, field catalog/parser
+area:tracker-backend|1d76db|Tracker backends — Jira/Plane/GitHub/Linear clients, HTTP, field catalog/parser
 area:grid-engine|1d76db|Ticket grid / spreadsheet UI
 area:offline-sync|1d76db|SQLite cache / offline queue / sync / audit trail
 area:command-system|1d76db|Unified command system (CLI / palette / MCP / Lua / scenarios)

@@ -3,7 +3,7 @@
 #
 # Discovers tests by glob across scripts/dev/ + agents/scripts/{core,project}/
 # (each root included only if present); test-*.sh, excludes self.
-# Each test script must follow the test-author bash conventions:
+# Each test script must follow the test-script conventions:
 #   - set -euo pipefail
 #   - exits 0 on all-pass, 1 on assertion failure, 2 on missing binary/build.
 #   - prints a final "Passed: N  Failed: M" line (regex-extracted here).
@@ -288,7 +288,7 @@ for script in "${TESTS[@]}"; do
     # in CI; they exit 0 and are genuinely passing).
     SUMMARY=$(echo "$OUT" | grep -E 'Passed: [0-9]+ +Failed: [0-9]+' | tail -n 1 || true)
     if [ -z "$SUMMARY" ]; then
-        # No parseable count. The test-author contract makes exit 0 the
+        # No parseable count. The test-script convention makes exit 0 the
         # authoritative all-pass signal (many checks print `… PASS — …` with no
         # numeric tally), so treat exit 0 as a pass and only a non-zero exit as a
         # real failure.

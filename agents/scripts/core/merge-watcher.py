@@ -29,8 +29,9 @@ Env knobs:
   MERGE_GATES_*                     — inherited by merge-gates.sh per its own contract.
   ORCH_USER                         — required by merge-gates.sh.
   MERGE_WATCH_AUTO_ACT_ON_SANITIZER — opt-in (default false). When true, sanitizer
-                                      CI failures trigger auto-act with debug-detective
-                                      (skips coderabbit-triage).
+                                      CI failures trigger auto-act: a headless session
+                                      running the debug-instrument skill's headless
+                                      auto-act clause (skips the coderabbit-triage skill).
   MERGE_WATCH_CR_NONE_GRACE_CYCLES  — poll cycles to wait before treating a NONE +
                                       status-SUCCESS / NONE + pending CodeRabbit state
                                       (skipped or absent review) as pass (default 10;
@@ -2603,34 +2604,30 @@ def maybe_escalate_stuck_pr(
 # checkout) so it doesn't waste tokens guessing the branch.
 #
 # C4 prong 3 (per docs/reference/agentic-infrastructure-2026-05-23.md): the
-# spawned session is explicitly instructed to use the `coderabbit-triage`
-# agent's classification framework (per `agents/core/coderabbit-triage.md`) — that
-# agent specialises in CR-finding triage with hard invariant-rejection
-# heuristics. The agent itself is `read-only:true` (classification only); the
-# spawned session does the *application* step after the agent has classified.
-# Result: a finding the triage agent rejects (e.g. suggesting C++17 features
-# in a C++14-hard codebase) never gets applied, even if the spawned session
-# would otherwise have been tempted to "just go with CR's suggestion."
+# spawned session is told to load the `coderabbit-triage` skill
+# (agents/_shared/skills/coderabbit-triage/SKILL.md) and finish its read-only
+# triage phase before it edits anything. A finding the triage rejects (e.g. one
+# suggesting C++17 features in a C++14-hard codebase) is never applied, even if
+# the session would otherwise have been tempted to "just go with CR's suggestion."
 AUTO_ACT_PROMPT = (
     "You are the auto-act helper spawned by smatchet-merge-watcher because "
     "PR #{pr} is BLOCKED on CodeRabbit findings.\n\n"
     "Address every actionable CodeRabbit comment on this PR. Steps:\n"
     "  1. `gh pr checkout {pr}` to switch this clone to the PR's branch.\n"
-    "  2. **Invoke the `coderabbit-triage` agent first** (per "
-    "`agents/core/coderabbit-triage.md`). Pass it PR #{pr}; it will fetch the "
-    "inline CR comments via `gh api`, classify each by severity + target "
-    "Smatchet subsystem, and reject suggestions that collide with the "
-    "AGENTS.md invariants (C++14 hard, dual-target, UI-thread non-blocking, "
-    "RAII, LOG_* logging, never-crash, etc.). The agent is read-only and "
-    "emits a per-finding handoff packet — VALID findings (with target "
-    "subsystem named) plus REJECT-INVARIANT / REJECT-AMBIGUOUS lists with "
-    "rationale.\n"
-    "  3. Apply the smallest possible fix per VALID finding. Use the "
-    "subsystem agents the triage packet names (`tracker-backend`, "
-    "`grid-engine`, `offline-sync`, `command-system`, `lua-binder`, "
-    "`mcp-toolsmith`, etc.) for the actual edits when the finding is in their "
-    "territory; otherwise edit directly. Skip every REJECT-INVARIANT finding "
-    "outright; surface the rationale in the commit body.\n"
+    "  2. **Load the `coderabbit-triage` skill first** "
+    "(`agents/_shared/skills/coderabbit-triage/SKILL.md` in the agent layer; "
+    "`agent-layer/` in a host checkout) and run its read-only triage phase on "
+    "PR #{pr}: fetch the bot findings via `gh api`, validate each against the "
+    "branch, reject suggestions that match its override table (C++14 hard, "
+    "dual-target, UI-thread non-blocking, RAII, LOG_* logging, never-crash, "
+    "etc.), classify severity, and route each survivor through the project's "
+    "area map to its area and docs. Finish the triage table (VALID findings "
+    "with area + docs named, plus REJECT-INVARIANT / REJECT-AMBIGUOUS with "
+    "rationale) before editing anything.\n"
+    "  3. Apply the smallest possible fix per VALID finding, after reading the "
+    "docs its route names (the area's leaf AGENTS.md, guide or header). Skip "
+    "every REJECT-INVARIANT and REJECT-AMBIGUOUS finding outright; surface the "
+    "rationale in the commit body.\n"
     "  4. Build / test only when the diff actually warrants it (docs-only "
     "diffs skip both per the pure-docs slice rule).\n"
     "  5. `git commit` with a message of the form "
@@ -2647,19 +2644,25 @@ AUTO_ACT_PROMPT = (
 AUTO_ACT_SANITIZER_PROMPT = (
     "You are the auto-act helper spawned by smatchet-merge-watcher because "
     "PR #{pr} has a FAILING sanitizer CI job.\n\n"
-    "A sanitizer failure was detected. Invoke `debug-detective` directly to "
-    "diagnose and fix the issue. Steps:\n"
+    "Diagnose and fix it in THIS session with the `debug-instrument` skill "
+    "(`agents/_shared/skills/debug-instrument/SKILL.md` in the agent layer; "
+    "`agent-layer/` in a host checkout), following its § Headless auto-act "
+    "clause. Steps:\n"
     "  1. `gh pr checkout {pr}` to switch this clone to the PR's branch.\n"
-    "  2. **Invoke `debug-detective`** (per `agents/core/debug-detective.md`) with:\n"
+    "  2. Load the `debug-instrument` skill with these inputs:\n"
     "     - Failing test: {failing_test}\n"
     "     - CI job log: run `gh run list --branch $(gh pr view {pr} --json "
     "headRefName -q .headRefName) --status failure --limit 5` to find the "
-    "sanitizer run URL.\n"
-    "     - The sanitizer stderr constitutes the reproducer per slice 10's "
-    "reproducer-first contract.\n"
-    "  3. Do NOT invoke `coderabbit-triage` — this is a sanitizer failure, "
-    "not a CR-finding block.\n"
-    "  4. Apply the smallest fix that resolves the sanitizer error.\n"
+    "sanitizer run, then `gh run view <run-id> --log-failed` for its stderr.\n"
+    "     - The sanitizer stderr is the reproducer (the skill's "
+    "reproducer-first contract). Nobody can answer: skip the phase-0 "
+    "question and the § 7.5 wait-for-feedback pause.\n"
+    "  3. Do NOT load the `coderabbit-triage` skill — this is a sanitizer "
+    "failure, not a CR-finding block.\n"
+    "  4. After propose-fix (adversarial RCA first — a memory-safety finding "
+    "is crash-class), apply the smallest fix that resolves the sanitizer "
+    "error under the touched subsystem's leaf AGENTS.md invariants, and "
+    "strip every `[temp-debug]` marker.\n"
     "  5. Build with `cmake --build --preset {sanitizer_preset}` and run "
     "`ctest --output-on-failure` in the build dir to confirm the fix.\n"
     "  6. `git commit` with a message of the form "
@@ -2786,7 +2789,8 @@ def maybe_auto_act(state: dict[str, Any], entry: dict[str, Any]) -> dict[str, An
         file under the state dir for after-the-fact inspection.
 
     When the trigger is a sanitizer failure (not CR-finding), the spawned
-    session invokes `debug-detective` directly — skips `coderabbit-triage`.
+    session runs the `debug-instrument` skill's headless auto-act loop
+    directly — skips the `coderabbit-triage` skill.
 
     Returns extras dict to merge into the state.
     """

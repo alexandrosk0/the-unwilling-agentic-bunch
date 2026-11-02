@@ -18,6 +18,8 @@
 #   no-detach              `.detach()` (use AppController::LaunchBackgroundTask; first-party-wide)
 #   no-glfw-in-core-headers  GLFW/glad/OpenGL #include in a Source/Core/include header
 #                          (DX12 target compiles them too; absolute-0, no grandfathering)
+#   p4-single-spawn        exactly one SubprocessCapture::Run + >=1 cfg.P4RunOverride in
+#                          P4Annotate.cpp, no other spawn primitive (absolute-0, whole-file)
 #   cmake-local-gate-ci-scope  message(FATAL_ERROR ...) keyed on a LOCAL-dev project.config
 #                          knob (msvc_toolset_pin) without a NOT DEFINED ENV{CI} scope —
 #                          would FATAL every fresh-configure CI runner (absolute-0; #1074)
@@ -133,7 +135,8 @@ for _mod in "$LINT_RULES_D"/00-common.sh "$LINT_RULES_D"/10-line-rules.sh \
             "$LINT_RULES_D"/40-unused-config-guard.sh "$LINT_RULES_D"/50-bare-json.sh \
             "$LINT_RULES_D"/55-catch-all.sh "$LINT_RULES_D"/60-json-walker.sh \
             "$LINT_RULES_D"/65-file-slurp.sh "$LINT_RULES_D"/70-ui-request-flag.sh "$LINT_RULES_D"/72-offline-exact.sh "$LINT_RULES_D"/74-offline-heuristic.sh \
-            "$LINT_RULES_D"/75-pr-comments.sh "$LINT_RULES_D"/80-interface-doc.sh \
+            "$LINT_RULES_D"/75-pr-comments.sh "$LINT_RULES_D"/77-p4-single-spawn.sh \
+            "$LINT_RULES_D"/80-interface-doc.sh \
             "$LINT_RULES_D"/85-ui-include-direction.sh \
             "$LINT_RULES_D"/90-tu-line-ceiling.sh; do
     if [ ! -f "$_mod" ]; then
@@ -154,8 +157,8 @@ MODE="diff"; ARG=""; REFRESH=0
 # subcommand branch (keeps the subcommand parse value-free).
 for _a in "$@"; do [ "$_a" = "--refresh" ] && REFRESH=1; done
 case "${1:-}" in
-    --diff)        MODE=diff;     ARG="${2:-}" ;;
-    --diff=*)      MODE=diff;     ARG="${1#--diff=}" ;;
+    --diff)        MODE="diff";   ARG="${2:-}" ;;
+    --diff=*)      MODE="diff";   ARG="${1#--diff=}" ;;
     --catalog)     MODE=catalog ;;
     --funcsize-baseline) MODE=funcsizebaseline ;;
     --agentsize-baseline) MODE=agentsizebaseline ;;
@@ -166,6 +169,7 @@ case "${1:-}" in
     --full)        MODE=full ;;
     --scan-wide)   MODE=scanwide ;;
     --scan-glfw)   MODE=scanglfw ;;
+    --scan-p4-spawn) MODE=scanp4spawn ;;
     --scan-cmake-ci) MODE=scancmakeci ;;
     --scan-unused-cfg) MODE=scanunusedcfg ;;
     --scan-bare-json) MODE=scanbarejson ;;
@@ -179,8 +183,8 @@ case "${1:-}" in
     --scan-revisit-cohorts) MODE=scancohorts ;;
     --scan-offline) MODE=scanoffline ;;
     --selftest)    MODE=selftest ;;
-    "")            MODE=diff ;;
-    *) echo "usage: $0 [--diff[=]<ref>|--catalog [--refresh]|--funcsize-baseline|--agentsize-baseline|--dup-baseline|--include-cycle-baseline|--scan-file[=]<f>|--full|--scan-wide|--scan-glfw|--scan-cmake-ci|--scan-unused-cfg|--scan-bare-json|--scan-catch-all|--scan-json-walkers|--scan-slurps|--scan-ui-reqflag|--scan-ui-include|--scan-pr-comments|--scan-tu-ceiling|--scan-revisit-cohorts|--scan-offline|--selftest]" >&2; exit 2 ;;
+    "")            MODE="diff" ;;
+    *) echo "usage: $0 [--diff[=]<ref>|--catalog [--refresh]|--funcsize-baseline|--agentsize-baseline|--dup-baseline|--include-cycle-baseline|--scan-file[=]<f>|--full|--scan-wide|--scan-glfw|--scan-p4-spawn|--scan-cmake-ci|--scan-unused-cfg|--scan-bare-json|--scan-catch-all|--scan-json-walkers|--scan-slurps|--scan-ui-reqflag|--scan-ui-include|--scan-pr-comments|--scan-tu-ceiling|--scan-revisit-cohorts|--scan-offline|--selftest]" >&2; exit 2 ;;
 esac
 
 case "$MODE" in
@@ -234,6 +238,20 @@ case "$MODE" in
     if ! grep -qF "deviation-cohort" "$_tlr_agents_md"; then echo "SELFTEST FAIL: 'deviation-cohort' rule missing from AGENTS.md" >&2; miss=1; fi
     # Assert the no-glfw-in-core-headers rule-id is documented in AGENTS.md (absolute-0 gate).
     if ! grep -qF "no-glfw-in-core-headers" "$_tlr_agents_md"; then echo "SELFTEST FAIL: 'no-glfw-in-core-headers' rule missing from AGENTS.md" >&2; miss=1; fi
+    # Assert the p4-single-spawn rule-id is documented in AGENTS.md (absolute-0 whole-file gate).
+    for r in "${P4_SPAWN_RULES[@]}"; do
+        if ! grep -qF "$r" "$_tlr_agents_md"; then echo "SELFTEST FAIL: '$r' rule missing from AGENTS.md" >&2; miss=1; fi
+    done
+    # p4-single-spawn: asserts-failure — a second SubprocessCapture::Run must fire; one Run plus a
+    # cfg.P4RunOverride consult must not.
+    _p4s_tmp="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/p4s_selftest.$$")"
+    printf 'bool A(const Cfg& cfg) {\n    if (cfg.P4RunOverride) {\n        return true;\n    }\n    SubprocessCapture::Run(a);\n    return SubprocessCapture::Run(b).has_value();\n}\n' > "$_p4s_tmp"
+    if [ -z "$(scan_p4_single_spawn_file "$_p4s_tmp")" ]; then
+        echo "SELFTEST FAIL: p4-single-spawn did not fire on two SubprocessCapture::Run calls" >&2; miss=1; fi
+    printf 'bool A(const Cfg& cfg) {\n    if (cfg.P4RunOverride) {\n        return true;\n    }\n    return SubprocessCapture::Run(a).has_value();\n}\n' > "$_p4s_tmp"
+    if [ -n "$(scan_p4_single_spawn_file "$_p4s_tmp")" ]; then
+        echo "SELFTEST FAIL: p4-single-spawn fired on one Run plus a cfg.P4RunOverride consult" >&2; miss=1; fi
+    rm -f "$_p4s_tmp" 2>/dev/null || true
     # Assert the cmake-local-gate-ci-scope rule-id is documented in AGENTS.md (absolute-0 gate).
     if ! grep -qF "cmake-local-gate-ci-scope" "$_tlr_agents_md"; then echo "SELFTEST FAIL: 'cmake-local-gate-ci-scope' rule missing from AGENTS.md" >&2; miss=1; fi
     # cmake-local-gate-ci-scope: asserts-failure — an unguarded knob-keyed FATAL_ERROR must fire;
@@ -656,6 +674,12 @@ case "$MODE" in
     compute_glfw_violations
     ;;
 
+  scanp4spawn)
+    # p4-single-spawn absolute-0 whole-file check of the P4 annotate implementation (debug +
+    # bats harness). `--root <dir>` (handled above) points this at an arbitrary tree.
+    compute_p4_single_spawn_violations
+    ;;
+
   scancmakeci)
     # cmake-local-gate-ci-scope absolute-0 set over CMakeLists.txt / cmake/*.cmake (debug +
     # bats harness). `--root <dir>` (handled above) points this at an arbitrary tree.
@@ -936,6 +960,24 @@ case "$MODE" in
         echo "  or add SMATCHET_DEVIATION(rule=no-glfw-in-core-headers; reason=...; owner=...; revisit=...) above the include."
     else
         echo "[test-lint-rules] PASS — no GLFW/glad/OpenGL include in Source/Core/include headers"
+    fi
+
+    # --- p4-single-spawn (Source/Core/src/P4Annotate.cpp; ABSOLUTE-0, whole-file) ---
+    # The P4 annotate implementation keeps one SubprocessCapture::Run spawn behind at least one
+    # cfg.P4RunOverride consult (the zero-credential test seam, ADR-0009) and no other spawn
+    # primitive. A count has no line for the (rule, basename, hash) delta to key on — deleting the
+    # consult adds no triple — so it runs absolute over the whole file, like no-glfw.
+    # A SMATCHET_DEVIATION(rule=p4-single-spawn; ...) anywhere in the file escapes.
+    p4s_out="$(compute_p4_single_spawn_violations)"
+    if [ -n "$p4s_out" ]; then
+        rc=1
+        echo
+        echo "FAIL: the P4 annotate spawn seam broke (exactly one SubprocessCapture::Run + >=1 cfg.P4RunOverride consult, no other spawn primitive):"
+        printf '%s\n' "$p4s_out" | sed 's/^/  /'
+        echo "  Route every Perforce call through P4RunCommand (which consults cfg.P4RunOverride before its one spawn),"
+        echo "  or add SMATCHET_DEVIATION(rule=p4-single-spawn; reason=...; owner=...; revisit=...) in the file."
+    else
+        echo "[test-lint-rules] PASS — P4 annotate keeps one spawn site + the P4RunOverride seam"
     fi
 
     # --- cmake-local-gate-ci-scope (CMakeLists.txt / cmake/*.cmake; ABSOLUTE-0) ---
@@ -1387,9 +1429,9 @@ case "$MODE" in
     # --- agent-prompt / AGENTS.md size rule (delta-gated; reduce-agent-prompt-bloat Slice 0) ---
     # New agent prompts (agents/core, agents/project) over 250 lines — or AGENTS.md over 150, or an
     # existing one that JUST crossed its cap — fail. agent_size_audit.py keys by (rule, path) and
-    # diffs HEAD vs the merge-base of $BASE, so the current whales (debug-detective, git-janitor,
-    # test-author, AGENTS.md) are grandfathered (a grandfathered file shrinking — or even growing —
-    # stays grandfathered; only a NEW over-cap file or an under->over crossing fires). The sink
+    # diffs HEAD vs the merge-base of $BASE, so a file already over its cap on the base is
+    # grandfathered (shrinking — or even growing — it stays grandfathered; only a NEW over-cap
+    # file or an under->over crossing fires). The sink
     # classes (docs/agent-rules, agents/_shared/skills) are soft-warn-only and never enter $rc. Fail
     # CLOSED on infra error, identical contract to the function-size gate (0 clean / 1 violations /
     # >=2 infra). A line reading SMATCHET_DEVIATION(rule=agent-too-long; ...) anywhere in the file

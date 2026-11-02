@@ -13,7 +13,7 @@
 #
 # Env: REPO (owner/repo, default from `gh repo view`); BUG_MD / DEBT_MD path overrides (bats).
 #
-# Exit codes (test-author convention): 0 ok · 2 bad args / missing file / gh missing.
+# Exit codes (test-script convention, scripts/dev/test-all.sh header): 0 ok · 2 bad args / missing file / gh missing.
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)" || exit 2

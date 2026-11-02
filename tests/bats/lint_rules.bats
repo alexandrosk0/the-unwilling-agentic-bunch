@@ -141,6 +141,47 @@ _resolve_py() {
     [[ "$output" == *"no GLFW/glad/OpenGL include in Source/Core/include headers"* ]]
 }
 
+# ---------- p4-single-spawn (entry-point wiring; rule detail in p4_single_spawn.bats) ----------
+
+@test "--scan-p4-spawn FAILs on a P4 annotate implementation with two spawn sites" {
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/Source/Core/include" "$tmp/Source/Core/src"
+    printf '#pragma once\n' > "$tmp/Source/Core/include/P4Annotate.h"
+    printf 'bool A(const Cfg& cfg) {\n    if (cfg.P4RunOverride) {\n        return true;\n    }\n    SubprocessCapture::Run(a);\n    return SubprocessCapture::Run(b).has_value();\n}\n' \
+        > "$tmp/Source/Core/src/P4Annotate.cpp"
+    ( cd "$tmp" && git init -q && git add -A ) >/dev/null 2>&1
+    run bash "$LINT" --root "$tmp" --scan-p4-spawn
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"p4-single-spawn"*"P4Annotate.cpp:6"*"calls=2"* ]]
+}
+
+@test "--scan-p4-spawn FAILs on a P4 annotate implementation with no P4RunOverride consult" {
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/Source/Core/include" "$tmp/Source/Core/src"
+    printf '#pragma once\n' > "$tmp/Source/Core/include/P4Annotate.h"
+    printf 'bool A() {\n    return SubprocessCapture::Run(a).has_value();\n}\n' \
+        > "$tmp/Source/Core/src/P4Annotate.cpp"
+    ( cd "$tmp" && git init -q && git add -A ) >/dev/null 2>&1
+    run bash "$LINT" --root "$tmp" --scan-p4-spawn
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"p4-single-spawn"*"consults=0"* ]]
+}
+
+@test "--scan-p4-spawn is clean on the real first-party tree" {
+    run bash "$LINT" --scan-p4-spawn
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "--diff enforces the p4-single-spawn absolute-0 gate (clean tree PASSes)" {
+    run bash "$LINT" --full
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | sed -n 's/^  //p' > /tmp/lr_base_all
+    SMATCHET_LINT_BASELINE_SET=/tmp/lr_base_all run bash "$LINT" --diff
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"P4 annotate keeps one spawn site + the P4RunOverride seam"* ]]
+}
+
 # ---------- cmake-local-gate-ci-scope (infra:10 #1074) ----------
 
 @test "--scan-cmake-ci FAILs on an unguarded knob-keyed FATAL_ERROR" {

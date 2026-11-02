@@ -2,7 +2,8 @@
 # issue-sweep.sh — triage open GitHub Issues per the issue-triage protocol
 # (docs/agent-rules/issue-triage.md). Classifies each open Issue by author +
 # label state + dedup, emits a verdict, and surfaces the top-priority open bug as
-# an [issue-propose] line. Runs in the ship-loop closeout + the issue-janitor.
+# an [issue-propose] line. Runs in the ship-loop closeout + the periodic janitor
+# pass (docs/agent-rules/issue-triage.md § Triage cadence).
 #
 # Verdicts (decision tree): keep / relabel / mirror-then-close / flag-stale /
 # flag-relabel. AUTONOMY: --apply may auto-act (relabel / close) ONLY on

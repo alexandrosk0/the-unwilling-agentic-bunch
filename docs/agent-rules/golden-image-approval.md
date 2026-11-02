@@ -52,7 +52,7 @@ The check is WARN-only while the count is below N/N — a blocking gate at 0/N w
 
 When both states are produced at runtime within the same test (see `scripts/dev/test-theme-roundtrip.sh`), there is no checked-in artefact to enshrine. The failure mode is structurally impossible. Prefer this pattern when feasible.
 
-## Agents that own this
+## Who applies this
 
-- `test-author` — primary executor; sub-bullet under § Pattern C — Screenshot scan in [`agents/core/test-author.md`](../../agents/core/test-author.md).
-- Any other agent that ships a regression-gate artefact (e.g. `debug-detective` shipping a pink-clear sentinel image, `perf-detective` shipping a deterministic perf-snapshot fixture).
+- The `test-authoring` skill — § Golden-image bootstrap pause and § Pattern C — Screenshot scan in [`SKILL.md`](../../agents/_shared/skills/test-authoring/SKILL.md).
+- Any other session that ships a regression-gate artefact (e.g. a debug investigation shipping a pink-clear sentinel image, a perf investigation shipping a deterministic perf-snapshot fixture).

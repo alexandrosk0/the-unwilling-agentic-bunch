@@ -8,7 +8,7 @@ Trigger: **editing C++** in `Source/Core` / `Source/Plugins` / `Source/Standalon
 
 ## Available libs
 
-(FetchContent, linked): nlohmann/json, cpr, SQLiteCpp, cpp-httplib, md4c, ImGui (docking), GLFW, Lua + sol2, ghc::filesystem.
+(FetchContent, linked): nlohmann/json, cpr, SQLiteCpp, cpp-httplib, md4c, ImGui (docking), GLFW, sol2, ghc::filesystem; optional: whisper.cpp (dictation), imgui_test_engine (UI tests). Lua comes as a pinned, hash-verified tarball (`file(DOWNLOAD)`), not FetchContent.
 
 ## nlohmann json
 
@@ -16,11 +16,11 @@ Trigger: **editing C++** in `Source/Core` / `Source/Plugins` / `Source/Standalon
 
 ## Optional plugins
 
-Gate with `#if SMATCHET_WITH_LUA_AUTOMATION` / `#if SMATCHET_WITH_MCP`. Lua bindings split: `AppController_LuaBindings.cpp` (on) ↔ `AppController_LuaStubs.cpp` (off) — keep in sync.
+Gate with `#if SMATCHET_WITH_LUA_AUTOMATION` / `#if SMATCHET_WITH_MCP`. Lua bindings split: `AppController_LuaBindings.cpp` (on) ↔ `AppController_LuaStubs.cpp` (off) — keep in sync. Binding-author rules (stub parity, sentinel list, sol2 limits, Lua-as-C++) live in the host guide that `CONTEXT-MAP.md` § Code without a leaf names.
 
 ## Dual-target
 
-`Source/Core/` compiles into both `SmatchetStandalone` (OpenGL+GLFW) and `SmatchetCore_DX12` (Unreal). Diverging macros: `SMATCHET_EMBEDDED_IN_UNREAL=1` (DX12 only); `SMATCHET_WITH_MCP=1` (Standalone only — `SMATCHET_WITH_MCP_UNREAL` is OFF). Full verify: `cmake --build --preset ninja-iter-msvc --target SmatchetStandalone SmatchetCore_DX12`. In a worktree shell without `cl.exe` on PATH, wrap it: `bash scripts/dev/with-msvc-env.sh cmake --build --preset ninja-iter-msvc --target SmatchetStandalone SmatchetCore_DX12` (vswhere → vcvars64, toolset-pinned). **Don't**: add GLFW/OpenGL includes to `Source/Core/` headers (DX12 compiles them too); redefine `IMGUI_USE_WCHAR32` (PUBLIC on `ImGuiLib`).
+`Source/Core/` compiles into both `SmatchetStandalone` (OpenGL+GLFW) and `SmatchetCore_DX12` (Unreal). Diverging macros: `SMATCHET_EMBEDDED_IN_UNREAL=1` (DX12 only); `SMATCHET_WITH_MCP=1` (Standalone only — `SMATCHET_WITH_MCP_UNREAL` is OFF). Full verify: `cmake --build --preset ninja-iter-msvc --target SmatchetStandalone SmatchetCore_DX12`. In a worktree shell without `cl.exe` on PATH, wrap it: `bash scripts/dev/with-msvc-env.sh cmake --build --preset ninja-iter-msvc --target SmatchetStandalone SmatchetCore_DX12` (vswhere → vcvars64, toolset-pinned). **Don't**: add GLFW/OpenGL includes to `Source/Core/` headers (DX12 compiles them too); redefine `IMGUI_USE_WCHAR32` (set once in the ImGui user-config header that `ImGuiLib` publishes via PUBLIC `IMGUI_USER_CONFIG`). A feature that exists in only one build target is gated at its call site, not in a shared header; platform-specific code lives in that target's own source tree, never in the shared core (the host's root `BUILD.md` § Build-system layout maps each target to its dir).
 
 ## Quality
 
@@ -80,7 +80,7 @@ The repo-wide **`duplication`** rule (DRY — the **Engineering Quality Pillar 5
 
 ## Subsystem guides
 
-Heavy subsystem dirs below `Source/` carry their own leaf docs: an `AGENTS.md` (scoped rules — the subsystem invariants that used to live in `code-review.md`), and for the exemplar `Tracker/` also a `CONTEXT.md` (domain glossary) + `README.md` (orientation / request flow). When you touch a subsystem, read its leaf `AGENTS.md` and apply its invariants — they are the single source of truth for that dir and override any central summary. Leaves today, all under `Source/Core/src/`: `Tracker/`, `Commands/`, `Persistence/`, `Sync/`, `Ui/` (the strict zones above + the light `Ui/`); a leaf may also sit in another dir below `Source/` (a plugin dir) when its rules govern that code. The full registry + per-context coverage + harness-discovery index is [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md); the coverage + README-staleness gate is `agents/scripts/project/test-subsystem-docs.sh`, which also fails a leaf rule restated in a central checklist: `agents/core/code-review.md`, plus the host checklist named by `docs.review_checklist` in `project.config.json` when set (repo-relative; the file must exist; the host schema must declare the key). Claude Code auto-loads each leaf via a gitignored `CLAUDE.md` shim that `setup-harness.sh claude-code` generates beside it (Claude Code reads nested `CLAUDE.md`, not nested `AGENTS.md`).
+Heavy subsystem dirs below `Source/` carry their own leaf docs: an `AGENTS.md` (scoped rules — the subsystem invariants every edit and review applies), and for the exemplar `Tracker/` also a `CONTEXT.md` (domain glossary) + `README.md` (orientation / request flow). When you touch a subsystem, read its leaf `AGENTS.md` and apply its invariants — they are the single source of truth for that dir and override any central summary. Leaves today, all under `Source/Core/src/`: `Tracker/`, `Commands/`, `Persistence/`, `Sync/`, `Ui/` (the strict zones above + the light `Ui/`); a leaf may also sit in another dir below `Source/` (a plugin dir) when its rules govern that code. The full registry + per-context coverage + harness-discovery index is [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md); the coverage + README-staleness gate is `agents/scripts/project/test-subsystem-docs.sh`, which also fails a leaf rule restated in a central checklist: `agents/core/code-review.md`, plus the host checklist named by `docs.review_checklist` in `project.config.json` when set (repo-relative; the file must exist; the host schema must declare the key). Claude Code auto-loads each leaf via a gitignored `CLAUDE.md` shim that `setup-harness.sh claude-code` generates beside it (Claude Code reads nested `CLAUDE.md`, not nested `AGENTS.md`).
 
 ## `SMATCHET_DEVIATION` comment
 

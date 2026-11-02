@@ -22,9 +22,8 @@ triggers:
 version: 2
 ---
 
-<!-- Skill-only helper (no agent twin; registered in SKILL_ONLY_HELPERS). The single
-     home for test automation: judgement + verification gate + unit-rig rules first,
-     then the copy-paste recipes. Project facts about the rig (targets, test lists,
+<!-- The single home for test automation: judgement + verification gate + unit-rig
+     rules first, then the copy-paste recipes. Project facts about the rig (targets, test lists,
      fixtures, gating) live in the host's docs/guides/testing-surface.md. Cross-harness:
      Claude Code loads this skill on demand; other harnesses reach it through the
      on-demand table in AGENTS.md. -->
@@ -70,7 +69,7 @@ Every checked-in reference artefact a gate diffs against (`tests/golden/<scenari
 
 ### Report mapping
 
-When the work comes back as a delegated result, use the Maintenance shape from `delegation.md` § Agent output contract, with the § Report format template inside it:
+When the work comes back as a delegated result, its body is the § Report format template, closed per `delegation.md` § Agent output contract:
 
 - `## Pre-flight` — one row per audited Verification item with its current status: auto / manual / partial.
 - `## Mutations applied` — one bullet per new artefact (driver script, scenario class, CLI probe, bucket-E test TU, doctest file) with its path and assertion count.

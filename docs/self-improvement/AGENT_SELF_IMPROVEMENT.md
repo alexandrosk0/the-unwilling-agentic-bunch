@@ -1,7 +1,7 @@
 # Agent self-improvement
 
 Suggestions emitted by delegated agents for improving the agent ecosystem itself
-— prompt tweaks, missing context, redundant steps, new-subagent candidates,
+— prompt tweaks, missing context, redundant steps, new-skill candidates,
 tooling gaps. Live entries split by category; this file is the index + spec.
 
 ## Format
@@ -65,7 +65,7 @@ Applied entries are archived immediately to [`self-improvement/categories/applie
   agent finds itself doing manually that should be encoded in its prompt;
   context an agent had to discover that should be pre-loaded.
 - **tooling** — missing CLI / lint / semantic-search / harness automation gap.
-- **infra** — build system / CI / scaffolding / new-subagent candidates.
+- **infra** — build system / CI / scaffolding / new-skill candidates.
 - **test** — test coverage gap, fixture, bucket-E wiring.
 - **security** — exploitable surface; secret leakage; sandbox escape; defense-in-depth.
 
@@ -116,7 +116,7 @@ Mandatory on every `open` entry.
    hand-edit (removed 2026-06-03), so a new per-entry file needs no index touch and
    the pre-push gate stays green by construction.
 4. When evidence accumulates (mentioned by ≥2 agents OR blocks the same
-   workflow ≥3 times), apply: edit the relevant agent prompt(s) in `agents/`
+   workflow ≥3 times), apply: edit the relevant agent prompt or skill in `agents/`
    or AGENTS.md; flip Status to `applied`; archive the entry with
 
    ```

@@ -11,6 +11,7 @@ capabilities:
   - file-read
   - text-search
   - file-glob
+  - file-write
   - shell
   - git-history
 triggers:
@@ -22,7 +23,7 @@ harness-hints:
   claude-code:
     model: opus
     effort: high
-version: 8
+version: 9
 ---
 
 Read-only gate reviewer. Output is a severity-tagged punch list; never edit source. The only files you write are the two gitignored gate files below: `.review-findings.json` (the `Write` tool is granted for this file alone) and `.review-ack` (through `review-ack.sh`).

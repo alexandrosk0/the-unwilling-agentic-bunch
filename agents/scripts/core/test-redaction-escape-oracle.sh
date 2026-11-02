@@ -10,7 +10,7 @@
 # planted-secret corpus. Emits the canonical `Passed: N  Failed: M` line that
 # test-all.sh greps for.
 #
-# Exit codes follow the test-author convention:
+# Exit codes follow the test-script convention (scripts/dev/test-all.sh header):
 #   0 — oracle selftest passed
 #   1 — a planted secret survived redaction (a real leak / regression)
 #   2 — python interpreter missing (cannot run the oracle)

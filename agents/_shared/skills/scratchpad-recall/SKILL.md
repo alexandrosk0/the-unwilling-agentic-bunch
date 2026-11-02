@@ -51,10 +51,10 @@ Prefer `Read` over `cat` when the orchestrator wants the content in its own cont
 grep -rn --include='*.md' '<pattern>' .session-context.archive/
 ```
 
-**Find archives by agent** (every archive `agent-token-log.py` wrote a header for `perf-detective`):
+**Find archives by agent** (every archive `agent-token-log.py` wrote a header for `code-review`):
 
 ```bash
-grep -rln --include='*.md' '^## perf-detective ·' .session-context.archive/
+grep -rln --include='*.md' '^## code-review ·' .session-context.archive/
 ```
 
 ## Output contract

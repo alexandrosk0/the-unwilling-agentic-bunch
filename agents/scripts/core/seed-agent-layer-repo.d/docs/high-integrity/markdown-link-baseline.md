@@ -4,7 +4,7 @@ _Auto-generated. Do not hand-edit; run `bash agents/scripts/core/test-markdown-l
 _Scope: `--all` (repo-wide). The DEFAULT diff-scope mode does not consult this file — it already grandfathers by scope, only ever checking markdown a change actually touches._
 _Keyed by `source::href`, not by line number, so an edit above a grandfathered link does not un-grandfather it. Burn these down and re-run `--baseline`; `--all` reports any entry that is already fixed as stale._
 
-## dangling links (101)
+## dangling links (89)
 - `AGENTS.md` — `AI_POLICY.md` (resolves to `AI_POLICY.md`)
 - `AGENTS.md` — `CONTEXT-MAP.md` (resolves to `CONTEXT-MAP.md`)
 - `AGENTS.md` — `docs/STRUCTURE.md` (resolves to `docs/STRUCTURE.md`)
@@ -22,14 +22,6 @@ _Keyed by `source::href`, not by line number, so an edit above a grandfathered l
 - `agents/_shared/skills/gate-escape-postmortem/SKILL.md` — `../../../../docs/plans/shipped/gate-escape-postmortem.md` (resolves to `docs/plans/shipped/gate-escape-postmortem.md`)
 - `agents/_shared/skills/historical-code-review/SKILL.md` — `../../../../docs/adr/0014-github-issues-canonical-for-product-bugs.md` (resolves to `docs/adr/0014-github-issues-canonical-for-product-bugs.md`)
 - `agents/_shared/token-tracking/README.md` — `../../../docs/guides/agent-token-tracking.md` (resolves to `docs/guides/agent-token-tracking.md`)
-- `agents/core/code-review.md` — `../../CONTEXT-MAP.md` (resolves to `CONTEXT-MAP.md`)
-- `agents/core/coderabbit-triage.md` — `../../docs/adr/0014-github-issues-canonical-for-product-bugs.md` (resolves to `docs/adr/0014-github-issues-canonical-for-product-bugs.md`)
-- `agents/core/issue-janitor.md` — `../../docs/adr/0014-github-issues-canonical-for-product-bugs.md` (resolves to `docs/adr/0014-github-issues-canonical-for-product-bugs.md`)
-- `agents/core/p4-janitor.md` — `../../docs/perforce/AGENT_FLOWS.md` (resolves to `docs/perforce/AGENT_FLOWS.md`)
-- `agents/core/p4-janitor.md` — `../../docs/perforce/SETUP.md` (resolves to `docs/perforce/SETUP.md`)
-- `agents/core/p4-janitor.md` — `../../docs/plans/shipped/git-to-perforce-migration.md` (resolves to `docs/plans/shipped/git-to-perforce-migration.md`)
-- `agents/core/perf-gatekeeper.md` — `../../docs/perforce/SETUP.md` (resolves to `docs/perforce/SETUP.md`)
-- `docs/agent-rules/AGENT-VS-SKILL.md` — `../plans/shipped/agents-skill-conversion.md` (resolves to `docs/plans/shipped/agents-skill-conversion.md`)
 - `docs/agent-rules/ci-required-check-pattern.md` — `../adr/0013-solo-no-required-review.md` (resolves to `docs/adr/0013-solo-no-required-review.md`)
 - `docs/agent-rules/ci-required-check-pattern.md` — `../plans/shipped/gate-enforcement-hardening.md` (resolves to `docs/plans/shipped/gate-enforcement-hardening.md`)
 - `docs/agent-rules/cpp-rules.md` — `../../CONTEXT-MAP.md` (resolves to `CONTEXT-MAP.md`)
@@ -48,7 +40,6 @@ _Keyed by `source::href`, not by line number, so an edit above a grandfathered l
 - `docs/agent-rules/delegation.md` — `../../.github/workflows/locks-render.yml` (resolves to `.github/workflows/locks-render.yml`)
 - `docs/agent-rules/delegation.md` — `../plans/active/_plan-locks-archive.md` (resolves to `docs/plans/active/_plan-locks-archive.md`)
 - `docs/agent-rules/delegation.md` — `../plans/active/_plan-locks.generated.md` (resolves to `docs/plans/active/_plan-locks.generated.md`)
-- `docs/agent-rules/delegation.md` — `../plans/shipped/autonomous-debugging-no-creds.md` (resolves to `docs/plans/shipped/autonomous-debugging-no-creds.md`)
 - `docs/agent-rules/issue-triage.md` — `../adr/0014-github-issues-canonical-for-product-bugs.md` (resolves to `docs/adr/0014-github-issues-canonical-for-product-bugs.md`)
 - `docs/agent-rules/issue-triage.md` — `../plans/shipped/issue-triage-protocol.md` (resolves to `docs/plans/shipped/issue-triage-protocol.md`)
 - `docs/agent-rules/merge-gates.md` — `../plans/shipped/agents-md-reduction.md` (resolves to `docs/plans/shipped/agents-md-reduction.md`)
@@ -91,11 +82,8 @@ _Keyed by `source::href`, not by line number, so an edit above a grandfathered l
 - `docs/agent-rules/work-items.md` — `../work/BACKLOG.md` (resolves to `docs/work/BACKLOG.md`)
 - `docs/agent-rules/work-items.md` — `../work/DEFERRED.md` (resolves to `docs/work/DEFERRED.md`)
 - `docs/agent-rules/work-items.md` — `../work/IDEAS.md` (resolves to `docs/work/IDEAS.md`)
-- `docs/agent-rules/workflow-orchestration.md` — `../../AI_POLICY.md` (resolves to `AI_POLICY.md`)
-- `docs/agent-rules/workflow-orchestration.md` — `../plans/shipped/adopt-workflow-orchestration.md` (resolves to `docs/plans/shipped/adopt-workflow-orchestration.md`)
 - `docs/harness/SETUP.md` — `../../BUILD.md` (resolves to `BUILD.md`)
 - `docs/harness/SETUP.md` — `../../CONTEXT-MAP.md` (resolves to `CONTEXT-MAP.md`)
-- `docs/harness/codex/setup.md` — `../../../agents/project/` (resolves to `agents/project`)
 - `docs/self-improvement/AGENT_SELF_IMPROVEMENT.md` — `../plans/deferred/self-improvement-one-entry-per-file.md` (resolves to `docs/plans/deferred/self-improvement-one-entry-per-file.md`)
 - `docs/self-improvement/AGENT_SELF_IMPROVEMENT.md` — `categories/applied.md` (resolves to `docs/self-improvement/categories/applied.md`)
 - `docs/self-improvement/AGENT_SELF_IMPROVEMENT.md` — `categories/bug.md` (resolves to `docs/self-improvement/categories/bug.md`)
@@ -108,5 +96,5 @@ _Keyed by `source::href`, not by line number, so an edit above a grandfathered l
 - `docs/self-improvement/AGENT_SELF_IMPROVEMENT.md` — `postmortems.md` (resolves to `docs/self-improvement/postmortems.md`)
 
 ## Totals
-- dangling links grandfathered: 101
+- dangling links grandfathered: 89
 

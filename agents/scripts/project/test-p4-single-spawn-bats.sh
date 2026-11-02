@@ -6,7 +6,7 @@
 # (agents/scripts/project/lint-rules.d/77-p4-single-spawn.sh) directly, so the rule's
 # detection is tested apart from the test-lint-rules.sh entry point that wires it in.
 #
-# Exit codes (test-author convention):
+# Exit codes (test-script convention, scripts/dev/test-all.sh header):
 #   0 — every bats test passed
 #   1 — at least one bats test failed
 #   2 — bats binary missing (BUILD.md § Dev-script CLI tools)

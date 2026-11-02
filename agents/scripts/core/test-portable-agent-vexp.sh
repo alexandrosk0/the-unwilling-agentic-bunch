@@ -74,7 +74,7 @@ if [ "${1:-}" = "--selftest" ]; then
     # when the layer tree holding agents/core/ is clean.
     mkdir -p "$tmp/L/agents/core" "$tmp/H/agents/project"
     printf '# Reviewer\n' > "$tmp/L/agents/core/code-review.md"
-    printf 'Call mcp__vexp__run.\n' > "$tmp/H/agents/project/ui-host.md"
+    printf 'Call mcp__vexp__run.\n' > "$tmp/H/agents/project/example-agent.md"
     if _scan_vexp "$tmp/L" "$tmp/H" >/dev/null; then
         echo "test-portable-agent-vexp --selftest: FAIL — a host project-agent hit not caught"; exit 1
     fi

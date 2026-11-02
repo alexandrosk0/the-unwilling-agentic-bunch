@@ -9,7 +9,7 @@ debugger (cdb/WinDbg/kd) or any pip package:
   * the MODULE LIST — loaded module base address, size, and name, so the
     faulting address can be attributed to a module (MINIDUMP_MODULE_LIST, 4).
 
-This is the hand-rolled scan a debug-detective previously re-derived per incident
+It replaces the hand-rolled scan each debug investigation would re-derive per incident
 (tooling backlog no-cdb-windbg-dump-triage-script). For a SYMBOLIZED stack use
 cdb instead — canonical invocation and the (non-trivial) install recipe both in
 docs/agent-rules/debug-techniques.md § Installing cdb. Not the bare

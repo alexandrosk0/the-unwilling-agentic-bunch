@@ -21,9 +21,10 @@ Trigger: **mapping an agent's capability tags to a specific harness's tools** (p
 
 ## Harness notes
 
-- **Claude Code** discovers agents at `.claude/agents/` — a junction into the canonical `agents/` tree created by `bash agents/scripts/core/setup-harness.sh claude-code`. Edits to `agents/*.md` are visible immediately; no sync step.
+- **Agents vs skills.** The layer ships three spawnable agents (`architect`, `code-review`, `security-review` in `agents/core/`); every other procedure is a skill (`agents/_shared/skills/<name>/SKILL.md`) that the main thread loads. Only Claude Code auto-discovers skills; Codex, Cursor, pi and generic harnesses reach each one through its row in the on-demand table in `AGENTS.md` § Project rules.
+- **Claude Code** discovers agents at `.claude/agents/` — a junction into the canonical `agents/` tree created by `bash agents/scripts/core/setup-harness.sh claude-code` — and skills at `.claude/skills/` (one link per skill). Edits to `agents/*.md` and skills are visible immediately; no sync step.
 - **Codex / OpenAI Agents** reads `AGENTS.md` per the [agents.md spec](https://agents.md/). Discover individual agents at `agents/{core,project}/*.md`; `setup-harness codex` also generates `.codex/agents/*.toml` custom agents from those canonical prompts.
-- **Cursor / Aider / generic** — human-driven. Agent files at `agents/` are reference docs the user pastes or invokes manually.
+- **Cursor / Aider / generic** — human-driven. Agent and skill files are reference docs the user pastes or invokes manually.
 - **pi** discovers a **flat** `.pi/agents/*.md` (parser reads only `name`/`description`/`tools`/`model`) and auto-loads extensions from `.pi/extensions/`. Both are generated/patched (gitignored) by `bash agents/scripts/core/setup-harness.sh pi` — the `capabilities:`→`tools:` mapping above plus a tier→model map. Project agents are off + confirm-gated in stock pi; the adapter relaxes that for this trusted repo. Bring-up + the security note: [`pi/README.md`](pi/README.md).
 - **`file-lock` is one script on every harness.** `flock(1)` is util-linux — absent on Git Bash, so it is never the primitive here; cross-shell mutual exclusion (e.g. the deferred-lint drain) goes through `scripts/dev/lockfile.py`, which is stdlib-only Python and therefore identical on Windows, macOS, and Linux.
 - Harnesses without `semantic-code-search` should fall back to text-search with the symbol set named in each agent's prose. Output is degraded but workable — expect more round-trips and larger context per query.

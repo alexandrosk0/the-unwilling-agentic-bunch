@@ -4,14 +4,18 @@ globs: **/*
 alwaysApply: true
 ---
 
-See `AGENTS.md` at the repo root for project rules, agent delegation table,
-semantic-codebase-search policy, and the harness adapter mapping.
+See `AGENTS.md` at the repo root for project rules, the on-demand trigger →
+rule-doc / skill table, delegation, semantic-codebase-search policy, and the
+harness adapter mapping.
 
-Individual agent definitions live at `{{AGENT_LAYER}}agents/core/*.md` and, for a
-project's own subsystem agents, `agents/project/*.md`.
+The three spawnable agents (`architect`, `code-review`, `security-review`) live
+at `{{AGENT_LAYER}}agents/core/*.md`; a project's own agents, when it has any,
+at `agents/project/*.md`.
 
-Shared skills and the token-tracking hook contract live under
-`{{AGENT_LAYER}}agents/_shared/`.
+Skills (`skills/<name>/SKILL.md`), the token-tracking hook contract and the
+workflow scripts live under `{{AGENT_LAYER}}agents/_shared/`. Cursor does not
+auto-discover skills: load the one whose row in the `AGENTS.md` on-demand table
+matches the task.
 
 Harness setup steps for any other harness (Claude Code, Codex, pi) live under
 `{{AGENT_LAYER}}docs/harness/`.

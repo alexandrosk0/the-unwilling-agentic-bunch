@@ -151,9 +151,10 @@ const auditPrompt = (z) =>
   'NOT a gate review of the branch diff: do NOT write .review-findings.json and do NOT ' +
   'record a review ack (review-ack.sh / pre-ship.sh --ack-review) — skip your gate-artifact steps.\n' +
   'STEP 1: read ONLY the "## Invariants" section of ' + z.leaf + ' (from that heading to the ' +
-  'next "## " heading) and extract every imperative, checkable invariant it states (naming ' +
-  'rules, banned constructs, layering/ownership constraints, required patterns). Other ' +
-  'sections ("## Before you edit", procedures, file maps) are guidance, not audit criteria. ' +
+  'next level-2 "## " heading, including its "### " subsections) and extract every ' +
+  'imperative, checkable invariant it states (naming rules, banned constructs, ' +
+  'layering/ownership constraints, required patterns). Other sections ' +
+  '("## Before you edit", procedures, file maps) are guidance, not audit criteria. ' +
   'If the leaf has no "## Invariants" section, return an empty findings list — do not ' +
   'audit against its other prose.\n' +
   'STEP 2: review the code under ' + z.dir + ' for any place that VIOLATES one of those leaf ' +

@@ -4,8 +4,8 @@
 # Thin bash wrapper over minidump-triage.py (sibling), the dependency-free
 # minidump-stream scanner: it extracts the EXCEPTION RECORD (code + faulting
 # address + crashing thread) and the MODULE LIST so a faulting address can be
-# attributed to a module — the hand-rolled scan a debug-detective previously
-# re-derived per incident (tooling backlog no-cdb-windbg-dump-triage-script).
+# attributed to a module — so no debug investigation re-derives that scan by hand
+# (tooling backlog no-cdb-windbg-dump-triage-script).
 #
 # For a SYMBOLIZED stack, install a debugger and use cdb instead. Do NOT reach
 # for the bare `cdb -z <dump> -c "!analyze -v; q"` one-liner: !analyze -v walks
