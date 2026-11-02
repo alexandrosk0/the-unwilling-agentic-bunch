@@ -1,6 +1,27 @@
 # Build rules (load on-demand)
 
-Trigger: **building** the project (configuring presets, the light build, the dual-target verify, or clearing the Unreal build). AGENTS.md § Project rules keeps a one-line build pointer here; this doc has the detail.
+Trigger: **building** the project (configuring presets, the light build, the dual-target verify, or clearing the Unreal build) and **fixing a build break** (configure / compile / link / packaging failure, toolchain or preset misbehaviour, a red CI build lane). AGENTS.md § Project rules keeps a one-line build pointer here; this doc has the detail.
+
+## Fix discipline
+
+Applies to whoever fixes a build break — the main thread or any delegated agent. The project's stack facts and its catalogue of known causes live in the host build reference (a root `BUILD.md` § Troubleshooting where the project has one); check that catalogue before diagnosing from scratch.
+
+1. **Name the preset.** If the report names no preset, ask which one — never guess. Reproduce with that exact preset; a fix verified on a different preset proves nothing about the reported one.
+2. **Read before patching.** Read the root `CMakeLists.txt`, `CMakePresets.json`, and every `cmake/*.cmake` helper or component `CMakeLists.txt` on the failing path with a direct file read — semantic code search rarely indexes build descriptors.
+3. **State the root cause in one sentence before any patch.** No sentence, no patch.
+4. **Minimum diff.** No CMake modernisation, no `target_link_libraries` reshuffle, no FetchContent restructure while fixing an unrelated error.
+5. **Keep the iter/publish split.** When a fix to the publish preset could change the iteration preset (or the reverse), say so explicitly; the presets differ on purpose (build type, LTO, PCH, runtime linkage).
+6. **Never disable warnings or lower the strict-warning level as a fix.** When the strict flags (`-Wall -Wextra` / `/W4`) flag real code, the fix is a code change — hand it back to the code owner rather than silencing the warning.
+7. **Name the exact exe after every successful rebuild** — `ls -la` the patched output and the most-likely-stale one side by side, print both mtimes, and give the absolute path to run (also when handing back to a perf or spike measurement); [`debug-techniques.md`](debug-techniques.md) § Exe staleness check.
+8. **Re-confirm a CI-symptom item still reproduces** on the most recent run that executed the step before coding a fix ([`process-rules.md`](process-rules.md) § Cadence and verification).
+9. **In a worktree, commit with a literal `git -C <abs-path>`**, never a `$VAR` — the head-drift guard reads the unexpanded command ([`process-rules.md`](process-rules.md) § Git/p4 discipline).
+
+Diagnostic rebuilds are fine while the cause is unknown; once fixed, the slice's verify build follows the slice-boundary cadence. **Report** the fix in four parts: what you inventoried before changing anything (preset, failing log path, compile-DB and FetchContent-cache state, `PATH`), what you changed (per file or per shell action), the verify commands you ran with PASS/FAIL (the reproducing preset; the publish preset when the publish surface was touched; § Dual-target verify; the unified test runner), and the residue the user still owns (a missing package, a `PATH` entry, a harness re-setup, a stale build dir) — or `none`.
+
+## Build-wrapper and build-log scripts
+
+- **A build-log regex accepts both path separators.** Windows toolchains emit `\` in diagnostic paths while CMake, Ninja and bash-quoted paths use `/`; a pattern that only matches `/` silently passes real warnings and reads green. Write `[\\/]` between path segments (e.g. `(src|include)[\\/].+:(error|warning):`), and give every new build-log script a negative-test fixture — deliberately broken input that must exit 1 — so a false pass is caught at authoring time.
+- **A PowerShell wrapper that changes scope uses `-File`, not a multi-line `-Command`.** Windows PowerShell 5.1 silently drops scope effects (a `$env:PATH` prepend, a variable set) from a multi-line `-Command "<…>"` string and still reports success; write the block to a temp `.ps1` and run `pwsh -File <temp.ps1>`.
 
 ## Entry point — `./build.sh` from the repo root
 

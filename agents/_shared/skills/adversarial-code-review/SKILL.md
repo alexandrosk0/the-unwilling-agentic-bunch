@@ -1,6 +1,6 @@
 ---
 name: adversarial-code-review
-version: 1
+version: 2
 description: Adversarial code review of a diff or PR to surface real bugs the author would actually want to fix, with a high bar and no theater. Use when the user asks to "review this", "review the diff", "review my changes", "review this PR", "any bugs in this?", "adversarial review", "tear this apart", "code review", or similar. Also use proactively before opening a PR or after a substantial set of changes. Also the reviewer procedure for a work item's post-implementation review gate (run-review.sh --gate post) — see § Panel leg.
 ---
 
@@ -66,6 +66,8 @@ Prioritize:
 - Test deception: tests asserting the implementation rather than behavior, snapshots masking wrong output, missing regression coverage for the stated fix.
 - Build and packaging gaps: new files not included, platform-specific includes leaking into shared code, generated metadata not updated.
 
+Then apply the project's own criteria: the review checklist named by `docs.review_checklist` in `project.config.json` (when set), and the `## Invariants` of the leaf `AGENTS.md` for each directory the diff touches.
+
 For each suspicion, try to disprove it. If you cannot name the exact failing path, affected caller, or broken invariant, keep reading before reporting.
 
 ## Step 5: Verify Findings
@@ -113,6 +115,8 @@ Severity:
 - `P2`: real bug or maintainability trap in a narrower path.
 - `P3`: low-risk issue the author may still want to fix.
 
+The project's gates, the `code-review` agent and the `.review-findings.json` counts name the same four levels Critical / High / Medium / Low: `P0` = Critical, `P1` = High, `P2` = Medium, `P3` = Low. The project's review checklist (`project.config.json` → `docs.review_checklist`) can fix the level of specific finding classes.
+
 If there are no findings:
 
 ```markdown
@@ -148,24 +152,9 @@ When launched as a review-panel leg (`agents/scripts/core/run-review.sh --gate p
 
 - **No ack recording by a leg** — a leg never runs review-ack.sh. The addresser (address-review-feedback skill) aggregates the panel's verdict trailers and records the ack once the round is resolved; the user's sign-off closes the loop.
 
-## Record The Ack (staged-diff reviews in this repo)
+## Gate Reviews: The Ack And The Artifact
 
-`scripts/git-hooks/pre-commit` refuses a commit whose staged diff is substantive C++ and carries no review acknowledgement pinned to that exact content (`docs/agent-rules/process-rules.md` § Code-review before every commit). When you reviewed the staged diff (`git diff --cached`) and no P0/P1 finding is outstanding, record it so the commit can proceed:
-
-```bash
-bash agents/scripts/core/review-ack.sh --record --staged
-```
-
-If you emit a verifier object (`overall_score`, `confidence`, `hard_veto`, per-criterion scores), aggregate and attach it so the gate sees the verdict:
-
-```bash
-python3 scripts/dev/verifier-sidecar.py aggregate samples.json > /tmp/verdict.json
-bash agents/scripts/core/review-ack.sh --record --staged --verdict /tmp/verdict.json
-```
-
-Only `hard_veto` blocks the commit — set it for a security issue or invariant breach, never for a stylistic doubt. The continuous score is advisory until calibrated.
-
-Do not record while a P0/P1 stands, and never record a review you did not run — the fingerprint proves only that the diff is unchanged since something was acknowledged. Any later staged edit re-arms the gate.
+A review that a commit or push gate depends on (the staged diff before a commit, the branch diff before the first push) leaves two gitignored files: `.review-ack` (the commit gate) and `.review-findings.json` (the push gate and the PR verdict). The procedure for both — when to record, the verifier verdict, the artifact schema and fingerprint — is written once, in `agents/core/code-review.md` § Gate artifacts. Follow it there, or dispatch that agent; the harness's built-in review commands write neither file. A panel leg, a drift audit or any other non-gate review writes neither. Do not record while a P0/P1 stands.
 
 ## Review Discipline
 

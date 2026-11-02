@@ -1,8 +1,17 @@
 ---
 name: test-authoring
-description: The deterministic mechanics of a Smatchet headless-test author — the Bucket-E ImGui Test Engine wire-up inventory + gotchas, the four authoring patterns (CLI probe + bash assert, scenario lifecycle, screenshot scan, sanitizer build run), the mock-tracker setup recipes, the bash-conventions checklist, and the report-format template. Invoked by test-author (which keeps the judgment: the 5-bucket taxonomy, automation-feasibility classification, the never-manual-forever deferral rule, the verification gate, the authoring-discipline refusals, and the golden-image-approval pause-gate). Use when wiring a bucket-E test, writing a CLI probe + bash assert, authoring an IScenario, scanning a screenshot, running a sanitizer build, or formatting a test-author report.
+description: Turn verification into deterministic, human-free tests. Load when adding, automating or fixing tests; when a plan, PR test-plan or report carries a manual verification step ("open X, click Y, observe Z", "visually verify", "user checks", eye-test); when drafting or auditing a plan's Verification section or bucket A-E test plan; when writing a doctest unit test or editing the test list; when wiring a UI-test-engine (bucket-E) test, CLI probe, scenario, screenshot scan or sanitizer run; or when creating or refreshing a golden image. Holds the judgement (every item maps to a bucket, never manual forever), the verification gate, the unit-rig rules and the copy-paste recipes.
 triggers:
   - test-authoring
+  - automate testing
+  - headless test
+  - manual verification step
+  - replace manual verification
+  - test plan
+  - unit test
+  - doctest
+  - ctest
+  - golden image
   - bucket-e
   - imgui-test-engine
   - cli-probe-test
@@ -10,19 +19,94 @@ triggers:
   - screenshot-scan
   - sanitizer-test
   - mock-tracker
-version: 1
+version: 2
 ---
 
-<!-- Skill-only helper (no agent twin; registered in SKILL_ONLY_HELPERS). This is the
-     EXTRACTED mechanics body of agents/core/test-author.md — the deterministic
-     copy-paste-run recipes (bucket-E wire-up, the four authoring patterns, mock-tracker
-     recipes, bash conventions, the report template). The agent keeps the reasoning and
-     points here per section. reduce-agent-prompt-bloat. Cross-harness: Codex/Cursor read
-     the agent's summary + this path; Claude Code loads this skill on demand. -->
+<!-- Skill-only helper (no agent twin; registered in SKILL_ONLY_HELPERS). The single
+     home for test automation: judgement + verification gate + unit-rig rules first,
+     then the copy-paste recipes. Project facts about the rig (targets, test lists,
+     fixtures, gating) live in the host's docs/guides/testing-surface.md. Cross-harness:
+     Claude Code loads this skill on demand; other harnesses reach it through the
+     on-demand table in AGENTS.md. -->
 
 # test-authoring (skill)
 
-The mechanics `test-author` runs. The agent owns *what to automate and why* (the 5-bucket taxonomy, automation-feasibility classification, the never-manual-forever deferral rule, the verification gate, the authoring-discipline refusals, the golden-image-approval pause-gate); this skill owns *how* — the bucket-E wire-up inventory, the four authoring patterns, the mock-tracker recipes, the bash conventions, the report template.
+Converts every verification step that needs a person ("open X, click Y, observe Z") into a deterministic CLI / scenario / screenshot / sanitizer / UI-test-engine assertion, and keeps unit tests honest. **Automate at every cost** — "truly interactive" is a gap to close (add a CLI probe, a scenario, a UI-engine test), never a permanent excuse.
+
+Run it at three points: at plan time (find the automation path before coding), after the first verification round (cover the residue), and whenever a report hands back a manual step. Project facts — test targets, the explicit test list, shared fixtures, which lanes gate — live in the host project's `docs/guides/testing-surface.md`; read it before scoping test work.
+
+## Judgement
+
+### Every verification item maps to a bucket
+
+| Bucket | What it looks like | Automation tactic |
+|---|---|---|
+| **A. Headless CLI probe / unit test** | "Function X returns Y" / "Lua snippet outputs Z" | A doctest case (§ Unit rig), or `debug.lua_eval` / a new `debug.<feature>_test` returning JSON that bash asserts on (§ Pattern A) |
+| **B. Scenario + perf snapshot** | "Frame budget under N ms" / "Cache hit rate = 100% in steady state" | An `IScenario` subclass drives N frames and returns rows; bash asserts on row values (§ Pattern B) |
+| **C. Screenshot diff** | "Cell renders red text" / "Icon visible" | `debug.window.screenshot` capture + sentinel-colour scan or golden diff (§ Pattern C) |
+| **D. Sanitizer build** | "No UAF on shutdown" / "No leak after N runs" | Run the scenario under ASan / UBSan; the exit code is the assertion (§ Pattern D) |
+| **E. UI test engine** | "Drag column to position X" / "Type into editor and see autocomplete" / "Click menu item and observe state" | The ImGui Test Engine drives the real widget tree — clicks, typing and drags become recorded test cases (§ Bucket E). Nothing escapes automation here; it only costs more setup. |
+
+Every plan § Verification item maps to A, B, C, D or E. An item that fits no bucket marks a gap in the **test infrastructure**, not in the item: name the missing piece (e.g. "needs new CLI probe `debug.dock.layout_dump`", "needs a UI-engine harness for the dock layout") and file it as a **bucket-E follow-up** — never "manual forever". The same rule applies when drafting a plan: classify each Verification item into a bucket before coding; a step that is interactive today is bucket E with an explicit "wire the UI-engine test before or alongside the slice" follow-up.
+
+### Deliverable shape
+
+1. Classification table: item → bucket → rationale.
+2. A driver script per feature, `scripts/dev/test-<feature>.sh` (assertions + exit codes per § Bash conventions).
+3. A CLI probe command when internal state must be observable — registered once in the command registry like every other command, so every front-end reaches it (§ Pattern A).
+4. An `IScenario` subclass for multi-frame state (§ Pattern B); a UI-engine test for widget interaction (§ Bucket E); a doctest case for pure logic (§ Unit rig).
+5. A final report: item × automated equivalent × residue (§ Report format).
+
+### Authoring discipline
+
+- **No `[temp-debug]` markers left behind** in any new or touched source.
+- **No commented-out code** — delete a one-off probe; ship a probe worth keeping.
+- **Comment intent, not history** — `// Captures pre-mutation cache size for the regression assertion.`, never `// Added for PR #71.`
+- **Single-purpose CLI test commands** — `debug.lua_log_test` does ONE thing. Split a "test 5 features" mega-command into five commands.
+
+### Golden-image bootstrap pause
+
+Every checked-in reference artefact a gate diffs against (`tests/golden/<scenario>.png`, a JSON snapshot, a deterministic byte stream) ships under [`golden-image-approval.md`](../../../../docs/agent-rules/golden-image-approval.md): build → hand the file and the launched app to the user → **wait for an explicit approve-golden verdict before `git add`**. The pause holds in both loop modes; a golden captured while a bug is live certifies that bug forever. That doc also says where the committed bytes must come from. Prefer dual-capture-no-golden (§ Pattern C) whenever both states are produced at runtime.
+
+### Report mapping
+
+When the work comes back as a delegated result, use the Maintenance shape from `delegation.md` § Agent output contract, with the § Report format template inside it:
+
+- `## Pre-flight` — one row per audited Verification item with its current status: auto / manual / partial.
+- `## Mutations applied` — one bullet per new artefact (driver script, scenario class, CLI probe, bucket-E test TU, doctest file) with its path and assertion count.
+- `## Regression gate` — the feature script and the unified runner, each with its `Passed: N  Failed: 0` line.
+- `## Residue requiring user action` — every item still manual, each with its own dated backlog entry `docs/self-improvement/categories/tooling/<YYYY-MM-DD>-<slug>.md` that names the missing infrastructure and the concrete next action. No residue: write `none`.
+
+### Self-improvement is proactive here
+
+The report's `## Self-improvement` lists **every** verification step met this round that needed a new CLI probe, scenario, debug command or UI-engine harness, plus the deferred-automation entry for any residue that stayed manual. An empty list is the rare case — only when the audited plan had zero manual residue.
+
+## Verification gate
+
+Before reporting done:
+
+1. The new driver runs end-to-end and ends `Passed: <N>  Failed: 0`.
+2. The unified runner picks it up: `bash scripts/dev/test-all.sh` globs every `test-*.sh` under its test roots, so a script named with the `test-` prefix auto-enrols, and the run still ends `Failed: 0`.
+3. No `[temp-debug]` markers remain in any new source file (a text search returns zero hits).
+4. Every new CLI command is registered: save the output of `"$EXE" cmd commands.list --mcp-port=<test port> --spawn --yes`, then search it for the command name.
+5. The plan doc cross-links the work: the new script is listed in the plan's `## Verification` section, and `## Implementation log` gains a bullet (`process-rules.md` § Plan-doc family).
+6. Every manual-residue item has its dated `tooling` backlog entry (§ Report mapping). Manual residue without a backlog entry fails the gate.
+7. For a unit-test change: the **full** local test suite passes (§ Unit rig), not just the new file or CI's filtered subset.
+
+## Unit rig
+
+Rules for pure-logic unit tests (doctest + CTest). The project's targets, test-list layout, fixtures and run commands are in the host testing guide.
+
+- **One test file per logical unit**; production headers and sources stay test-free.
+- **One `TEST_CASE` per public function with non-trivial behaviour.** Cover the happy path plus at least one edge case: empty, oversized or malformed input, or a boundary value. Use `SUBCASE` for variants of one setup.
+- **Prefer `CHECK` over `REQUIRE`.** `CHECK` keeps the test running after a failure, so one run reports every broken assertion; use `REQUIRE` only when a later line would crash on the bad value (null dereference, out-of-range index).
+- **Capture expected values by running the code — never transcribe a golden from source.** A value read off the code is a guess: build and run the function or binary, then copy the actual output. A duration formatter that emits `"0h 30m"` rather than the `"Spent 30m"` you expected is the kind of gap this catches.
+- **Assert shape, not an environment-dependent literal**, for any output that flows through locale, timezone, clock or float formatting. A hardcoded `"2026-03-15"` renders `"2026-03-14"` under a US timezone; CI runners use UTC, so the defect passes CI and fails only on a developer machine.
+- **Append to the END of explicit test lists.** When the project lists test files by hand, add the new test and its production sources at the end of the relevant list, so parallel PRs that each add a test do not conflict; the merge order serialises them.
+- **Never link production-only adapter TUs into a unit-test target.** An adapter that implements a deps interface against the live application controller drags that controller's unresolved symbols into the test link. Test through the fake deps fixtures instead.
+- **Prefer pure units.** Lift the pure decision logic out of a heavy subsystem (a retry cap, a conflict-priority rule) into a free function or small header so it tests without the heavy dependency. A heavier surface (database, HTTP, UI state) is tested through the project's shared fixtures (in-memory or temp-file databases, fake deps, a loopback HTTP server), not skipped; widget interaction belongs in bucket E.
+- **A failing new test means one side is wrong.** Fix the assertion when your reading of the contract was wrong. When the production code is wrong, that is a bug with its own diagnosis and fix; never bend the assertion to match it.
+- **Build and run once, at the slice boundary**, after every test file and test-list edit is in place (`process-rules.md` § Cadence and verification). Run the full local suite before declaring a test-bearing slice done.
 
 ## Bucket E — ImGui Test Engine (wired)
 
@@ -52,6 +136,8 @@ Gotchas the wire-up hit (record once, save the next agent):
 - An item ref that resolves to nothing must HARD-FAIL with the literal ref text in the failure message — never `IM_CHECK_NO_RET(found); if (!found) return;`, which logs one failed check and then reads like a clean skip, so a renamed label silently degrades the test to a no-op. Keep a checkbox / button label that doubles as an item ref in ONE shared constant with the `T(key, fallback)` fallback string it mirrors, so a rename cannot drift the label and the ref independently.
 - Any bucket-E test that performs a queue/field-edit WRITE MUST use `BucketE::UiTestWriteScope` (`tests/ui/_helpers/UiTestWriteScope.h`) to flip the fresh-profile `ReadOnlyMode=true` default OFF, and MUST HARD-FAIL — not skip — on a write failure once its env gates are met. A fresh profile defaults read-only, so an unscoped write is silently rejected and the test goes vacuously green.
 
+Two more harness traps that read as product defects — a docked panel whose body stops being submitted once a sibling tab holds the dock node, and an open modal that inhibits input beneath it — are recorded with their fixes in the host testing guide § 2.1.
+
 If a future bucket-E test needs synthetic input that the existing engine doesn't cover, the fallback is a recorded one-shot (mouse / key event log replayed via `ImGuiIO`) — but record the recipe so the next bucket-E item stays cheap.
 
 ## Authoring patterns
@@ -60,7 +146,7 @@ If a future bucket-E test needs synthetic input that the existing engine doesn't
 
 Smallest viable test. Two artifacts: a CLI command that captures state, a bash script that runs it and asserts the JSON.
 
-**CLI command shape** (mirror `debug.lua_log_test` in `Source/Core/src/Commands/BuiltinCommands.cpp`):
+**CLI command shape** (mirror `debug.lua_log_test` in `Source/Core/src/Commands/Builtin/BuiltinCommands_Debug.cpp`):
 
 ```cpp
 {
@@ -171,6 +257,8 @@ Many cell-rendering tests need real Jira data (field catalog, ticket rows). With
 Pick (2) for most cases — fewer moving parts. Add `AppController::Scenario*` helpers that mirror the lifetime contract of the existing `ScenarioRegisterLuaCachedProvider` (set up in `OnStart`, tear down in `OnCancel` / `OnFinish`).
 
 ## Bash conventions
+
+The test-script convention: `scripts/dev/test-all.sh` states it in its header and its parser relies on it.
 
 - `set -euo pipefail` always.
 - Exit codes: 0 pass, 1 assertion fail, 2 missing binary/build.

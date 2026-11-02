@@ -233,6 +233,20 @@ The harness maintains a `.claude/.tree-dirty` sentinel file written by `.claude/
 
 The deferred lint pipeline (`.claude/hooks/lint-cpp.sh` PostToolUse → `.claude/hooks/lint-cpp-drain.sh` Stop) follows the same principle for `cppcheck` / `clang-tidy` / dual-target syntax: heavy passes drain once at end-of-turn against the dedup'd set of edited files, not after each Edit/Write. `clang-format -i` still runs inline. Escape hatches: `SMATCHET_LINT_INLINE=1` reverts to per-edit, `bash agents/scripts/core/lint-flush.sh` drains explicitly mid-turn. The trivial-visual-only envelope above is a special case of this rule.
 
+## Mechanical edits
+
+**Sanity-grep a plan-named edit site before editing it** (every edit, not only mechanical ones): when a plan, design doc or review names a specific line or symbol to change, grep that symbol once before the first edit. Line numbers and descriptions drift — the "config read at L358" a plan names may by now be a draft write, and the "Lua config setter at L254" a different per-operation helper. One grep costs seconds; editing the wrong site costs a review round.
+
+A **mechanical edit** is a fully specified text change with no design judgement: a symbol or key rename across files, a find-and-replace, a format pass, a doc/comment/typo fix, a license or copyright header, a `.gitignore` line. Rules:
+
+- **Stop and ask when the request is under-specified.** "Rename it to something better" with no target, or "clean up this function", is a design request, not a mechanical one — one clarifying question is cheaper than a wrong edit applied to thirty files.
+- **Enumerate every occurrence with text search before the first edit** (`git grep -nw '<symbol>'` / `Grep`; semantic search is graph-ranked, never exhaustive — use it only to find which subsystems a symbol touches when the scope is unclear). **Never partial-apply** a rename: all occurrences land in the same change.
+- **A rename covers declarations, definitions, call sites, comments, and string literals** that name the symbol — registry keys, script bindings, tool or command names, localization keys, and build target or option names included.
+- **Prove completeness with a zero-hit grep**: after the edit, a text search for the old symbol across the documented scope returns nothing. The project lists that scope (every source, script, doc, localization and build tree a symbol can appear in) in its host build reference — a root `BUILD.md` § Rename scope where the project has one; with no list, the whole tracked tree is the scope. Build the code only when the rename touched code.
+- **Format and license passes touch only the listed files.** Never widen to "nearby files that also look untidy"; apply copyright / license text exactly as given, never reworded.
+- **Report** each file touched with its per-file occurrence count, the zero-hit grep (and build result when code changed), and any residue the user still owns — or `none`.
+- **Delegating** mechanical work: spawn a general-purpose agent on a cheap model (Claude Code: `model: haiku`) with the exact symbol pair or text, the file scope, and these rules — the diff is verifiable at a glance, so a deeper model buys nothing.
+
 ## Context compaction
 
 **Target ~80% of the context window** — compact / summarise the conversation when it reaches ≈80% of the active harness's context window, preserving headroom for the in-flight turn rather than waiting for the hard limit. This is a **harness-agnostic operating convention**, not a portable config key: compaction is a runtime feature of the harness, not agent-controllable, so each harness enforces the target through its own mechanism (or, where it exposes no knob, the operator applies it by hand).

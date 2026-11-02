@@ -1,6 +1,6 @@
 # Debug techniques (load on-demand)
 
-Trigger: **debugging** a visual / behavioural issue. These project-wide techniques are mandatory whenever they apply. The full behavioural-bug investigation loop is `agents/core/debug-detective.md` + its `debug-instrument` skill; this doc holds the two standalone techniques AGENTS.md used to inline.
+Trigger: **debugging** a visual / behavioural issue. These project-wide techniques are mandatory whenever they apply. The full behavioural-bug investigation loop — reproducer-first, hypothesis-driven, paused at every round — is the [`debug-instrument`](../../agents/_shared/skills/debug-instrument/SKILL.md) skill; this doc holds the standalone techniques it calls on.
 
 ## Pink-clear UI gap detection
 
@@ -8,7 +8,7 @@ For "is the background ever visible behind panels?" / "are dock gaps still leaki
 
 ## Exe staleness check
 
-After every rebuild, `ls -la` both the patched output and the most-likely-stale exe paths side-by-side, compare mtimes, and name the **exact** path the user should run. Multiple build outputs (`build/ninja-iter-msvc/`, `build/ninja-debug-msvc/`, `build/ninja-publish-msvc/`, worktree builds) make wrong-exe testing a common time-sink — orchestrator + perf / build agents all enforce this.
+After every rebuild, `ls -la` both the patched output and the most-likely-stale exe paths side-by-side, compare mtimes, and name the **exact** path the user should run. Multiple build outputs (`build/ninja-iter-msvc/`, `build/ninja-debug-msvc/`, `build/ninja-publish-msvc/`, worktree builds) make wrong-exe testing a common time-sink — every debug, perf and build loop enforces this. Where the project ships `scripts/dev/is-exe-fresh.sh`, run it before testing an exe you did not just rebuild (exit 3 = a source file is newer than the exe).
 
 ## Local bucket-E — native GL only
 
@@ -28,7 +28,7 @@ Call `debug.dump_self` over the CLI or MCP surface — it returns `{wrote, path}
 bash agents/scripts/core/dump-triage.sh <path>
 ```
 
-This works while the UI thread is stuck because the command runs inline on the serving thread — `debug.log_tail` and `debug.mcp_status` are safe the same way, while every marshalling `debug.*` command blocks forever (`debug-instrument` SKILL.md § Run has the full table). For a hung `--spawn` child, the readiness handshake proves it had a live MCP server on a known port, so target that port. `{available:false}` means the host has no writer (Unreal/DX12, Android) — fall back to the procdump recipe in [`docs/guides/crash-capture.md`](../guides/crash-capture.md). Design + rejected alternatives: [`docs/adr/0024-self-minidump-over-in-process-stack-walk.md`](../adr/0024-self-minidump-over-in-process-stack-walk.md).
+This works while the UI thread is stuck because the command runs inline on the serving thread — `debug.log_tail` and `debug.mcp_status` are safe the same way, while every marshalling `debug.*` command blocks forever (`debug-instrument` REFERENCE.md § Run has the full table). For a hung `--spawn` child, the readiness handshake proves it had a live MCP server on a known port, so target that port. `{available:false}` means the host has no writer (Unreal/DX12, Android) — fall back to the procdump recipe in [`docs/guides/crash-capture.md`](../guides/crash-capture.md). Design + rejected alternatives: [`docs/adr/0024-self-minidump-over-in-process-stack-walk.md`](../adr/0024-self-minidump-over-in-process-stack-walk.md).
 
 ## Dump triage (.dmp)
 

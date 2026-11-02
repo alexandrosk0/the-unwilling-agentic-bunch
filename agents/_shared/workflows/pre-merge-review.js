@@ -5,7 +5,7 @@
 // default model, schema-forced) collapsing the two severity-tagged punch-lists
 // into ONE ranked, deduped verdict plus advisory verifier scores. Concurrency 2
 // (under the Opus cap). Touches no files; never reaches the gated ship-loop tail
-// (the orchestrator acts on the verdict). See docs/agent-rules/workflow-orchestration.md.
+// (the orchestrator acts on the verdict). See docs/agent-rules/workflow-fleets.md.
 //
 // Discovery: linked into the gitignored .claude/workflows/ by setup-harness.sh,
 // then run as  Workflow({ name: 'pre-merge-review', args: <see below> }).
@@ -148,17 +148,27 @@ const reviewPrompt = (lens) =>
 
 phase('Review')
 const reviews = await parallel([
-  () => agent(reviewPrompt('correctness, the project invariants (C++14, RAII, LOG_*, UI-thread non-blocking), and code quality'),
+  () => agent(reviewPrompt('correctness, the project review checklist and subsystem invariants, and code quality'),
               { agentType: 'code-review',     label: 'code-review',     phase: 'Review', schema: FINDINGS }),
   () => agent(reviewPrompt('security: input validation, injection, secret leakage, deserialization, sandbox/MCP/CLI/Lua/p4/HTTP/SQLite trust-boundary surfaces'),
               { agentType: 'security-review', label: 'security-review', phase: 'Review', schema: FINDINGS }),
 ])
 
 phase('Judge')
-const punchLists = reviews.filter(Boolean)
-if (punchLists.length === 0) {
-  return { summary: 'Both reviewers failed or were skipped — no verdict.', ranked_findings: [], merge_recommendation: 'block' }
+// Keep the positions: parallel() returns a falsy slot for a failed leg, and
+// filtering would relabel the security list as the code-review list.
+const [codeList, securityList] = reviews
+if (!codeList && !securityList) {
+  return {
+    summary: 'Both reviewers failed or were skipped — no verdict.',
+    ranked_findings: [],
+    merge_recommendation: 'block',
+    verification: { overall_score: 0, confidence: 0, hard_veto: false, veto_reason: '', criteria: [] },
+  }
 }
+const legText = (list, name) => list
+  ? JSON.stringify(list)
+  : '(the ' + name + ' leg failed and returned nothing — this is NOT a clean result; say so in the summary and do not recommend "merge")'
 
 const judgePrompt =
   'You are the judge for a pre-merge review of ' + target.desc + '. Two read-only reviewers ' +
@@ -174,8 +184,8 @@ const judgePrompt =
   'security issue, deterministic gate failure, or project invariant breach is present, set ' +
   'hard_veto=true; do not average that away with good scores elsewhere. The verifier is ' +
   'advisory and never overrules deterministic merge gates.\n\n' +
-  'code-review punch list:\n' + JSON.stringify(punchLists[0]) + '\n\n' +
-  'security-review punch list:\n' + JSON.stringify(punchLists[1] || { findings: [] })
+  'code-review punch list:\n' + legText(codeList, 'code-review') + '\n\n' +
+  'security-review punch list:\n' + legText(securityList, 'security-review')
 
 const verdict = await agent(judgePrompt, { label: 'judge', phase: 'Judge', schema: VERDICT })
 return verdict

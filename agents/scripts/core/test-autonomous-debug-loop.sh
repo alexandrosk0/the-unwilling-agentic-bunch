@@ -212,29 +212,47 @@ check "merge-watcher matches raw ASAN error output" test $? -eq 0
 echo ""
 echo "=== Phase 6: Validate prompt template ==="
 
-check "AUTO_ACT_SANITIZER_PROMPT defined in merge-watcher.py" \
-    grep -q "AUTO_ACT_SANITIZER_PROMPT" "$REPO_ROOT/agents/scripts/core/merge-watcher.py"
+MERGE_WATCHER="$REPO_ROOT/agents/scripts/core/merge-watcher.py"
+DEBUG_SKILL="$REPO_ROOT/agents/_shared/skills/debug-instrument/SKILL.md"
 
-check "Prompt references debug-detective" \
-    grep -A5 "AUTO_ACT_SANITIZER_PROMPT" "$REPO_ROOT/agents/scripts/core/merge-watcher.py" \
-    | grep -qi "debug-detective"
+# True when the AUTO_ACT_SANITIZER_PROMPT definition block (its assignment line
+# through the closing parenthesis at column 0) mentions $1, case-insensitively.
+sanitizer_prompt_mentions() {
+    local block
+    block="$(awk '/^AUTO_ACT_SANITIZER_PROMPT = \(/ { inside = 1 }
+                  inside { print }
+                  inside && /^\)/ { exit }' "$MERGE_WATCHER")"
+    grep -qi -- "$1" <<<"$block"
+}
+
+check "AUTO_ACT_SANITIZER_PROMPT defined in merge-watcher.py" \
+    grep -q "AUTO_ACT_SANITIZER_PROMPT" "$MERGE_WATCHER"
+
+check "Prompt loads the debug-instrument skill" \
+    sanitizer_prompt_mentions "debug-instrument"
+
+check "Prompt applies the skill's headless auto-act clause" \
+    sanitizer_prompt_mentions "headless auto-act"
 
 check "MERGE_WATCH_AUTO_ACT_ON_SANITIZER env var checked" \
-    grep -q "MERGE_WATCH_AUTO_ACT_ON_SANITIZER" "$REPO_ROOT/agents/scripts/core/merge-watcher.py"
+    grep -q "MERGE_WATCH_AUTO_ACT_ON_SANITIZER" "$MERGE_WATCHER"
 
-# ---------- Phase 7: Validate debug-detective contract ----------
+# ---------- Phase 7: Validate the debug-instrument skill contract ----------
 
 echo ""
-echo "=== Phase 7: Validate debug-detective reproducer-first contract ==="
+echo "=== Phase 7: Validate debug-instrument reproducer-first contract ==="
 
-check "debug-detective.md contains 'reproducer-first contract'" \
-    grep -q "reproducer-first contract" "$REPO_ROOT/agents/core/debug-detective.md"
+check "debug-instrument SKILL.md contains 'reproducer-first contract'" \
+    grep -q "reproducer-first contract" "$DEBUG_SKILL"
 
-check "debug-detective.md contains phase 0 (concreteness check)" \
-    grep -qi "phase 0.*concreteness\|concreteness check" "$REPO_ROOT/agents/core/debug-detective.md"
+check "debug-instrument SKILL.md contains phase 0 (concreteness check)" \
+    grep -qi "phase 0.*concreteness\|concreteness check" "$DEBUG_SKILL"
 
-check "debug-detective.md contains phase 0.5 (scenario reuse)" \
-    grep -qi "phase 0.5\|existing-scenario reuse" "$REPO_ROOT/agents/core/debug-detective.md"
+check "debug-instrument SKILL.md contains phase 0.5 (scenario reuse)" \
+    grep -qi "phase 0.5\|existing-scenario reuse" "$DEBUG_SKILL"
+
+check "debug-instrument SKILL.md contains the headless auto-act clause" \
+    grep -qi "headless auto-act" "$DEBUG_SKILL"
 
 # ---------- Phase 8: Validate scenario infrastructure ----------
 
@@ -270,9 +288,9 @@ fi
 echo ""
 echo "All checks passed. The autonomous debugging loop infrastructure is wired."
 echo ""
-echo "To test the FULL end-to-end loop (merge-watcher → debug-detective spawn):"
+echo "To test the FULL end-to-end loop (merge-watcher → headless debug-instrument session):"
 echo "  1. Push a branch with the ASAN canary still in place (--keep-canary)"
 echo "  2. Open a PR"
 echo "  3. Set MERGE_WATCH_AUTO_ACT_ON_SANITIZER=true"
 echo "  4. Run: python agents/scripts/core/merge-watcher.py --pr <N>"
-echo "  5. Watch debug-detective spawn and diagnose the use-after-free"
+echo "  5. Watch the spawned session load debug-instrument and fix the use-after-free"

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # sync-issue-labels.sh — reconcile the GitHub Issue label set from a checked-in
 # manifest (agents/scripts/project/issue-labels.manifest), so the label set is
-# reproducible and the area:<subsystem> labels stay in parity with the
-# coderabbit-triage path→agent map.
+# reproducible and the area:<x> labels stay in parity with the project's area map
+# (<project root>/docs/area-map.json — the path -> area routing table the
+# coderabbit-triage skill and issue triage read).
 #
 # Issue-triage protocol (ADR-0014): docs/agent-rules/issue-triage.md § Labels.
 # Plan: docs/plans/shipped/issue-triage-protocol.md § C.
@@ -10,25 +11,37 @@
 # Usage:
 #   bash agents/scripts/project/sync-issue-labels.sh                # dry-run (default): print the plan
 #   bash agents/scripts/project/sync-issue-labels.sh --apply        # create/update labels via gh
-#   bash agents/scripts/project/sync-issue-labels.sh --check-parity # area:* ↔ coderabbit-triage map
+#   bash agents/scripts/project/sync-issue-labels.sh --check-parity # area:* labels <-> area map
 #
 # Env:
-#   REPO   — owner/repo (default: derived from `gh repo view`, else alexandrosk0/Smatchet)
+#   REPO                  — owner/repo (default: derived from `gh repo view` in the project root, else alexandrosk0/Smatchet)
+#   ISSUE_LABELS_MANIFEST — manifest path (default: the one beside this script)
+#   AREA_MAP_FILE         — area map path (default: <project root>/docs/area-map.json)
 #
-# Exit codes (test-author convention):
-#   0 — dry-run printed / apply succeeded / parity OK
-#   1 — parity drift (an area:* has no matching agent + isn't a generic area)
-#   2 — bad args / missing manifest / gh missing
+# The manifest is layer content, read from this script's own tree; the area map is
+# host content, read from PROJECT_ROOT (scripts/dev/project-config.sh: the
+# superproject once the layer is the agent-layer/ submodule). A standalone layer has
+# no area map, so --check-parity reports SKIP there; with a host, a missing map fails.
+#
+# Exit codes (test-script convention):
+#   0 — dry-run printed / apply succeeded / parity OK or SKIP (standalone layer)
+#   1 — parity drift (an area:* label with no route or generic area, or a map area with no label)
+#   2 — bad args / missing manifest or map / malformed map / gh or python missing
 
 set -uo pipefail
 
-cd "$(git rev-parse --show-toplevel)" || exit 2
+_sil_layer="$(cd "$(dirname "$0")/../../.." && pwd)" || exit 2
+if [ -f "$_sil_layer/scripts/dev/project-config.sh" ]; then
+    # shellcheck source=scripts/dev/project-config.sh
+    PC_ROOTS_ONLY=1 . "$_sil_layer/scripts/dev/project-config.sh" || true
+else
+    unset PROJECT_ROOT AGENT_LAYER_ROOT  # no config beside this script (a fixture copy): its own tree, never an inherited root
+fi
+_sil_project="${PROJECT_ROOT:-$_sil_layer}"
 
 # Paths are env-overridable so the bats harness can point --check-parity at fixtures.
-MANIFEST="${ISSUE_LABELS_MANIFEST:-agents/scripts/project/issue-labels.manifest}"
-TRIAGE_MAP="${ISSUE_TRIAGE_MAP:-agents/core/coderabbit-triage.md}"
-# Generic area:<x> labels that intentionally have no 1:1 agent in the triage map.
-GENERIC_AREAS=" ui build "
+MANIFEST="${ISSUE_LABELS_MANIFEST:-$_sil_layer/agents/scripts/project/issue-labels.manifest}"
+AREA_MAP="${AREA_MAP_FILE:-$_sil_project/docs/area-map.json}"
 
 MODE="dry-run"
 case "${1:-}" in
@@ -49,27 +62,65 @@ while IFS='|' read -r name color desc; do
     names+=("$name"); colors+=("$color"); descs+=("$desc")
 done < "$MANIFEST"
 
-# --- parity check: every area:<x> resolves to an agent (or a generic area) ---
+# --- parity check: area:<x> labels <-> area-map areas (both directions) ---
 if [ "$MODE" = "parity" ]; then
-    [ -f "$TRIAGE_MAP" ] || { echo "sync-issue-labels: missing $TRIAGE_MAP" >&2; exit 2; }
+    if [ ! -f "$AREA_MAP" ]; then
+        if [ -z "${AREA_MAP_FILE:-}" ] && [ "$(cd "$_sil_project" && pwd)" = "$_sil_layer" ]; then
+            echo "sync-issue-labels: parity SKIP — standalone layer, no host area map at $AREA_MAP"
+            exit 0
+        fi
+        echo "sync-issue-labels: missing area map $AREA_MAP" >&2
+        exit 2
+    fi
+    # command -v alone is insufficient on Windows: the python3 Store-alias stub passes
+    # it but exits 49 when run. Take the first candidate that actually executes.
+    PY=""
+    for _c in python3 python py; do
+        if command -v "$_c" >/dev/null 2>&1 && "$_c" -c "" >/dev/null 2>&1; then PY="$_c"; break; fi
+    done
+    [ -n "$PY" ] || { echo "sync-issue-labels: python required for --check-parity" >&2; exit 2; }
+    # One area name per line: every non-null route area, then every generic area.
+    if ! map_areas="$("$PY" - "$AREA_MAP" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    routes = data["routes"]
+    generic = data.get("generic_areas", [])
+    areas = [r["area"] for r in routes if r.get("area") is not None] + list(generic)
+except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+    sys.exit("sync-issue-labels: malformed area map %s: %s" % (sys.argv[1], exc))
+for a in areas:
+    print(a)
+PY
+)"; then
+        exit 2
+    fi
     miss=0
+    label_areas=""
     for n in "${names[@]}"; do
         case "$n" in area:*) ;; *) continue ;; esac
         sub="${n#area:}"
-        case "$GENERIC_AREAS" in *" $sub "*) continue ;; esac
-        # The map cites the agent as `\`<agent>\`` in the right column.
-        if ! grep -qF "\`$sub\`" "$TRIAGE_MAP"; then
-            echo "PARITY FAIL: $n has no matching agent in $TRIAGE_MAP (add the agent, the label, or list '$sub' in GENERIC_AREAS)" >&2
+        label_areas="$label_areas $sub "
+        if ! printf '%s\n' "$map_areas" | grep -qxF -- "$sub"; then
+            echo "PARITY FAIL: $n has no route in $AREA_MAP (add a route with \"area\": \"$sub\", list it in generic_areas, or drop the label)" >&2
             miss=1
         fi
     done
+    while IFS= read -r a; do
+        [ -n "$a" ] || continue
+        case "$label_areas" in *" $a "*) continue ;; esac
+        echo "PARITY FAIL: area '$a' in $AREA_MAP has no area:$a label in $MANIFEST (add the label, or set the route's area to null)" >&2
+        miss=1
+    done <<< "$map_areas"
     if [ "$miss" -eq 0 ]; then
-        echo "sync-issue-labels: parity OK — every area:* maps to an agent or a generic area (${#names[@]} labels)"
+        echo "sync-issue-labels: parity OK — every area:* label maps to an area-map route or generic area, and every map area has a label (${#names[@]} labels)"
         exit 0
     fi
     exit 1
 fi
 
+# gh derives the repo from the working directory: the labels belong to the project.
+cd "$_sil_project" || exit 2
 command -v gh >/dev/null 2>&1 || { echo "sync-issue-labels: gh required" >&2; exit 2; }
 REPO="${REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || echo alexandrosk0/Smatchet)}"
 
