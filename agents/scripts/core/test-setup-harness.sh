@@ -12,6 +12,9 @@
 #   7. sync-settings-hooks.sh heals missing template hooks additively.
 #   8. Codex setup verifies native discovery, generates Codex-native
 #      hooks/custom agents, and does not clobber Claude Code setup.
+#   9. Leaf CLAUDE.md shims are written for any Source/**/AGENTS.md only where
+#      the host gitignores them; dangling .claude/skills + .claude/workflows
+#      links are pruned without touching user-owned skills (hermetic temp host).
 #
 # Auto-enrolled by scripts/dev/test-all.sh.
 
@@ -364,6 +367,61 @@ if [[ -f ".claude/settings.json" && -e ".claude/skills/perf-measure/SKILL.md" ]]
 else
     nope "codex setup clobbered Claude Code adapter files"
 fi
+
+# -------------------------------------------------------------------- Test 9
+note "Test 9 — leaf shims only where gitignored (any depth under Source/); dangling skill/workflow links pruned"
+# Hermetic: a throwaway host repo, so the live tree's adapter is never touched.
+# SMATCHET_PROJECT_ROOT_OVERRIDE=1 aims the layer's setup at that host.
+T9_HOST="$(mktemp -d)"
+T9_HOST="$(cd "$T9_HOST" && pwd -P)"
+(
+    cd "$T9_HOST" || exit 1
+    git init -q -b develop .
+    git config user.email t@local
+    git config user.name t
+    mkdir -p Source/Core/src/Alpha Source/Plugins/Beta Source/Plugins/Gamma
+    printf '# Alpha rules\n' > Source/Core/src/Alpha/AGENTS.md
+    printf '# Beta rules\n' > Source/Plugins/Beta/AGENTS.md
+    printf '# Gamma rules\n' > Source/Plugins/Gamma/AGENTS.md
+    # Alpha + Beta shims are ignored; Gamma's is not.
+    printf 'Source/Core/src/**/CLAUDE.md\nSource/Plugins/Beta/CLAUDE.md\n.claude/\n' > .gitignore
+    git add -A
+    git commit -qm seed
+    mkdir -p .claude/skills/zz-user-skill .claude/workflows
+    printf 'user-owned\n' > .claude/skills/zz-user-skill/SKILL.md
+    ln -s ../../no-such-skill .claude/skills/zz-removed-skill
+    ln -s ../no-such-workflow.js .claude/workflows/zz-removed.js
+) >/dev/null 2>&1
+T9_OUT="$(SMATCHET_PROJECT_ROOT_OVERRIDE=1 PROJECT_ROOT="$T9_HOST" AGENT_LAYER_ROOT="$LAYER" \
+    bash "$SETUP_HARNESS" claude-code 2>&1)" || true
+if grep -qx '@AGENTS.md' "$T9_HOST/Source/Core/src/Alpha/CLAUDE.md" 2>/dev/null \
+    && grep -qx '@AGENTS.md' "$T9_HOST/Source/Plugins/Beta/CLAUDE.md" 2>/dev/null; then
+    ok "shims written beside gitignored leaves (Source/Core/src/<ctx>/ and a plugin dir)"
+else
+    nope "shim missing beside a gitignored leaf (Alpha or Beta)"
+fi
+if [[ ! -e "$T9_HOST/Source/Plugins/Gamma/CLAUDE.md" ]] \
+    && grep -q 'Source/Plugins/Gamma/CLAUDE.md is not gitignored' <<< "$T9_OUT"; then
+    ok "no shim beside a leaf whose CLAUDE.md is not gitignored, and the skip is reported"
+else
+    nope "shim written (or skip not reported) beside a leaf whose CLAUDE.md is not gitignored"
+fi
+if [[ -z "$(git -C "$T9_HOST" status --porcelain 2>/dev/null)" ]]; then
+    ok "setup left the host's tracked tree clean (shims are ignored)"
+else
+    nope "setup left untracked or modified files in the host: $(git -C "$T9_HOST" status --porcelain | tr '\n' ' ')"
+fi
+if [[ ! -L "$T9_HOST/.claude/skills/zz-removed-skill" && ! -L "$T9_HOST/.claude/workflows/zz-removed.js" ]]; then
+    ok "dangling skill + workflow links pruned"
+else
+    nope "dangling skill or workflow link left behind"
+fi
+if [[ -f "$T9_HOST/.claude/skills/zz-user-skill/SKILL.md" && -e "$T9_HOST/.claude/skills/perf-measure/SKILL.md" ]]; then
+    ok "a user-owned skill dir and live layer skill links survive the prune"
+else
+    nope "prune removed a user-owned skill dir or a live layer skill link"
+fi
+rm -rf "$T9_HOST"
 
 # -------------------------------------------------------------------- Report
 echo

@@ -111,11 +111,11 @@ Templates that the user might locally tweak (`settings.json`, hook shell scripts
 
 ## Per-subsystem leaf discovery
 
-Heavy `Source/Core/src/<ctx>/` subsystems carry a leaf `AGENTS.md` (scoped rules) — plus, for the `Tracker/` exemplar, `CONTEXT.md` + `README.md`. Registry + per-context coverage: root [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md). How a harness picks up the leaf **rules** when you touch a file in that dir:
+Heavy subsystem dirs below `Source/` (`Source/Core/src/<ctx>/`, a plugin dir, …) carry a leaf `AGENTS.md` (scoped rules) — plus, for the `Tracker/` exemplar, `CONTEXT.md` + `README.md`. Registry + per-context coverage: root [`CONTEXT-MAP.md`](../../CONTEXT-MAP.md). How a harness picks up the leaf **rules** when you touch a file in that dir:
 
 | Harness | Nested-`AGENTS.md` auto-load? | Mechanism |
 |---|---|---|
-| Claude Code | **No** — it lazy-loads nested `CLAUDE.md`, not nested `AGENTS.md` | `setup-harness.sh claude-code` generates a gitignored one-line `CLAUDE.md` (`@AGENTS.md`) beside each leaf. Claude Code includes it when it reads a file in that dir (lazy — only that subsystem's rules cost tokens, only when touched). Committed tree stays `AGENTS.md`-only. |
+| Claude Code | **No** — it lazy-loads nested `CLAUDE.md`, not nested `AGENTS.md` | `setup-harness.sh claude-code` generates a gitignored one-line `CLAUDE.md` (`@AGENTS.md`) beside each leaf. Claude Code includes it when it reads a file in that dir (lazy — only that subsystem's rules cost tokens, only when touched). Committed tree stays `AGENTS.md`-only: a shim is written only where the host's `.gitignore` already ignores it (e.g. `Source/**/CLAUDE.md`); a leaf whose shim is not ignored is reported and skipped, never written. |
 | Codex / OpenAI Agents | **Yes** — reads the nearest `AGENTS.md` per the [agents.md spec](https://agents.md/) | Native; no shim needed. |
 | Cursor | Partial — `.cursor/rules` globs, not path-nearest | Use `CONTEXT-MAP.md` + explicit reads, or author a per-glob `.mdc` (follow-up if locality matters). |
 | Aider / generic | No | Read the leaf explicitly (point at it via `CONTEXT-MAP.md`). |

@@ -238,20 +238,45 @@ link_file() {
 # Generate gitignored CLAUDE.md shims beside each subsystem leaf AGENTS.md.
 # Claude Code lazy-loads nested CLAUDE.md (not nested AGENTS.md) when a file in
 # that dir is touched; the one-line `@AGENTS.md` import pulls in the leaf rules.
-# The shim is gitignored (`.gitignore` Source/Core/src/**/CLAUDE.md) so the
-# committed tree stays AGENTS.md-only (portable to Codex/Cursor, which read
-# AGENTS.md natively). Registry of leaves: root CONTEXT-MAP.md.
+# A leaf is any tracked AGENTS.md below Source/ (Source/Core/src/<ctx>/, a plugin
+# dir, ...; the pathspec `*` spans directories, the same leaf set
+# test-subsystem-docs.sh checks); registry of leaves: root CONTEXT-MAP.md, kept in sync with the tree by
+# test-subsystem-docs.sh. A shim is written ONLY where the host's .gitignore
+# already ignores it, so the committed tree stays AGENTS.md-only (portable to
+# Codex/Cursor, which read AGENTS.md natively) and a tracked CLAUDE.md is never
+# overwritten; an un-ignored location is reported instead.
 gen_subsystem_claude_shims() {
-  local count=0 agents shim
+  local count=0 skipped=0 agents shim
   while IFS= read -r agents; do
     [[ -z "$agents" ]] && continue
     shim="$(dirname "$agents")/CLAUDE.md"
-    if [[ ! -f "$shim" ]] || ! grep -q '^@AGENTS.md' "$shim" 2>/dev/null; then
-      printf '@AGENTS.md\n\n<!-- Generated gitignored shim (setup-harness.sh). Claude Code lazy-loads nested CLAUDE.md, not AGENTS.md; this imports the sibling leaf rules. Edit AGENTS.md, not this file. -->\n' > "$shim"
-      count=$((count + 1))
+    if [[ -f "$shim" ]] && grep -q '^@AGENTS.md' "$shim" 2>/dev/null; then
+      continue
     fi
-  done < <(git_cmd ls-files 'Source/Core/src/*/AGENTS.md' 2>/dev/null || true)
-  echo "  subsystem-shims  $count new CLAUDE.md shim(s) beside Source/Core/src/*/AGENTS.md (gitignored)"
+    if ! git_cmd check-ignore -q -- "$shim" >/dev/null 2>&1; then
+      echo "  WARN  subsystem-shims: $shim is not gitignored, so it was not written; add it to .gitignore (e.g. Source/**/CLAUDE.md) for Claude Code to auto-load $agents" >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    printf '@AGENTS.md\n\n<!-- Generated gitignored shim (setup-harness.sh). Claude Code lazy-loads nested CLAUDE.md, not AGENTS.md; this imports the sibling leaf rules. Edit AGENTS.md, not this file. -->\n' > "$shim"
+    count=$((count + 1))
+  done < <(git_cmd ls-files -- 'Source/*/AGENTS.md' 2>/dev/null || true)
+  echo "  subsystem-shims  $count new CLAUDE.md shim(s) beside Source/*/AGENTS.md (gitignored); $skipped skipped (not gitignored)"
+}
+
+# Remove links under $1 whose target no longer exists: a skill or workflow that
+# was deleted or renamed in the layer leaves its old link behind, and link_dir /
+# link_file only replace a dangling link they are asked to create again. Only
+# DANGLING links go; a live link, a real directory (a user's own skill) or a
+# hardlinked file is never touched.
+prune_dangling_links() {
+  local dir="$1" entry
+  [[ -d "$dir" ]] || return 0
+  for entry in "$dir"/*; do
+    [[ -L "$entry" && ! -e "$entry" ]] || continue
+    rm -f -- "$entry"
+    echo "  prune      $entry (dangling link removed)"
+  done
 }
 
 # _template_history_match <layer-rel-src> <dst>
@@ -410,6 +435,7 @@ PY
       link_dir ".claude/skills/$skill_name" "agents/_shared/skills/$skill_name"
     done
   fi
+  prune_dangling_links ".claude/skills"
 
   # Auto-link every saved Workflow under agents/_shared/workflows/ into the
   # gitignored .claude/workflows/ so the Workflow tool resolves them by name
@@ -434,6 +460,7 @@ PY
       link_file ".claude/workflows/$(basename "$wf")" "$wf"
     done
   fi
+  prune_dangling_links ".claude/workflows"
 
   # Special case: token-tracking lives at a non-conforming path
   # (agents/_shared/token-tracking/, not agents/_shared/skills/token-tracking/).

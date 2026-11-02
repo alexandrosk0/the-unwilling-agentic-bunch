@@ -5,9 +5,12 @@
 # Two halves:
 #   default (static, offline, auto-enrolled via the test-*.sh glob) — when the
 #     Claude Code harness has been provisioned (any gitignored CLAUDE.md shim
-#     exists under Source/Core/src/*/), assert a `@AGENTS.md` shim sits beside
-#     EVERY leaf AGENTS.md, so setup-harness.sh's gen_subsystem_claude_shims()
-#     regression-checks itself. Unprovisioned checkout (CI) -> skip, exit 0.
+#     exists beside a leaf under Source/), assert a `@AGENTS.md` shim sits beside
+#     EVERY leaf AGENTS.md (Source/*/AGENTS.md — the pathspec `*` spans
+#     directories, the leaf set setup-harness.sh and test-subsystem-docs.sh use),
+#     so setup-harness.sh's gen_subsystem_claude_shims() regression-checks itself;
+#     a leaf whose shim the host does not gitignore fails here. Unprovisioned
+#     checkout (CI) -> skip, exit 0.
 #   --live (opt-in, spends real agent tokens; never run by test-all) — headless
 #     probe: spawn `claude -p` cd'd into Source/Core/src/Tracker/, ask for the
 #     rule source of a Tracker invariant, assert the answer names the LEAF
@@ -32,7 +35,7 @@ PASS=0; FAIL=0; SKIP=0; NOTE=""
 
 static_check() {
     local leaves shim have_any=0 leaf
-    leaves="$(git ls-files 'Source/Core/src/*/AGENTS.md')"
+    leaves="$(git ls-files 'Source/*/AGENTS.md')"
     if [ -z "$leaves" ]; then
         NOTE="  (no leaf AGENTS.md files tracked — nothing to check)"
         SKIP=1
