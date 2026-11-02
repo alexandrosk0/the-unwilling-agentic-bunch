@@ -30,6 +30,7 @@ setup() {
     mkdir -p "$MAIN/scripts/git-hooks" "$MAIN/scripts/dev" "$MAIN/agents/scripts/core/lib"
     cp "$REPO_ROOT/agents/scripts/core/setup-harness.sh" "$MAIN/agents/scripts/core/"
     cp "$REPO_ROOT/agents/scripts/core/lib/agents-dir-current.sh" "$MAIN/agents/scripts/core/lib/"
+    cp "$REPO_ROOT/agents/scripts/core/lib/leaf-docs.sh" "$MAIN/agents/scripts/core/lib/"
     # doctor.sh is the host's dev-env doctor, not layer content; copied when a
     # host tree carries it (the two doctor cases skip without one).
     DOCTOR_SRC="$(host_root)/scripts/dev/doctor.sh"
