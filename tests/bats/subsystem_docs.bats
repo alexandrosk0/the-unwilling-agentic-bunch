@@ -135,3 +135,100 @@ MAP
     [[ "$output" == *"Source/Core/src/Persistence"* ]]
     [[ "$output" == *"WARN"* ]]
 }
+
+# --- Leaves below Source/ outside Source/Core/src, and the host checklist -----
+
+# The sandbox gains the real project-config.sh + a minimal project.config.json so
+# the gate's full config load reads docs.review_checklist from the sandbox host.
+_with_config() { # $1 = docs object JSON
+    mkdir -p "$SANDBOX/scripts/dev"
+    cp "$REPO_ROOT/scripts/dev/project-config.sh" "$SANDBOX/scripts/dev/project-config.sh"
+    printf '{"docs": %s}\n' "$1" > "$SANDBOX/project.config.json"
+    _commit "config"
+}
+
+_register_plugin_leaf() {
+    mkdir -p "$SANDBOX/Source/Plugins/Mcp"
+    printf '# Mcp rules\n\n## Invariants\n- Tool descriptions are written for an LLM consumer because clients show them verbatim.\n' \
+        > "$SANDBOX/Source/Plugins/Mcp/AGENTS.md"
+    cat > "$SANDBOX/CONTEXT-MAP.md" <<'MAP'
+# CONTEXT-MAP
+
+## Registry
+
+| Subsystem | Rules | Glossary | Orientation |
+|---|---|---|---|
+| Tracker | `Source/Core/src/Tracker/AGENTS.md` | — | — |
+| Mcp | `Source/Plugins/Mcp/AGENTS.md` | — | — |
+
+## Growth path
+Add a row when content exists.
+MAP
+    _commit "add Mcp plugin leaf"
+}
+
+@test "leaf outside Source/Core/src: unregistered FAILs" {
+    mkdir -p "$SANDBOX/Source/Plugins/Mcp"
+    printf '# Mcp rules\n' > "$SANDBOX/Source/Plugins/Mcp/AGENTS.md"
+    _commit "add unregistered plugin leaf"
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"on-disk leaf not in"*"Source/Plugins/Mcp/AGENTS.md"* ]]
+}
+
+@test "leaf outside Source/Core/src: registered passes, and its bullets are checked against the central checklist" {
+    _register_plugin_leaf
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+    printf -- '- Tool descriptions are written for an LLM consumer because clients show them verbatim.\n' \
+        >> "$SANDBOX/agents/core/code-review.md"
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"leaf rule duplicated"*"Source/Plugins/Mcp/AGENTS.md"* ]]
+}
+
+@test "an unregistered README below Source/ is not a leaf and never WARNs" {
+    mkdir -p "$SANDBOX/Source/UnrealPlugins/Thing"
+    printf '# Plugin readme\n' > "$SANDBOX/Source/UnrealPlugins/Thing/README.md"
+    printf 'int x = 1;\n' > "$SANDBOX/Source/UnrealPlugins/Thing/Thing.cpp"
+    _commit "plugin baseline"
+    printf 'int x = 2;\n' > "$SANDBOX/Source/UnrealPlugins/Thing/Thing.cpp"
+    _commit "change plugin code"
+    run bash "$GATE" --diff HEAD~1
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARN"* ]]
+}
+
+@test "host checklist (docs.review_checklist): a leaf rule restated there FAILs" {
+    mkdir -p "$SANDBOX/docs/guides"
+    printf '# Review checklist\n\n- No backend leak into the shared tracker interface family for any concrete backend.\n' \
+        > "$SANDBOX/docs/guides/review-checklist.md"
+    _with_config '{"review_checklist": "docs/guides/review-checklist.md"}'
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"leaf rule duplicated in docs/guides/review-checklist.md"* ]]
+}
+
+@test "host checklist (docs.review_checklist): a clean checklist passes" {
+    mkdir -p "$SANDBOX/docs/guides"
+    printf '# Review checklist\n\n- Trace execution order through the scheduler, never lexical order.\n' \
+        > "$SANDBOX/docs/guides/review-checklist.md"
+    _with_config '{"review_checklist": "docs/guides/review-checklist.md"}'
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Passed: 1  Failed: 0"* ]]
+}
+
+@test "host checklist (docs.review_checklist): a configured path that does not exist FAILs" {
+    _with_config '{"review_checklist": "docs/guides/no-such-checklist.md"}'
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"docs.review_checklist names a missing file: docs/guides/no-such-checklist.md"* ]]
+}
+
+@test "no docs.review_checklist key: only the layer checklist is used" {
+    _with_config '{"taxonomy_exceptions": []}'
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Passed: 1  Failed: 0"* ]]
+}
