@@ -876,8 +876,8 @@ poll_merge_gates() {
     # skip — "manual review required" / "available on request" — so a SUCCESS
     # state is NOT a review; non-empty) · 42 crRunClean (bool: CodeRabbit's own
     # newest "CodeRabbit" check run on the head, app slug coderabbitai, is
-    # COMPLETED + SUCCESS — CR finished a clean review of this head and posts no
-    # review object for it; non-empty, safe at the tail).
+    # COMPLETED + SUCCESS at least 60 s ago — CR finished a clean review of this
+    # head and posts no review object for it; non-empty, safe at the tail).
     # GATE_FILTER — the 43-field jq projection (see field-order map above).
     # Copied byte-for-byte from the _MG_GATE_FILTER_TEMPLATE global that
     # merge-gates.d/10-gate-filter.sh defines (single-quoted literal → no

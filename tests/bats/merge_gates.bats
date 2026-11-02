@@ -4788,9 +4788,12 @@ cr_run_fixture() {
 }
 
 cr_run() {
-    # Usage: cr_run <databaseId> <status> <conclusion|null> [app-slug]
-    jq -cn --argjson id "$1" --arg s "$2" --argjson c "$3" --arg app "${4:-coderabbitai}" \
-        '{"__typename":"CheckRun","name":"CodeRabbit","databaseId":$id,"status":$s,"conclusion":$c,"isRequired":false,"checkSuite":{"createdAt":"2026-11-02T10:00:00Z","app":{"slug":$app}}}'
+    # Usage: cr_run <databaseId> <status> <conclusion|null> [app-slug] [completedAt]
+    # completedAt defaults to long settled; pass "now" for a just-finished run.
+    local done="${5:-2026-01-01T00:00:00Z}"
+    [ "$done" = now ] && done="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -cn --argjson id "$1" --arg s "$2" --argjson c "$3" --arg app "${4:-coderabbitai}" --arg d "$done" \
+        '{"__typename":"CheckRun","name":"CodeRabbit","databaseId":$id,"status":$s,"conclusion":$c,"completedAt":$d,"isRequired":false,"checkSuite":{"createdAt":"2026-11-02T10:00:00Z","app":{"slug":$app}}}'
 }
 
 stale_no_header_fixture() {
@@ -4824,6 +4827,28 @@ stale_no_header_fixture() {
         [[ "$output" != *"checkrun-clean"* ]]
         rm -f "$f"
     done
+}
+
+@test "crRunClean: a run that completed under 60 s ago has not settled -> no pass yet" {
+    local f
+    f="$(cr_run_fixture "$FIXTURES_DIR/merge_gates_pass.json" "[$(cr_run 9 COMPLETED '"SUCCESS"' coderabbitai now)]")"
+    export MERGE_GATES_CR_INSTALLED=true MERGE_GATES_CR_GRACE_POLLS=10
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [[ "$output" != *"checkrun-clean"* ]]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    rm -f "$f"
+}
+
+@test "crRunClean: a run with no completedAt is not clean" {
+    local f r
+    r="$(cr_run 9 COMPLETED '"SUCCESS"' | jq -c 'del(.completedAt)')"
+    f="$(cr_run_fixture "$FIXTURES_DIR/merge_gates_pass.json" "[$r]")"
+    export MERGE_GATES_CR_INSTALLED=true MERGE_GATES_CR_GRACE_POLLS=10
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [[ "$output" != *"checkrun-clean"* ]]
+    rm -f "$f"
 }
 
 @test "crRunClean: a CodeRabbit-named run from another app is not clean" {
