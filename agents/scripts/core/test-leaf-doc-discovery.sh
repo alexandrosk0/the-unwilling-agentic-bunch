@@ -6,11 +6,11 @@
 #   default (static, offline, auto-enrolled via the test-*.sh glob) — when the
 #     Claude Code harness has been provisioned (any gitignored CLAUDE.md shim
 #     exists beside a leaf under Source/), assert a `@AGENTS.md` shim sits beside
-#     EVERY leaf AGENTS.md (Source/*/AGENTS.md — the pathspec `*` spans
-#     directories, the leaf set setup-harness.sh and test-subsystem-docs.sh use),
-#     so setup-harness.sh's gen_subsystem_claude_shims() regression-checks itself;
-#     a leaf whose shim the host does not gitignore fails here. Unprovisioned
-#     checkout (CI) -> skip, exit 0.
+#     EVERY leaf AGENTS.md (lib/leaf-docs.sh — the leaf set setup-harness.sh and
+#     test-subsystem-docs.sh use), so setup-harness.sh's
+#     gen_subsystem_claude_shims() regression-checks itself; a leaf whose shim
+#     setup had to skip (not ignored, or a CLAUDE.md without the import) fails
+#     here. Unprovisioned checkout (CI) -> skip, exit 0.
 #   --live (opt-in, spends real agent tokens; never run by test-all) — headless
 #     probe: spawn `claude -p` cd'd into Source/Core/src/Tracker/, ask for the
 #     rule source of a Tracker invariant, assert the answer names the LEAF
@@ -22,6 +22,15 @@
 # Exit codes: 0 pass/skip · 1 failure · 2 required tool missing (--live only).
 
 set -uo pipefail
+_tldd_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The lint exempt zones (PC_LINT_EXEMPT_ZONES) narrow the leaf set; a failed
+# config load leaves them empty, which only widens it.
+if [ -f "$_tldd_self/../../../scripts/dev/project-config.sh" ]; then
+    # shellcheck source=scripts/dev/project-config.sh
+    . "$_tldd_self/../../../scripts/dev/project-config.sh" >/dev/null 2>&1 || true
+fi
+# shellcheck source=agents/scripts/core/lib/leaf-docs.sh
+. "$_tldd_self/lib/leaf-docs.sh" || exit 2
 cd "$(git rev-parse --show-toplevel)" || exit 2
 
 MODE="static"
@@ -35,7 +44,7 @@ PASS=0; FAIL=0; SKIP=0; NOTE=""
 
 static_check() {
     local leaves shim have_any=0 leaf
-    leaves="$(git ls-files 'Source/*/AGENTS.md')"
+    leaves="$(leaf_agents_files Source)"
     if [ -z "$leaves" ]; then
         NOTE="  (no leaf AGENTS.md files tracked — nothing to check)"
         SKIP=1
