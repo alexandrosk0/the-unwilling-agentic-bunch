@@ -6,14 +6,15 @@ Generated locally at `.claude/` by:
 bash agents/scripts/core/setup-harness.sh claude-code
 ```
 
-Idempotent. Run it after every clone and any time the canonical templates change. The script never overwrites a user-modified template — it prints `skip-copy` and leaves your local edits alone.
+Idempotent. Run it after every clone and any time the canonical templates change. The script never overwrites a user-modified template — it prints `skip-copy` with a `git diff --no-index` line to compare, and leaves your local edits alone. A copy that is byte-identical to an earlier version of its template in the layer's git history holds no local edit, so it is replaced and reported as `upgrade <path> (was <sha>)`. Without readable layer history (no `.git`, or a shallow clone missing that version) such a copy is skipped instead.
 
 ## What the script generates
 
 Links (junction on Windows, symlink on Unix) point at the in-repo source so an
 edit to the canonical file is picked up with no re-run; copies are snapshotted
-and re-copied only when the canonical template differs (a user-modified copy is
-left alone with a `skip-copy`).
+and re-copied when the canonical template changes, as long as the copy is still a
+verbatim earlier version of it (a user-modified copy is left alone with a
+`skip-copy`).
 
 | Path under `.claude/` | Kind | Source |
 |---|---|---|
