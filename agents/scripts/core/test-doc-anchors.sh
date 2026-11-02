@@ -44,6 +44,8 @@ cd "${PROJECT_ROOT:-$(git rev-parse --show-toplevel)}" || exit 2
 export PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
 # Selftest first (a synthetic tree; asserts a pass and a failure) so a broken
 # resolver can never report a vacuous PASS on the real tree.
+# selftest: asserts-failure — delegated to test_doc_anchors.py --selftest (a wrong
+# leaf section must fail).
 if [ "${1:-}" != "--selftest" ]; then
     "$PY" "$_tda_self/test_doc_anchors.py" --selftest || exit 1
 fi

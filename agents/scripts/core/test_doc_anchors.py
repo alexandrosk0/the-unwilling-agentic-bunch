@@ -300,8 +300,8 @@ def selftest() -> int:
         subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
         with contextlib.redirect_stdout(io.StringIO()):
             clean = run(root, root)
-        # A leaf-qualified reference to a ROOT-only section must fail: it names
-        # the leaf, and the leaf has no such heading.
+        # selftest: asserts-failure — a leaf-qualified reference to a ROOT-only
+        # section must fail: it names the leaf, and the leaf has no such heading.
         (root / "docs" / "bad.md").write_text(
             f"See Source/Core/src/Ui/AGENTS.md {sec} Root rules.\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
