@@ -11,6 +11,11 @@
 # ----------------------------------------------------------------------------
 
 setup() {
+    # The host's test-all.sh runs layer suites with PROJECT_ROOT pointed at the
+    # layer and SMATCHET_PROJECT_ROOT_OVERRIDE=1, which would hide the host's area
+    # map from the real-manifest case; let the script resolve the roots itself.
+    unset PROJECT_ROOT AGENT_LAYER_ROOT PC_PROJECT_ROOT PC_AGENT_LAYER_ROOT
+    unset SMATCHET_PROJECT_ROOT_OVERRIDE
     REPO_ROOT="$(git rev-parse --show-toplevel)"
     export REPO_ROOT
     export SCRIPT="$REPO_ROOT/agents/scripts/project/sync-issue-labels.sh"
