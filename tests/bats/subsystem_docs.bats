@@ -17,9 +17,10 @@ setup() {
     GATE_SRC="$REPO_ROOT/agents/scripts/project/test-subsystem-docs.sh"
     SANDBOX="$(mktemp -d)"
 
-    mkdir -p "$SANDBOX/agents/scripts/project" "$SANDBOX/agents/core" \
-             "$SANDBOX/Source/Core/src/Tracker"
+    mkdir -p "$SANDBOX/agents/scripts/project" "$SANDBOX/agents/scripts/core/lib" \
+             "$SANDBOX/agents/core" "$SANDBOX/Source/Core/src/Tracker"
     cp "$GATE_SRC" "$SANDBOX/agents/scripts/project/test-subsystem-docs.sh"
+    cp "$REPO_ROOT/agents/scripts/core/lib/leaf-docs.sh" "$SANDBOX/agents/scripts/core/lib/leaf-docs.sh"
 
     printf '# code-review\n\nGlobal rules only; subsystem invariants live in the leaves.\n' \
         > "$SANDBOX/agents/core/code-review.md"
@@ -139,11 +140,12 @@ MAP
 # --- Leaves below Source/ outside Source/Core/src, and the host checklist -----
 
 # The sandbox gains the real project-config.sh + a minimal project.config.json so
-# the gate's full config load reads docs.review_checklist from the sandbox host.
-_with_config() { # $1 = docs object JSON
+# the gate's full config load reads docs.review_checklist (and the lint exempt
+# zones) from the sandbox host.
+_with_config() { # $1 = docs object JSON, $2 = optional lint object JSON
     mkdir -p "$SANDBOX/scripts/dev"
     cp "$REPO_ROOT/scripts/dev/project-config.sh" "$SANDBOX/scripts/dev/project-config.sh"
-    printf '{"docs": %s}\n' "$1" > "$SANDBOX/project.config.json"
+    printf '{"docs": %s, "lint": %s}\n' "$1" "${2:-{\}}" > "$SANDBOX/project.config.json"
     _commit "config"
 }
 
@@ -187,13 +189,14 @@ MAP
     [[ "$output" == *"leaf rule duplicated"*"Source/Plugins/Mcp/AGENTS.md"* ]]
 }
 
-@test "an unregistered README below Source/ is not a leaf and never WARNs" {
-    mkdir -p "$SANDBOX/Source/UnrealPlugins/Thing"
-    printf '# Plugin readme\n' > "$SANDBOX/Source/UnrealPlugins/Thing/README.md"
-    printf 'int x = 1;\n' > "$SANDBOX/Source/UnrealPlugins/Thing/Thing.cpp"
-    _commit "plugin baseline"
-    printf 'int x = 2;\n' > "$SANDBOX/Source/UnrealPlugins/Thing/Thing.cpp"
-    _commit "change plugin code"
+@test "staleness covers only registered READMEs: an unregistered one never WARNs" {
+    # Under Source/Core/src/, where the old gate warned on ANY README.
+    mkdir -p "$SANDBOX/Source/Core/src/Orphan"
+    printf '# Orphan readme\n' > "$SANDBOX/Source/Core/src/Orphan/README.md"
+    printf 'int x = 1;\n' > "$SANDBOX/Source/Core/src/Orphan/Orphan.cpp"
+    _commit "orphan baseline"
+    printf 'int x = 2;\n' > "$SANDBOX/Source/Core/src/Orphan/Orphan.cpp"
+    _commit "change orphan code"
     run bash "$GATE" --diff HEAD~1
     [ "$status" -eq 0 ]
     [[ "$output" != *"WARN"* ]]
@@ -230,5 +233,57 @@ MAP
     _with_config '{"taxonomy_exceptions": []}'
     run bash "$GATE"
     [ "$status" -eq 0 ]
+    [[ "$output" == *"Passed: 1  Failed: 0"* ]]
+}
+
+@test "a vendored AGENTS.md inside a lint exempt zone is not a leaf" {
+    mkdir -p "$SANDBOX/Source/Core/ThirdParty/SomeLib"
+    printf '# Upstream agent notes\n' > "$SANDBOX/Source/Core/ThirdParty/SomeLib/AGENTS.md"
+    _with_config '{}' '{"zones": {"exempt": ["ThirdParty", "build"]}}'
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Passed: 1  Failed: 0"* ]]
+}
+
+@test "without exempt zones the same vendored AGENTS.md is an unregistered leaf (FAIL)" {
+    mkdir -p "$SANDBOX/Source/Core/ThirdParty/SomeLib"
+    printf '# Upstream agent notes\n' > "$SANDBOX/Source/Core/ThirdParty/SomeLib/AGENTS.md"
+    _with_config '{}' '{"zones": {"exempt": []}}'
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Source/Core/ThirdParty/SomeLib/AGENTS.md"* ]]
+}
+
+@test "a leaf path with non-ASCII characters is read unquoted and matched to its registry row" {
+    mkdir -p "$SANDBOX/Source/Plugins/Ünï"
+    printf '# rules\n' > "$SANDBOX/Source/Plugins/Ünï/AGENTS.md"
+    printf '| Unicode | `Source/Plugins/Ünï/AGENTS.md` | — | — |\n' > "$SANDBOX/row.txt"
+    awk 'FNR==NR{row=$0; next} /^\| Tracker/{print; print row; next} {print}' \
+        "$SANDBOX/row.txt" "$SANDBOX/CONTEXT-MAP.md" > "$SANDBOX/map.tmp"
+    mv "$SANDBOX/map.tmp" "$SANDBOX/CONTEXT-MAP.md"
+    rm "$SANDBOX/row.txt"
+    _commit "unicode leaf"
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+}
+
+@test "an unloadable config that names docs.review_checklist FAILs (never silently dropped)" {
+    mkdir -p "$SANDBOX/scripts/dev"
+    cp "$REPO_ROOT/scripts/dev/project-config.sh" "$SANDBOX/scripts/dev/project-config.sh"
+    printf '{"docs": {"review_checklist": "docs/guides/rc.md",}\n' > "$SANDBOX/project.config.json"
+    _commit "malformed config"
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"names docs.review_checklist but could not be loaded"* ]]
+}
+
+@test "an unloadable config without docs.review_checklist only WARNs" {
+    mkdir -p "$SANDBOX/scripts/dev"
+    cp "$REPO_ROOT/scripts/dev/project-config.sh" "$SANDBOX/scripts/dev/project-config.sh"
+    printf '{"docs": {"taxonomy_exceptions": [],}\n' > "$SANDBOX/project.config.json"
+    _commit "malformed config"
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARN — project.config.json not loaded"* ]]
     [[ "$output" == *"Passed: 1  Failed: 0"* ]]
 }

@@ -127,7 +127,7 @@ def collect_anchors(files: list[Path]) -> list[str]:
     return sorted(anchors, key=len, reverse=True)  # Longest first for greedy match.
 
 
-def collect_references(scan_root: Path) -> list[tuple[str, str, int, str]]:
+def collect_references(scan_root: Path, env: dict[str, str] | None = None) -> list[tuple[str, str, int, str]]:
     """Return [(extracted_name, file_path, line_number, path_prefix), ...]."""
     cmd = [
         "git",
@@ -140,7 +140,7 @@ def collect_references(scan_root: Path) -> list[tuple[str, str, int, str]]:
         *EXCLUDE_GLOBS,
     ]
     try:
-        out = subprocess.check_output(cmd, cwd=scan_root, text=True, encoding="utf-8")
+        out = subprocess.check_output(cmd, cwd=scan_root, text=True, encoding="utf-8", env=env)
     except subprocess.CalledProcessError as exc:
         if exc.returncode == 1:
             return []  # No matches.
@@ -174,14 +174,20 @@ def leaf_target(prefix: str, ref_file: str, scan_root: Path, root_contracts: set
     """Return the subsystem leaf a path-qualified reference names, else None.
 
     None means "resolve against the shared anchor set": no path prefix, a path
-    to a root contract, or a path that names no existing file (kept lenient, as
-    before path-qualified references were resolved). The prefix is tried against
-    the scan root, then against the referencing file's own directory.
+    to a root contract, or a path that names no existing file inside the scan
+    root (kept lenient, as before path-qualified references were resolved). A
+    `./` or `../` prefix is relative to the referencing file, so its directory is
+    tried first; any other prefix is repo-relative, so the scan root is.
     """
     if not prefix:
         return None
-    for base in (scan_root, (scan_root / ref_file).parent):
+    root = scan_root.resolve()
+    file_dir = (scan_root / ref_file).parent
+    bases = (file_dir, scan_root) if prefix.startswith(("./", "../")) else (scan_root, file_dir)
+    for base in bases:
         candidate = (base / prefix / "AGENTS.md").resolve()
+        if candidate != root / "AGENTS.md" and root not in candidate.parents:
+            continue  # outside the scanned tree: never this repo's leaf
         if candidate.is_file():
             return None if candidate in root_contracts else candidate
     return None
@@ -212,14 +218,14 @@ def display_path(path: Path, scan_root: Path) -> str:
         return str(path)
 
 
-def run(repo_root: Path, scan_root: Path) -> int:
+def run(repo_root: Path, scan_root: Path, env: dict[str, str] | None = None) -> int:
     anchor_files = shared_anchor_files(repo_root)
     anchors = collect_anchors(anchor_files)
     root_contracts = {
         p.resolve()
         for p in (repo_root / "AGENTS.md", scan_root / "AGENTS.md", scan_root / "agent-layer" / "AGENTS.md")
     }
-    refs = collect_references(scan_root)
+    refs = collect_references(scan_root, env)
 
     # Dedup the references by (target leaf, extracted name) to keep the output
     # compact while preserving one example file:line per broken name.
@@ -279,6 +285,10 @@ def run(repo_root: Path, scan_root: Path) -> int:
 
 def selftest() -> int:
     """Synthetic tree: a passing set of references, then one that must fail."""
+    # Strip every GIT_* variable: a git hook exports GIT_DIR (and friends) into
+    # this process, and git would then init / stage / grep the CALLER's repository
+    # instead of the temp tree.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
         (root / "docs" / "agent-rules").mkdir(parents=True)
@@ -296,18 +306,21 @@ def selftest() -> int:
             f"See Source/Core/src/Ui/AGENTS.md {sec} Docking.\n"
             f"See agent-layer/AGENTS.md {sec} Shared section.\n",
             encoding="utf-8")
-        subprocess.run(["git", "init", "-q", str(root)], check=True)
-        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        # A file-relative reference resolves against the sibling leaf.
+        (root / "Source" / "Core" / "src" / "Ui" / "README.md").write_text(
+            f"See ./AGENTS.md {sec} Grid.\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(root)], check=True, env=env)
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, env=env)
         with contextlib.redirect_stdout(io.StringIO()):
-            clean = run(root, root)
+            clean = run(root, root, env)
         # selftest: asserts-failure — a leaf-qualified reference to a ROOT-only
         # section must fail: it names the leaf, and the leaf has no such heading.
         (root / "docs" / "bad.md").write_text(
             f"See Source/Core/src/Ui/AGENTS.md {sec} Root rules.\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, env=env)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            broken = run(root, root)
+            broken = run(root, root, env)
     if clean != 0:
         print("test-doc-anchors --selftest: FAIL — a consistent tree reported broken references")
         return 1

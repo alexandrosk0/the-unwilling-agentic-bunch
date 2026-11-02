@@ -8,7 +8,8 @@
 #
 # FAIL (exit 1) on any structural breakage:
 #   1. A leaf listed in CONTEXT-MAP.md is missing on disk.
-#   2. An on-disk Source/**/AGENTS.md is absent from CONTEXT-MAP.md.
+#   2. An on-disk leaf AGENTS.md below Source/ (lib/leaf-docs.sh: tracked, outside
+#      the lint exempt zones) is absent from CONTEXT-MAP.md.
 #   3. A leaf invariant bullet is duplicated verbatim in a central checklist:
 #      agents/core/code-review.md, plus the host checklist named by
 #      project.config.json docs.review_checklist when set (central<->leaf drift —
@@ -40,14 +41,13 @@ set -uo pipefail
 _tsd_self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 _tsd_layer="$(cd "$(dirname "$_tsd_self")/../../.." && pwd)"
 unset PC_DOCS_REVIEW_CHECKLIST
+_tsd_config_err=0
 if [ -f "$_tsd_layer/scripts/dev/project-config.sh" ]; then
-    # Full load, not PC_ROOTS_ONLY: check 3 reads docs.review_checklist. A failed
-    # load (no working python, malformed config) still exports the roots and is
-    # reported; check 3 then uses the layer checklist alone.
+    # Full load, not PC_ROOTS_ONLY: check 3 reads docs.review_checklist and the
+    # leaf set reads the lint exempt zones. A failed load (no working python, a
+    # malformed config) still exports the roots; see the policy after fail=0.
     # shellcheck source=scripts/dev/project-config.sh
-    if ! . "$_tsd_layer/scripts/dev/project-config.sh"; then
-        echo "test-subsystem-docs: WARN — project.config.json not loaded; checking against agents/core/code-review.md only." >&2
-    fi
+    . "$_tsd_layer/scripts/dev/project-config.sh" || _tsd_config_err=1
 else
     unset PROJECT_ROOT AGENT_LAYER_ROOT  # no config beside this script (a fixture copy): its own tree, never an inherited root
 fi
@@ -58,6 +58,10 @@ cd "${PROJECT_ROOT:-$_tsd_layer}" || { echo "test-subsystem-docs: cannot cd to $
 # temp registry and assert the REAL detection path FAILS on a known-bad fixture.
 # Defaults are unchanged in every real invocation (no env set) — a test seam, not
 # a logic change. SUBSYS_DOCS_NEGCHECK guards against selftest re-entrancy.
+# shellcheck source=agents/scripts/core/lib/leaf-docs.sh
+. "$_tsd_layer/agents/scripts/core/lib/leaf-docs.sh" \
+  || { echo "test-subsystem-docs: missing $_tsd_layer/agents/scripts/core/lib/leaf-docs.sh" >&2; exit 2; }
+
 MAP="${SUBSYS_DOCS_MAP:-CONTEXT-MAP.md}"
 SRC_GLOB="${SUBSYS_DOCS_SRC_GLOB:-Source}"
 CENTRAL_FILES=("$_tsd_layer/agents/core/code-review.md")
@@ -109,6 +113,18 @@ fi
 fail=0
 warn=0
 
+# A config that could not be loaded must not silently drop a configured host
+# checklist: FAIL when its raw text names docs.review_checklist, else WARN (the
+# layer checklist alone loses nothing that was configured).
+if [[ "$_tsd_config_err" == 1 ]]; then
+  if [[ -f "${PC_CONFIG_FILE:-}" ]] && grep -q '"review_checklist"' "$PC_CONFIG_FILE"; then
+    echo "test-subsystem-docs: FAIL — ${PC_CONFIG_FILE} names docs.review_checklist but could not be loaded; fix it (or the python it needs) so check 3 can read it." >&2
+    fail=1
+  else
+    echo "test-subsystem-docs: WARN — project.config.json not loaded; checking against agents/core/code-review.md only, and no lint exempt zones." >&2
+  fi
+fi
+
 if [[ ! -f "$MAP" ]]; then
   echo "test-subsystem-docs: FAIL — registry $MAP not found" >&2
   exit 1
@@ -132,9 +148,10 @@ while IFS= read -r leaf; do
 done <<< "$registered"
 
 # --- Check 2: every on-disk leaf AGENTS.md is registered.
-# git ls-files = tracked files only (matches the repo's tracked-vs-ignored discipline);
-# the pathspec `*` spans directories, so a leaf at any depth below $SRC_GLOB counts.
-ondisk_agents="$(git ls-files "$SRC_GLOB/*/AGENTS.md" 2>/dev/null | sort -u)"
+# The leaf set is lib/leaf-docs.sh's (tracked AGENTS.md at any depth below
+# $SRC_GLOB, minus the lint exempt zones such as vendored ThirdParty/), the same
+# set setup-harness.sh shims.
+ondisk_agents="$(leaf_agents_files "$SRC_GLOB" | sort -u)"
 while IFS= read -r leaf; do
   [[ -z "$leaf" ]] && continue
   if ! grep -qF "$leaf" <<< "$registered"; then
