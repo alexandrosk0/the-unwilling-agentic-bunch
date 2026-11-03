@@ -281,6 +281,11 @@ for f in "${FILES[@]}"; do
         echo "historical-review-survivors: WARNING — tree lookup for '$f' at $SHA errored; not counting it as superseded." >&2
         at_sha=""
     fi
+    # A pure rename destination (0 added lines) brought nothing of its own, like a
+    # pure deletion: its later removal does not supersede this change.
+    if [ "${RENAME_ADDED[$f]-}" = "0" ]; then
+        at_sha=""
+    fi
     if ! present="$(git ls-tree "$REVIEW_REF" -- "$f" 2>/dev/null)"; then
         echo "historical-review-survivors: WARNING — existence check for '$f' at '$REVIEW_REF' errored; NOT skipping it (possible path-mangling regression — review '$f' manually)." >&2
     elif [ -z "$present" ]; then

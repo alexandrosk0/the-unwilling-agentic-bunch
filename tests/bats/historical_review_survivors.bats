@@ -299,6 +299,21 @@ teardown() {
     ! echo "$output" | grep -q "FULLY SUPERSEDED"
 }
 
+@test "a pure rename whose new path was later deleted is still NOTHING TO ASSESS" {
+    printf 'alpha\nbravo\n' > a.txt
+    git add a.txt
+    git commit -qm "base"
+    git mv a.txt b.txt
+    git commit -qm "A: rename only"
+    A="$(git rev-parse HEAD)"
+    git rm -q b.txt
+    git commit -qm "B: delete the renamed file"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
 @test "a rename with an edit counts only the edited lines" {
     printf 'alpha\nbravo\ncharlie\ndelta\necho\n' > a.txt
     git add a.txt
