@@ -159,7 +159,8 @@ mapfile -t FILES < <(git diff-tree --no-commit-id --name-only -r --root "$SHA")
 # `git blame` follows the rename and credits those lines to the original commit.
 # A pure rename then read FULLY SUPERSEDED, and the ledger reconcile dropped a
 # finding whose code was still there. -z: a rename record is "A<TAB>D<TAB>" then
-# NUL-separated old and new paths.
+# NUL-separated old and new paths. -l0 lifts diff.renameLimit, so a very large
+# commit still detects its renames.
 declare -A RENAME_ADDED=()
 while IFS= read -r -d '' rec; do
     IFS=$'\t' read -r r_add _r_del r_path <<<"$rec"
@@ -168,7 +169,7 @@ while IFS= read -r -d '' rec; do
         IFS= read -r -d '' r_new || break
         RENAME_ADDED["$r_new"]="$r_add"
     fi
-done < <(git diff-tree -M -z --no-commit-id --numstat -r --root "$SHA")
+done < <(git diff-tree -M -l0 -z --no-commit-id --numstat -r --root "$SHA")
 
 emit_header() {
     echo "# Historical-review survivors — $LABEL ($SHORT)"
