@@ -281,29 +281,26 @@ for f in "${FILES[@]}"; do
         echo "historical-review-survivors: WARNING — tree lookup for '$f' at $SHA errored; not counting it as superseded." >&2
         at_sha=""
     fi
-    # A pure rename destination (0 added lines) brought nothing of its own, like a
-    # pure deletion: its later removal does not supersede this change.
-    if [ "${RENAME_ADDED[$f]-}" = "0" ]; then
-        at_sha=""
+    # Reviewable lines this commit added to this path. A binary ("-"), a 0-line
+    # rename destination or a removal-only edit adds none, like a pure deletion:
+    # its later removal or replacement supersedes nothing.
+    numstat="$(git log -1 --format= --numstat "$SHA" -- "$f")"
+    if [ -n "${RENAME_ADDED[$f]+x}" ]; then
+        numstat="$(printf '%s\t0\t%s' "${RENAME_ADDED[$f]}" "$f")"
     fi
+    added="$(printf '%s\n' "$numstat" | awk 'NF>=3 && $1!="-"{s+=$1} END{print s+0}')"
     if ! present="$(git ls-tree "$REVIEW_REF" -- "$f" 2>/dev/null)"; then
         echo "historical-review-survivors: WARNING — existence check for '$f' at '$REVIEW_REF' errored; NOT skipping it (possible path-mangling regression — review '$f' manually)." >&2
     elif [ -z "$present" ]; then
         # Gone since, unless this commit is the one that deleted it (a pure deletion
         # leaves nothing to supersede) or it was a gitlink (no lines to supersede).
-        [ -n "$at_sha" ] && [ "${at_sha%% *}" != "160000" ] && gone_paths=$((gone_paths + 1))
+        [ -n "$at_sha" ] && [ "${at_sha%% *}" != "160000" ] && [ "$added" -gt 0 ] && gone_paths=$((gone_paths + 1))
         continue
     elif [ "${present%% *}" = "160000" ] || [ "${present%% *}" = "040000" ]; then
         # A gitlink or a directory now: neither has lines to blame (`git blame` would
         # exit 128). If this commit wrote a file there, later work replaced it.
-        [ -n "$at_sha" ] && [ "${at_sha%% *}" != "160000" ] && gone_paths=$((gone_paths + 1))
+        [ -n "$at_sha" ] && [ "${at_sha%% *}" != "160000" ] && [ "$added" -gt 0 ] && gone_paths=$((gone_paths + 1))
         continue
-    fi
-
-    # Net lines this commit added to this file (for the supersede ratio).
-    numstat="$(git log -1 --format= --numstat "$SHA" -- "$f")"
-    if [ -n "${RENAME_ADDED[$f]+x}" ]; then
-        numstat="$(printf '%s\t0\t%s' "${RENAME_ADDED[$f]}" "$f")"
     fi
 
     # A BINARY path carries no reviewable lines. numstat reports it as "-  -",
@@ -319,7 +316,6 @@ for f in "${FILES[@]}"; do
         continue
     fi
 
-    added="$(printf '%s\n' "$numstat" | awk 'NF>=3 && $1!="-"{s+=$1} END{print s+0}')"
     total_introduced=$((total_introduced + added))
 
     # Surviving lines: blame the review ref, keep lines still attributed to $SHA.

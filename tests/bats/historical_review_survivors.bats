@@ -314,6 +314,71 @@ teardown() {
     ! echo "$output" | grep -q "FULLY SUPERSEDED"
 }
 
+@test "a binary-only addition later deleted is NOTHING TO ASSESS" {
+    printf 'x\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    printf '\000\001\002\003' > blob.bin
+    git add blob.bin
+    git commit -qm "A: binary only"
+    A="$(git rev-parse HEAD)"
+    git rm -q blob.bin
+    git commit -qm "B: delete the binary"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a binary-only addition later replaced by a directory is NOTHING TO ASSESS" {
+    printf 'x\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    printf '\000\001\002\003' > blob.bin
+    git add blob.bin
+    git commit -qm "A: binary only"
+    A="$(git rev-parse HEAD)"
+    git rm -q blob.bin
+    mkdir blob.bin
+    printf 'y\n' > blob.bin/inner.txt
+    git add blob.bin/inner.txt
+    git commit -qm "B: a directory where the binary was"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a removal-only edit whose file was later deleted is NOTHING TO ASSESS" {
+    printf 'alpha\nbravo\n' > a.txt
+    git add a.txt
+    git commit -qm "base"
+    printf 'alpha\n' > a.txt
+    git commit -qam "A: remove a line"
+    A="$(git rev-parse HEAD)"
+    git rm -q a.txt
+    git commit -qm "B: delete the file"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a binary rename whose new path was later deleted is NOTHING TO ASSESS" {
+    printf '\000\001\002\003' > blob.bin
+    git add blob.bin
+    git commit -qm "base"
+    git mv blob.bin moved.bin
+    git commit -qm "A: rename the binary"
+    A="$(git rev-parse HEAD)"
+    git rm -q moved.bin
+    git commit -qm "B: delete it"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
 @test "a rename with an edit counts only the edited lines" {
     printf 'alpha\nbravo\ncharlie\ndelta\necho\n' > a.txt
     git add a.txt
