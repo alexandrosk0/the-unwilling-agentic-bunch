@@ -351,7 +351,9 @@ _MG_GATE_FILTER_TEMPLATE="$_MG_JQ_DISPOSITION_DEF"'
 # at least 60 s ago. On live heads CR posts its review object a few seconds
 # BEFORE the run completes, but a poll landing between a SUCCESS run and a
 # later review with findings would merge past it, and the poller gets no
-# re-trigger on the review event (the merge-beats-review race, #1332).
+# re-trigger on the review event (the merge-beats-review race, #1332). The
+# date parse sits in try: a jq build without strptime then reads only this
+# signal as not clean instead of aborting the whole filter on every poll.
 | ([$pr.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?
     | select(.__typename == "CheckRun" and .name == "CodeRabbit"
              and ((.checkSuite.app.slug // "") == "coderabbitai"))]
@@ -359,7 +361,7 @@ _MG_GATE_FILTER_TEMPLATE="$_MG_JQ_DISPOSITION_DEF"'
 | (($crrun != null) and (($crrun.status // "") == "COMPLETED")
    and (($crrun.conclusion // "") == "SUCCESS")
    and (($crrun.completedAt // "") as $done
-        | $done != "" and ((now - ($done | fromdateiso8601)) >= 60))) as $crrunclean
+        | $done != "" and ((try (now - ($done | fromdateiso8601)) catch -1) >= 60))) as $crrunclean
 # crRateLimited — CR declined / deferred the review because it hit its rate
 # limit (PR-2 cr-review-skipped-pure-docs-auto-downgrade /
 # cr-rate-limit-code-pr-auto-pause). Distinct from $crreviewskipped (a clean
