@@ -211,3 +211,236 @@ teardown() {
     # ...but the binary never appears as a reviewable file.
     ! echo "$output" | grep -q "=== img.png ==="
 }
+
+@test "a submodule pointer (gitlink) in the commit is skipped, not fatal" {
+    # git blame on a gitlink exits 128 ("no such path"); under pipefail that used
+    # to abort the whole digest for any commit that also moved a submodule
+    # pointer, so its real files were never reviewed.
+    printf 'alpha\nbravo\n' > f.txt
+    git add f.txt
+    git update-index --add --cacheinfo "160000,$(git hash-object -t blob --stdin </dev/null),sub"
+    git commit -qm "A: add source and a submodule pointer"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"=== f.txt ==="* ]]
+    [[ "$output" == *"2/2 introduced line(s) still alive"* ]]
+    [ "$(grep -c "=== sub ===" <<<"$output")" -eq 0 ]
+}
+
+@test "a commit that only moves a submodule pointer is NOTHING TO ASSESS, not superseded" {
+    # Zero introduced lines because nothing reviewable was there must not read as
+    # "every line was since replaced": the ledger reconcile drops a finding on that banner.
+    printf 'alpha\n' > f.txt
+    git add f.txt
+    git commit -qm "base"
+    git update-index --add --cacheinfo "160000,$(git hash-object -t blob --stdin </dev/null),sub"
+    git commit -qm "A: pointer bump only"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a binary-only commit is NOTHING TO ASSESS" {
+    printf 'alpha\n' > f.txt
+    git add f.txt
+    git commit -qm "base"
+    printf '\x00\x01\x02' > blob.bin
+    git add blob.bin
+    git commit -qm "A: binary only"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+}
+
+@test "lines added to a file deleted since are still FULLY SUPERSEDED, not NOTHING TO ASSESS" {
+    printf 'alpha\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    printf 'bravo\n' > gone.txt
+    git add gone.txt
+    git commit -qm "A: add gone.txt"
+    A="$(git rev-parse HEAD)"
+    git rm -q gone.txt
+    git commit -qm "B: delete it"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FULLY SUPERSEDED"* ]]
+    ! echo "$output" | grep -q "NOTHING TO ASSESS"
+}
+
+@test "a commit that only deletes a file is NOTHING TO ASSESS, not superseded" {
+    printf 'alpha\n' > keep.txt
+    printf 'bravo\n' > doomed.txt
+    git add keep.txt doomed.txt
+    git commit -qm "base"
+    git rm -q doomed.txt
+    git commit -qm "A: delete only"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a pure rename is NOTHING TO ASSESS, not superseded (the moved code is still there)" {
+    printf 'alpha\nbravo\ncharlie\ndelta\n' > a.txt
+    git add a.txt
+    git commit -qm "base"
+    git mv a.txt b.txt
+    git commit -qm "A: rename only"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a pure rename whose new path was later deleted is still NOTHING TO ASSESS" {
+    printf 'alpha\nbravo\n' > a.txt
+    git add a.txt
+    git commit -qm "base"
+    git mv a.txt b.txt
+    git commit -qm "A: rename only"
+    A="$(git rev-parse HEAD)"
+    git rm -q b.txt
+    git commit -qm "B: delete the renamed file"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a binary-only addition later deleted is NOTHING TO ASSESS" {
+    printf 'x\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    printf '\000\001\002\003' > blob.bin
+    git add blob.bin
+    git commit -qm "A: binary only"
+    A="$(git rev-parse HEAD)"
+    git rm -q blob.bin
+    git commit -qm "B: delete the binary"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a binary-only addition later replaced by a directory is NOTHING TO ASSESS" {
+    printf 'x\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    printf '\000\001\002\003' > blob.bin
+    git add blob.bin
+    git commit -qm "A: binary only"
+    A="$(git rev-parse HEAD)"
+    git rm -q blob.bin
+    mkdir blob.bin
+    printf 'y\n' > blob.bin/inner.txt
+    git add blob.bin/inner.txt
+    git commit -qm "B: a directory where the binary was"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a removal-only edit whose file was later deleted is NOTHING TO ASSESS" {
+    printf 'alpha\nbravo\n' > a.txt
+    git add a.txt
+    git commit -qm "base"
+    printf 'alpha\n' > a.txt
+    git commit -qam "A: remove a line"
+    A="$(git rev-parse HEAD)"
+    git rm -q a.txt
+    git commit -qm "B: delete the file"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a binary rename whose new path was later deleted is NOTHING TO ASSESS" {
+    printf '\000\001\002\003' > blob.bin
+    git add blob.bin
+    git commit -qm "base"
+    git mv blob.bin moved.bin
+    git commit -qm "A: rename the binary"
+    A="$(git rev-parse HEAD)"
+    git rm -q moved.bin
+    git commit -qm "B: delete it"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a rename with an edit counts only the edited lines" {
+    printf 'alpha\nbravo\ncharlie\ndelta\necho\n' > a.txt
+    git add a.txt
+    git commit -qm "base"
+    git mv a.txt b.txt
+    printf 'alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n' > b.txt
+    git add b.txt
+    git commit -qm "A: rename plus one line"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"~1/1 introduced line(s) still alive"* ]]
+    echo "$output" | grep -q "foxtrot"
+}
+
+@test "a submodule pointer added and later removed is NOTHING TO ASSESS" {
+    printf 'alpha\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    git update-index --add --cacheinfo "160000,$(git hash-object -t blob --stdin </dev/null),sub"
+    git commit -qm "A: add a pointer"
+    A="$(git rev-parse HEAD)"
+    git rm -q --cached sub
+    git commit -qm "B: drop it"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a file later replaced by a directory is FULLY SUPERSEDED, not fatal" {
+    printf 'alpha\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    printf 'bravo\n' > thing
+    git add thing
+    git commit -qm "A: add thing as a file"
+    A="$(git rev-parse HEAD)"
+    git rm -q thing
+    mkdir thing
+    printf 'charlie\n' > thing/inner.txt
+    git add thing/inner.txt
+    git commit -qm "B: thing becomes a directory"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FULLY SUPERSEDED"* ]]
+}
+
+@test "a file later replaced by a submodule pointer is FULLY SUPERSEDED" {
+    printf 'alpha\n' > keep.txt
+    git add keep.txt
+    git commit -qm "base"
+    printf 'bravo\n' > sub
+    git add sub
+    git commit -qm "A: add sub as a file"
+    A="$(git rev-parse HEAD)"
+    git rm -q --cached sub
+    rm sub
+    git update-index --add --cacheinfo "160000,$(git hash-object -t blob --stdin </dev/null),sub"
+    git commit -qm "B: replace it with a pointer"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FULLY SUPERSEDED"* ]]
+    ! echo "$output" | grep -q "NOTHING TO ASSESS"
+}

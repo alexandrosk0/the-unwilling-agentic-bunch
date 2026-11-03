@@ -153,6 +153,24 @@ SUBJECT="$(git log -1 --format='%s' "$SHA")"
 # --root so an initial commit lists its files instead of emitting nothing.
 mapfile -t FILES < <(git diff-tree --no-commit-id --name-only -r --root "$SHA")
 
+# Added-line counts for paths this commit RENAMED, from a rename-aware diff. The
+# per-path `git log --numstat -- <path>` below cannot see a rename (the pathspec
+# hides the old side), so it counts every line of a moved file as added, while
+# `git blame` follows the rename and credits those lines to the original commit.
+# A pure rename then read FULLY SUPERSEDED, and the ledger reconcile dropped a
+# finding whose code was still there. -z: a rename record is "A<TAB>D<TAB>" then
+# NUL-separated old and new paths. -l0 lifts diff.renameLimit, so a very large
+# commit still detects its renames.
+declare -A RENAME_ADDED=()
+while IFS= read -r -d '' rec; do
+    IFS=$'\t' read -r r_add _r_del r_path <<<"$rec"
+    if [ -z "$r_path" ]; then
+        IFS= read -r -d '' _r_old || break
+        IFS= read -r -d '' r_new || break
+        RENAME_ADDED["$r_new"]="$r_add"
+    fi
+done < <(git diff-tree -M -l0 -z --no-commit-id --numstat -r --root "$SHA")
+
 emit_header() {
     echo "# Historical-review survivors — $LABEL ($SHORT)"
     echo "# Subject: $SUBJECT"
@@ -235,6 +253,11 @@ PY
 total_introduced=0
 total_alive=0
 files_with_survivors=0
+# Paths the change touched that are gone at the review ref. Zero gone paths and zero
+# introduced lines means the change added nothing reviewable (gitlinks, binaries, pure
+# deletions, renames),
+# which is not the same as "later work replaced it".
+gone_paths=0
 
 for f in "${FILES[@]}"; do
     # Existence guard against the review ref. Use `ls-tree` (separate <ref> and
@@ -245,15 +268,40 @@ for f in "${FILES[@]}"; do
     # surfaces LOUDLY instead of silently dropping a live file:
     #   nonzero rc      -> the check itself errored: warn, do NOT skip
     #   rc 0 + empty    -> genuinely absent at the ref (deleted/renamed): skip
-    #   rc 0 + nonempty -> present at the ref: review it
-    if ! present="$(git ls-tree --name-only "$REVIEW_REF" -- "$f" 2>/dev/null)"; then
+    #   rc 0 + nonempty -> present at the ref: review it, unless it is a gitlink
+    # A gitlink (mode 160000, a submodule pointer) has no lines: `git blame` on it
+    # exits 128 ("no such path"), and under pipefail that aborted the whole
+    # digest for any PR that also moved a submodule pointer. Skip it, like a
+    # binary path; the pointer move itself is the submodule repo's history.
+    # The path's entry in this commit's own tree (after the change), for the two
+    # "gone since" checks below. A failed lookup warns and reads as absent, which
+    # counts nothing as gone: the verdict then stays OPEN, the safe side.
+    at_sha=""
+    if ! at_sha="$(git ls-tree "$SHA" -- "$f" 2>/dev/null)"; then
+        echo "historical-review-survivors: WARNING — tree lookup for '$f' at $SHA errored; not counting it as superseded." >&2
+        at_sha=""
+    fi
+    # Reviewable lines this commit added to this path. A binary ("-"), a 0-line
+    # rename destination or a removal-only edit adds none, like a pure deletion:
+    # its later removal or replacement supersedes nothing.
+    numstat="$(git log -1 --format= --numstat "$SHA" -- "$f")"
+    if [ -n "${RENAME_ADDED[$f]+x}" ]; then
+        numstat="$(printf '%s\t0\t%s' "${RENAME_ADDED[$f]}" "$f")"
+    fi
+    added="$(printf '%s\n' "$numstat" | awk 'NF>=3 && $1!="-"{s+=$1} END{print s+0}')"
+    if ! present="$(git ls-tree "$REVIEW_REF" -- "$f" 2>/dev/null)"; then
         echo "historical-review-survivors: WARNING — existence check for '$f' at '$REVIEW_REF' errored; NOT skipping it (possible path-mangling regression — review '$f' manually)." >&2
     elif [ -z "$present" ]; then
+        # Gone since, unless this commit is the one that deleted it (a pure deletion
+        # leaves nothing to supersede) or it was a gitlink (no lines to supersede).
+        [ -n "$at_sha" ] && [ "${at_sha%% *}" != "160000" ] && [ "$added" -gt 0 ] && gone_paths=$((gone_paths + 1))
+        continue
+    elif [ "${present%% *}" = "160000" ] || [ "${present%% *}" = "040000" ]; then
+        # A gitlink or a directory now: neither has lines to blame (`git blame` would
+        # exit 128). If this commit wrote a file there, later work replaced it.
+        [ -n "$at_sha" ] && [ "${at_sha%% *}" != "160000" ] && [ "$added" -gt 0 ] && gone_paths=$((gone_paths + 1))
         continue
     fi
-
-    # Net lines this commit added to this file (for the supersede ratio).
-    numstat="$(git log -1 --format= --numstat "$SHA" -- "$f")"
 
     # A BINARY path carries no reviewable lines. numstat reports it as "-  -",
     # so it already contributed 0 to `added` — but `git blame` still emits a
@@ -268,7 +316,6 @@ for f in "${FILES[@]}"; do
         continue
     fi
 
-    added="$(printf '%s\n' "$numstat" | awk 'NF>=3 && $1!="-"{s+=$1} END{print s+0}')"
     total_introduced=$((total_introduced + added))
 
     # Surviving lines: blame the review ref, keep lines still attributed to $SHA.
@@ -289,6 +336,11 @@ superseded=$((total_introduced - total_alive))
 [ "$superseded" -lt 0 ] && superseded=0
 echo "# Summary: $files_with_survivors file(s) with survivors; ~$total_alive/$total_introduced introduced line(s) still alive (~$superseded superseded)."
 echo "#"
+if [ "$files_with_survivors" -eq 0 ] && [ "$total_introduced" -eq 0 ] && [ "$gone_paths" -eq 0 ]; then
+    echo "# NOTHING TO ASSESS — this change added no reviewable lines (submodule"
+    echo "# pointers, binaries, pure deletions or renames). It is not superseded."
+    exit 0
+fi
 if [ "$files_with_survivors" -eq 0 ]; then
     echo "# FULLY SUPERSEDED — every line this change introduced has since been"
     echo "# modified or removed. Nothing to review."
