@@ -153,6 +153,23 @@ SUBJECT="$(git log -1 --format='%s' "$SHA")"
 # --root so an initial commit lists its files instead of emitting nothing.
 mapfile -t FILES < <(git diff-tree --no-commit-id --name-only -r --root "$SHA")
 
+# Added-line counts for paths this commit RENAMED, from a rename-aware diff. The
+# per-path `git log --numstat -- <path>` below cannot see a rename (the pathspec
+# hides the old side), so it counts every line of a moved file as added, while
+# `git blame` follows the rename and credits those lines to the original commit.
+# A pure rename then read FULLY SUPERSEDED, and the ledger reconcile dropped a
+# finding whose code was still there. -z: a rename record is "A<TAB>D<TAB>" then
+# NUL-separated old and new paths.
+declare -A RENAME_ADDED=()
+while IFS= read -r -d '' rec; do
+    IFS=$'\t' read -r r_add _r_del r_path <<<"$rec"
+    if [ -z "$r_path" ]; then
+        IFS= read -r -d '' _r_old || break
+        IFS= read -r -d '' r_new || break
+        RENAME_ADDED["$r_new"]="$r_add"
+    fi
+done < <(git diff-tree -M -z --no-commit-id --numstat -r --root "$SHA")
+
 emit_header() {
     echo "# Historical-review survivors — $LABEL ($SHORT)"
     echo "# Subject: $SUBJECT"
@@ -279,6 +296,9 @@ for f in "${FILES[@]}"; do
 
     # Net lines this commit added to this file (for the supersede ratio).
     numstat="$(git log -1 --format= --numstat "$SHA" -- "$f")"
+    if [ -n "${RENAME_ADDED[$f]+x}" ]; then
+        numstat="$(printf '%s\t0\t%s' "${RENAME_ADDED[$f]}" "$f")"
+    fi
 
     # A BINARY path carries no reviewable lines. numstat reports it as "-  -",
     # so it already contributed 0 to `added` — but `git blame` still emits a

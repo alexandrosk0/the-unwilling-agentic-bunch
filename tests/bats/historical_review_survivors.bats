@@ -286,6 +286,34 @@ teardown() {
     ! echo "$output" | grep -q "FULLY SUPERSEDED"
 }
 
+@test "a pure rename is NOTHING TO ASSESS, not superseded (the moved code is still there)" {
+    printf 'alpha\nbravo\ncharlie\ndelta\n' > a.txt
+    git add a.txt
+    git commit -qm "base"
+    git mv a.txt b.txt
+    git commit -qm "A: rename only"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NOTHING TO ASSESS"* ]]
+    ! echo "$output" | grep -q "FULLY SUPERSEDED"
+}
+
+@test "a rename with an edit counts only the edited lines" {
+    printf 'alpha\nbravo\ncharlie\ndelta\necho\n' > a.txt
+    git add a.txt
+    git commit -qm "base"
+    git mv a.txt b.txt
+    printf 'alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n' > b.txt
+    git add b.txt
+    git commit -qm "A: rename plus one line"
+    A="$(git rev-parse HEAD)"
+    run bash "$SCRIPT" "$A" --context 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"~1/1 introduced line(s) still alive"* ]]
+    echo "$output" | grep -q "foxtrot"
+}
+
 @test "a submodule pointer added and later removed is NOTHING TO ASSESS" {
     printf 'alpha\n' > keep.txt
     git add keep.txt
