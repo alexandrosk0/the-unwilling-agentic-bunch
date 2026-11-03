@@ -10,7 +10,9 @@
 # asserts on CODE (comments stripped), across the whole file:
 #   - exactly one `SubprocessCapture::Run(` call,
 #   - at least one `cfg.P4RunOverride` consult,
-#   - no other process-spawn primitive (`system(`, `popen(`, `_popen(`, `CreateProcess`).
+#   - no other process-spawn primitive: the C runtime (`system`, `popen`, the `exec*` family
+#     and their `_`/`_w` variants, `_spawn*`), `posix_spawn[p]`, and the Windows launchers
+#     (`CreateProcess*`, `ShellExecute*`, `WinExec`).
 # A count has no single line to anchor to, so the (rule, basename, hash) delta gate cannot see this
 # invariant: deleting the consult adds no new triple. It therefore runs as an absolute whole-tree
 # check, like no-glfw-in-core-headers. The implementation missing while its header
@@ -27,6 +29,9 @@
 P4_SPAWN_RULES=(p4-single-spawn)
 P4_SPAWN_IMPL="Source/Core/src/P4Annotate.cpp"
 P4_SPAWN_HEADER="Source/Core/include/P4Annotate.h"
+# Any process-spawn call other than SubprocessCapture::Run. The leading class keeps a longer
+# identifier (`my_system(`, `RunSystem(`) from matching.
+P4_SPAWN_PRIMITIVE_RE='(^|[^A-Za-z0-9_])(_?w?system|_?w?popen|_?w?exec[lv]p?e?|_w?spawn[lv]p?e?|posix_spawnp?|WinExec)[[:space:]]*\(|(CreateProcess|ShellExecute)[A-Za-z]*[[:space:]]*\('
 
 p4_spawn_strip_comments() {
     # $1 = a C++ file. Prints it line for line (numbering preserved) with `/* ... */` (multi-line)
@@ -73,7 +78,7 @@ scan_p4_single_spawn_file() {
     if [ "$override_count" -lt 1 ]; then
         printf 'p4-single-spawn\t%s:1\tcfg.P4RunOverride consults=0 (want >= 1)\n' "$f"
     fi
-    spawn_lines="$(printf '%s\n' "$code" | grep -nE '(^|[^A-Za-z0-9_])(std::)?(system|_?popen)[[:space:]]*\(|CreateProcess[AW]?[[:space:]]*\(' || true)"
+    spawn_lines="$(printf '%s\n' "$code" | grep -nE "$P4_SPAWN_PRIMITIVE_RE" || true)"
     if [ -n "$spawn_lines" ]; then
         local ln
         while IFS= read -r ln; do

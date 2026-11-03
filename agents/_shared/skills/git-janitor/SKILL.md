@@ -12,7 +12,7 @@ triggers:
   - worktree cleanup
   - git maintenance
   - tidy up
-version: 7
+version: 8
 ---
 
 # git-janitor
@@ -66,7 +66,7 @@ For each authorised open PR targeting `develop`, in **dependency order** (oldest
 1. **Verify merge state** with REFERENCE.md § Poll-until-stable. Require `MERGEABLE` + `CLEAN`; `CONFLICTING` → halt (the user resolves). `UNKNOWN` is transient, but `UNKNOWN` sustained for 20 s is itself halt-worthy (repo migration, rate limit, replication outage).
 2. **Best-effort draft → ready** (`gh_pr_ready_idempotent`) so a review bot that skips drafts reviews the PR. Non-blocking; the poll retries the flip. Return code 6 (unknown failure) → surface the error, do not merge.
 3. **Run the merge gates** unless `SKIP_MERGE_GATES=true` was set at session start: `MERGE_GATES_FLIP_READY=true poll_merge_gates`, then map the return code with the table below. Never fall through to a merge on an unexpected code.
-4. **Merge through `safe-merge.sh`** (REFERENCE.md § Merge and ledger row). It re-runs the full gate poll, arms `gh pr merge --squash --auto` bound to the gated head, waits for the merge and appends the merge-snapshot row (actor `orchestrator-automerge`). Never a bare `gh pr merge --auto` and never a direct REST `PUT …/merge`: both skip the review-bot, user-comment and Bugbot gates. Confirm the ledger row exists before moving on.
+4. **Merge through `safe-merge.sh`** (REFERENCE.md § Merge and ledger row). It re-runs the full gate poll, arms `gh pr merge --squash --auto` bound to the gated head, waits for the merge and appends the merge-snapshot row (actor `orchestrator-automerge`); the janitor then waits for `MERGED` on a bounded budget and HALTs when it does not come. Never a bare `gh pr merge --auto` and never a direct REST `PUT …/merge`: both skip the review-bot, user-comment and Bugbot gates. Confirm the ledger row exists before moving on.
 5. **Delete the remote branch** after the protected-branch guards (REFERENCE.md § Protected-branch guards).
 6. **Append to the plan revision** when the PR shipped a slice of `docs/plans/active/<slug>.md`: `- <sha-short> · <PR-title>` under § Implementation log, on a fresh branch + PR (or batched into the closeout PR).
 7. **Re-check the next PR's mergeability** — merging A can flip B to `CONFLICTING`.
@@ -97,7 +97,7 @@ The options mirror the **Halt prompts (per return code)** table in [`merge-gates
 | 8 | Required run cancelled while pending | Rerun the named run(s) (`gh run rerun <id>` from the BLOCK output), then re-poll · Abandon — **no skip**, same reason as 7; a check fed by the PR body or title needs the body edited instead |
 | other | Unexpected | HALT |
 
-The user chooses a skip; the janitor never picks it on its own, also not under `governance.auto_merge: on`. A skip logs `WARN: user skipped gates: code=<rc>`, runs `safe-merge.sh` with `SKIP_MERGE_GATES=true` scoped to that one PR, and is listed in § Mutations applied: the ledger row `safe-merge.sh` writes records `GATES_PASSED` either way, so the report is the record of the skip. Executable form: REFERENCE.md § Merge-gate return codes.
+The user chooses a skip; the janitor never picks it on its own, also not under `governance.auto_merge: on`. A skip logs `WARN: user skipped gates: code=<rc>`, runs `safe-merge.sh` with `SKIP_MERGE_GATES=true` scoped to that one PR, and is listed in § Mutations applied. A skip bypasses only the poller: GitHub auto-merge still waits on a red or pending branch-protection required check, so the bounded wait HALTs there — surface it to the user (`safe-admin-merge.sh` only for a stale-BLOCKED PR whose checks are all green). The ledger row `safe-merge.sh` writes records `GATES_PASSED` either way, so the report is the record of the skip. Executable form: REFERENCE.md § Merge-gate return codes.
 
 ## Regression gate
 

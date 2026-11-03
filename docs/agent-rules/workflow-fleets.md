@@ -24,7 +24,7 @@ Reach for a Workflow when the *structure* of the work (how it fans out, what ver
 
 Default wide fan-out is restricted to agents that touch no files, so any number run concurrently with **zero write-set collision**, no worktree, no lock:
 
-- `architect` · `code-review` · `security-review` — each declares `read-only: true`.
+- `architect` · `code-review` · `security-review` — each declares `read-only: true`. `code-review` still writes two gitignored gate files (`.review-findings.json`, `.review-ack`) on a staged or branch-diff gate review, so every fan-out leg's prompt says it is **not a gate review** — do not write `.review-findings.json`, do not record a review ack; N legs over one branch would otherwise stamp the same diff fingerprint with partial counts, last writer wins.
 - Built-in `Explore` — read-only by its tool set; the default reader for a survey, locate or code-reading sweep.
 - Built-in `general-purpose` — only with a prompt that confines it to reading; it holds write tools, so prefer `Explore` and treat an edit by it as a write fan-out (Boundary 1).
 
@@ -53,7 +53,7 @@ Canonical home is tracked `agents/_shared/workflows/*.js` (NOT `.claude/workflow
 |---|---|---|---|
 | `pre-merge-review` | `_shared` | parallel-barrier `code-review` + `security-review` → judge `agent()` (schema-forced) → one ranked deduped verdict + advisory verifier scores | pre-merge review of a PR / local branch diff. `args = {pr: N}` / `{base: 'origin/develop'}` / no-arg = local diff vs `origin/develop` |
 | `subsystem-invariant-audit` | `_shared` | discover leaf-AGENTS.md zones at runtime (delegated to a discovery agent — the JS runtime has no shell) → one read-only `code-review` agent per zone vs ONLY that leaf's rules → aggregate into one ranked drift report | drift audit of each subsystem against its own leaf-AGENTS.md invariants. `args = {}` (all zones) / `{zones: [...]}` (named dirs). Portable: zero project literal in the `.js` |
-| `historical-review-sweep` | `project` | fan-out: one `code-review` agent per merged PR over its survivor digest (`historical-review-survivors.sh`) → severity-tagged findings, aggregated | historical code-review of a merged-PR batch. `args = [<PR numbers>]` (real JSON array, required). Pairs with the `historical-code-review` skill + ledger |
+| `historical-review-sweep` | `project` | fan-out: one `code-review` agent per merged PR over its survivor digest (`historical-review-survivors.sh`) → severity-tagged findings, aggregated | historical code-review of a merged-PR batch. `args = [<PR numbers>]` (real JSON array, required). Pairs with the [`historical-code-review`](../../agents/_shared/skills/historical-code-review/SKILL.md) skill + ledger |
 
 The `.js` is the single source of truth; this doc excerpts it, never re-copies the body. The judge-after-barrier shape:
 

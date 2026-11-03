@@ -86,6 +86,34 @@ GOOD='bool P4RunCommand(const Cfg& cfg) {\n    if (cfg.P4RunOverride) {\n       
     [[ "$output" == *"p4-single-spawn"*"P4Annotate.cpp:9"*"second spawn primitive"* ]]
 }
 
+@test "a wide-char CRT spawn (_wpopen) fails" {
+    _fixture "$GOOD"'#if defined(_WIN32)\nFILE* Legacy() {\n    return _wpopen(L"p4 info", L"r");\n}\n#endif\n'
+    _scan
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"p4-single-spawn"*"P4Annotate.cpp:10"*"second spawn primitive"* ]]
+}
+
+@test "a Windows shell launch (ShellExecuteW) fails" {
+    _fixture "$GOOD"'void OpenP4() {\n    ShellExecuteW(nullptr, nullptr, L"p4.exe", L"sync", nullptr, SW_HIDE);\n}\n'
+    _scan
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"p4-single-spawn"*"P4Annotate.cpp:9"*"second spawn primitive"* ]]
+}
+
+@test "the exec and posix_spawn families fail, one finding per line" {
+    _fixture "$GOOD"'void Legacy(char* const* argv, pid_t* pid) {\n    execvp("p4", argv);\n    posix_spawnp(pid, "p4", nullptr, nullptr, argv, environ);\n    _wsystem(L"p4 sync");\n}\n'
+    _scan
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"P4Annotate.cpp:9"*"P4Annotate.cpp:10"*"P4Annotate.cpp:11"* ]]
+}
+
+@test "a longer identifier ending in a spawn name does not fail" {
+    _fixture "$GOOD"'int ParseSystem(int x) { return x; }\nint Run_popen(int x) { return ParseSystem(x); }\n'
+    _scan
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 @test "a SMATCHET_DEVIATION(rule=p4-single-spawn) anywhere in the file escapes" {
     _fixture '// SMATCHET_DEVIATION(rule=p4-single-spawn; reason=test; owner=x; revisit=2099-01-01)\nbool A() {\n    return SubprocessCapture::Run(a).has_value() && SubprocessCapture::Run(b).has_value();\n}\n'
     _scan

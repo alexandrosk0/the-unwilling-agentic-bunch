@@ -424,8 +424,14 @@ def cmd_post_comment(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # The map is HOST data (it names product paths), so it lives in the project tree,
 # not in this layer: <project root>/docs/area-map.json. The project root is the
-# superproject when this layer is mounted as a submodule, else this layer's own
-# tree, which has no map (routing then falls back to the skill's generic rows).
+# PROJECT_ROOT that scripts/dev/project-config.sh resolves (roots-only), the same
+# ladder sync-issue-labels.sh reads the map through: SMATCHET_PROJECT_CONFIG, the
+# superproject when this layer is a submodule, else this layer's own tree, which
+# has no map (routing then falls back to the skill's generic rows); a caller's
+# PROJECT_ROOT counts when it names that tree or SMATCHET_PROJECT_ROOT_OVERRIDE=1.
+# Without project-config.sh beside this script (a fixture copy) the root is its
+# own tree; without a runnable bash (or a root python cannot open), the
+# superproject probe alone decides.
 # AREA_MAP_FILE names another map (bats fixtures). Doc paths resolve against the
 # directory above the map's own directory — the project root for docs/area-map.json.
 AREA_MAP_REL = Path("docs") / "area-map.json"
@@ -436,8 +442,36 @@ def _layer_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+# Sources project-config.sh roots-only and prints PROJECT_ROOT, as a mixed-form
+# Windows path under Git Bash (cygpath) so a native python can open it.
+_ROOTS_SNIPPET = (
+    'PC_ROOTS_ONLY=1 . "$1" || exit 1; '
+    'if command -v cygpath >/dev/null 2>&1; then cygpath -m "${PROJECT_ROOT:-}"; '
+    'else printf %s "${PROJECT_ROOT:-}"; fi'
+)
+
+
 def _project_root() -> Path:
     layer = _layer_root()
+    config_sh = layer / "scripts" / "dev" / "project-config.sh"
+    if not config_sh.is_file():
+        return layer
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", _ROOTS_SNIPPET, "_", config_sh.as_posix()],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)  # project-config.sh's WARN on an ignored PROJECT_ROOT
+        resolved = proc.stdout.strip() if proc.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        resolved = ""
+    if resolved and Path(resolved).is_dir():
+        return Path(resolved)
     try:
         out = subprocess.run(
             ["git", "-C", str(layer), "rev-parse", "--show-superproject-working-tree"],

@@ -4,7 +4,9 @@
 // write-set collision, no worktree, no lock) → a judge stage (plain `agent()`,
 // default model, schema-forced) collapsing the two severity-tagged punch-lists
 // into ONE ranked, deduped verdict plus advisory verifier scores. Concurrency 2
-// (under the Opus cap). Touches no files; never reaches the gated ship-loop tail
+// (under the Opus cap). Touches no files — the code-review leg is told it is not
+// a gate review, so it skips .review-findings.json and the review ack; the gate
+// review stays a direct code-review spawn. Never reaches the gated ship-loop tail
 // (the orchestrator acts on the verdict). See docs/agent-rules/workflow-fleets.md.
 //
 // Discovery: linked into the gitignored .claude/workflows/ by setup-harness.sh,
@@ -140,7 +142,9 @@ const reviewPrompt = (lens) =>
   (target.kind === 'pr'
     ? 'Target: GitHub PR #' + target.ref + ' (use gh to fetch the diff). '
     : 'Target: diff the current working branch against ' + target.ref + '. ') +
-  'Read-only — do NOT edit any files; discover via semantic search / code-graph ' +
+  'Read-only — do NOT edit any files. This is NOT a gate review: do NOT write ' +
+  '.review-findings.json and do NOT record a review ack (review-ack.sh / pre-ship.sh ' +
+  '--ack-review) — skip your gate-artifact steps. Discover via semantic search / code-graph ' +
   'queries first, falling back to Grep/Glob. Return a severity-tagged ' +
   'punch list: each finding = severity (CRITICAL/HIGH/MEDIUM/LOW), file (path:line when ' +
   'known), category, a one-line title, detail, and a suggested_fix. Empty findings is a ' +

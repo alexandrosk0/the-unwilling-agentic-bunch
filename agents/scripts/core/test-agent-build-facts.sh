@@ -6,15 +6,19 @@
 # prompt cited ninja-asan; review prompts cited "MinGW UCRT").
 #
 # Scanned: every *.md under agents/ in the layer (agent prompts + skills) and in
-# the host (project agents), plus docs/agent-rules/build.md. The other rule docs
-# stay out of scope: they cite retired presets as history, which is not a fact
-# an agent acts on.
+# the host, docs/agent-rules/build.md, and the host docs a working agent loads
+# for build facts: every leaf AGENTS.md (lib/leaf-docs.sh), BUILD.md and
+# docs/guides/*.md. The other rule docs stay out of scope: they cite retired
+# presets as history, which is not a fact an agent acts on.
 #
 # Checks:
 #   1. Every `ninja-*` preset token in the scanned docs resolves to a real
 #      `"name"` in the host's CMakePresets.json. A brace form
 #      (`ninja-test-{msvc,clang}`) is expanded first; a family prefix
-#      (`ninja-test-*`) must match at least one preset.
+#      (`ninja-test-*`) must match at least one preset. A historical mention is
+#      exempt when the word "retired" follows the token in the same sentence
+#      with no other preset token in between ("the `ninja-foo` preset is
+#      retired", "`ninja-foo` (retired)"); each retired token needs its own.
 #   2. No retired-build-toolchain phrase ("MinGW UCRT") in the scanned docs.
 #      (MSYS2-as-lint-tooling / MinGW-GCC-sanitizer-runtime mentions stay
 #      allowed — only the retired C++ *build-target* phrasing is banned.)
@@ -25,17 +29,20 @@
 set -euo pipefail
 
 # Two trees: the layer (this script's own; agent prompts, skills, build.md) and
-# the host (CMakePresets.json, agents/project/). project-config.sh resolves the
-# host — the superproject when the layer is a submodule. One tree when they are
-# the same checkout.
+# the host (CMakePresets.json, leaf docs, BUILD.md, guides). project-config.sh
+# resolves the host — the superproject when the layer is a submodule. One tree
+# when they are the same checkout. Full load, not PC_ROOTS_ONLY: the leaf set
+# reads the lint exempt zones; a failed load still exports the roots.
 LAYER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 if [ -f "$LAYER/scripts/dev/project-config.sh" ]; then
   # shellcheck source=scripts/dev/project-config.sh
-  PC_ROOTS_ONLY=1 . "$LAYER/scripts/dev/project-config.sh" 2>/dev/null || true
+  . "$LAYER/scripts/dev/project-config.sh" 2>/dev/null || true
 else
   unset PROJECT_ROOT AGENT_LAYER_ROOT  # no config beside this script (a fixture copy): its own tree, never an inherited root
 fi
 HOST="${PROJECT_ROOT:-$LAYER}"
+# shellcheck source=agents/scripts/core/lib/leaf-docs.sh
+. "$LAYER/agents/scripts/core/lib/leaf-docs.sh"
 
 PRESETS_JSON="$HOST/CMakePresets.json"
 
@@ -45,15 +52,30 @@ FAILED_CHECKS=()
 check_pass() { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$1"; }
 check_fail() { FAIL=$((FAIL + 1)); FAILED_CHECKS+=("$1"); printf '  FAIL  %s\n' "$1"; }
 
-# All scanned markdown (agent prompts, skills, build.md; READMEs excluded),
-# one path per line.
+# All scanned markdown (agent prompts, skills, build.md, host leaf docs,
+# BUILD.md, guides; READMEs under agents/ excluded), one path per line.
 agent_md() {
-  { find "$LAYER/agents" -name '*.md' ! -name 'README.md' 2>/dev/null
+  local leaf
+  { find "$LAYER/agents" -name '*.md' ! -name 'README.md' 2>/dev/null || true
     if [[ "$HOST" != "$LAYER" ]]; then
-      find "$HOST/agents" -name '*.md' ! -name 'README.md' 2>/dev/null
+      find "$HOST/agents" -name '*.md' ! -name 'README.md' 2>/dev/null || true
     fi
-    [[ -f "$LAYER/docs/agent-rules/build.md" ]] && printf '%s\n' "$LAYER/docs/agent-rules/build.md"
+    if [[ -f "$LAYER/docs/agent-rules/build.md" ]]; then printf '%s\n' "$LAYER/docs/agent-rules/build.md"; fi
+    if [[ -f "$HOST/BUILD.md" ]]; then printf '%s\n' "$HOST/BUILD.md"; fi
+    find "$HOST/docs/guides" -maxdepth 1 -name '*.md' 2>/dev/null || true
+    while IFS= read -r leaf; do
+      if [[ -n "$leaf" && -f "$HOST/$leaf" ]]; then printf '%s\n' "$HOST/$leaf"; fi
+    done < <(cd "$HOST" && leaf_agents_files)
   } | sort -u
+}
+
+# rel <path> — <path> relative to the tree it belongs to, for reporting.
+rel() {
+  case "$1" in
+    "$LAYER"/*) printf '%s\n' "${1#"$LAYER"/}" ;;
+    "$HOST"/*) printf '%s\n' "${1#"$HOST"/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
 }
 
 # expand_braces <token> — print each expansion of the brace groups in <token>
@@ -71,18 +93,34 @@ expand_braces() {
 }
 
 # preset_tokens <file> — the ninja-* preset tokens <file> cites, brace forms
-# expanded; a token ending in `-` is a family prefix (`ninja-test-*`).
+# expanded; a token ending in `-` is a family prefix (`ninja-test-*`). A token
+# is skipped as historical when "retired" follows it before the next preset
+# token or the end of its sentence (paragraphs are joined, so a sentence may
+# wrap lines).
 preset_tokens() {
   local raw
   while IFS= read -r raw; do
     expand_braces "$raw"
-  done < <(grep -oE 'ninja-[a-z0-9-]*(\{[a-z0-9,-]+\}[a-z0-9-]*)*' "$1" 2>/dev/null || true)
+  done < <(awk 'BEGIN { RS = "" }
+    {
+      gsub(/\n/, " ")
+      text = $0
+      while (match(text, /ninja-[a-z0-9-]*(\{[a-z0-9,-]+\}[a-z0-9-]*)*/)) {
+        tok = substr(text, RSTART, RLENGTH)
+        text = substr(text, RSTART + RLENGTH)
+        win = text
+        n = index(win, "ninja-")
+        if (n > 0) win = substr(win, 1, n - 1)
+        if (match(win, /[.!?]([ \t]|$)/)) win = substr(win, 1, RSTART)
+        if (tolower(win) !~ /retired/) print tok
+      }
+    }' "$1" 2>/dev/null || true)
 }
 
 # -------------------------------------------------------------------------
 # 1. ninja-* preset tokens resolve to a real CMakePresets.json preset name.
 # -------------------------------------------------------------------------
-echo "[1/2] ninja-* preset tokens in agent prompts, skills and build.md resolve to CMakePresets.json"
+echo "[1/2] ninja-* preset tokens in agent-facing docs resolve to CMakePresets.json"
 
 # Valid preset names (the ninja-* ones; hidden _smatchet-* presets never match
 # the ninja- prefix so they cannot collide).
@@ -103,7 +141,7 @@ else
       elif [[ "$valid_presets" == *" $tok "* ]]; then
         continue  # whole-word membership in the valid set
       fi
-      echo "    ${f#"$LAYER"/}: unknown preset '$tok'"
+      echo "    $(rel "$f"): unknown preset '$tok'"
       dangling=$((dangling + 1))
     done < <(preset_tokens "$f" | sort -u)
   done < <(agent_md)
@@ -118,10 +156,10 @@ fi
 # 2. No retired "MinGW UCRT" build-target citation in agent prompts.
 # -------------------------------------------------------------------------
 echo
-echo "[2/2] No retired-build-toolchain phrase 'MinGW UCRT' in agent prompts, skills and build.md"
+echo "[2/2] No retired-build-toolchain phrase 'MinGW UCRT' in agent-facing docs"
 retired_hits=""
 while IFS= read -r f; do
-  [[ -n "$f" ]] && grep -qF 'MinGW UCRT' "$f" 2>/dev/null && retired_hits+="${f#"$LAYER"/}"$'\n'
+  [[ -n "$f" ]] && grep -qF 'MinGW UCRT' "$f" 2>/dev/null && retired_hits+="$(rel "$f")"$'\n'
 done < <(agent_md)
 if [[ -z "$retired_hits" ]]; then
   check_pass "no 'MinGW UCRT' build-target citation (target is MSVC + Clang)"

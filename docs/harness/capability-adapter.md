@@ -21,7 +21,7 @@ Trigger: **mapping an agent's capability tags to a specific harness's tools** (p
 
 ## Harness notes
 
-- **Agents vs skills.** The layer ships three spawnable agents (`architect`, `code-review`, `security-review` in `agents/core/`); every other procedure is a skill (`agents/_shared/skills/<name>/SKILL.md`) that the main thread loads. Only Claude Code auto-discovers skills; Codex, Cursor, pi and generic harnesses reach each one through its row in the on-demand table in `AGENTS.md` § Project rules.
+- **Agents vs skills.** The layer ships three spawnable agents (`architect`, `code-review`, `security-review` in `agents/core/`); every other procedure is a skill (`agents/_shared/skills/<name>/SKILL.md`) that the main thread loads. Only Claude Code auto-discovers skills; Codex, Cursor, pi and generic harnesses reach each one through a path link: its row in the on-demand table in `AGENTS.md` § Project rules, or a link from a doc that `AGENTS.md` routes to ([`AGENT-VS-SKILL.md`](../agent-rules/AGENT-VS-SKILL.md)).
 - **Claude Code** discovers agents at `.claude/agents/` — a junction into the canonical `agents/` tree created by `bash agents/scripts/core/setup-harness.sh claude-code` — and skills at `.claude/skills/` (one link per skill). Edits to `agents/*.md` and skills are visible immediately; no sync step.
 - **Codex / OpenAI Agents** reads `AGENTS.md` per the [agents.md spec](https://agents.md/). Discover individual agents at `agents/{core,project}/*.md`; `setup-harness codex` also generates `.codex/agents/*.toml` custom agents from those canonical prompts.
 - **Cursor / Aider / generic** — human-driven. Agent and skill files are reference docs the user pastes or invokes manually.

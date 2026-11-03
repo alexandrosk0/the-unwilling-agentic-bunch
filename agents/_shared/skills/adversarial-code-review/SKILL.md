@@ -1,6 +1,6 @@
 ---
 name: adversarial-code-review
-version: 2
+version: 3
 description: Adversarial code review of a diff or PR to surface real bugs the author would actually want to fix, with a high bar and no theater. Use when the user asks to "review this", "review the diff", "review my changes", "review this PR", "any bugs in this?", "adversarial review", "tear this apart", "code review", or similar. Also use proactively before opening a PR or after a substantial set of changes. Also the reviewer procedure for a work item's post-implementation review gate (run-review.sh --gate post) — see § Panel leg.
 ---
 
@@ -65,6 +65,12 @@ Prioritize:
 - Performance regressions: new work in hot loops, synchronous I/O on UI paths, accidental O(n^2), unnecessary allocations in tight paths.
 - Test deception: tests asserting the implementation rather than behavior, snapshots masking wrong output, missing regression coverage for the stated fix.
 - Build and packaging gaps: new files not included, platform-specific includes leaking into shared code, generated metadata not updated.
+
+Three change-shape lenses apply to every diff:
+
+- **Fix-scope integrity — what did this diff take away?** A fix can resolve the reported bug and still drop other behaviour of the code it touches. For every hunk that changes control flow, error handling or a pipe / redirect, list what the code did before (exit-status propagation, logging, timeout and cancellation semantics, all-or-nothing vs partial results) and confirm each property still holds or its change is a stated part of the fix. A pipe added to silence a SIGPIPE that also swallows the upstream command's exit status turns a hard failure into a silent pass.
+- **Sibling consistency.** Before approving a new helper, parse routine or error-handling block, search for the nearest sibling doing the same operation — earlier in the same file or the same diff, or a file doing the identical class of operation. Flag a hand-rolled block where a helper already exists, and a new call site that omits handling (logging, validation, error surfacing) an otherwise-identical sibling has.
+- **Execution order is the scheduler's, not the file's.** Lexical order says little about run order: a task queue or dispatcher drain, a frame or event-loop phase, callback registration and static-initialisation order decide it. Before raising "A runs before B", trace the entry point that sequences them and check the path for a post / dispatch / enqueue hop that moves one of them across a tick boundary.
 
 Then apply the project's own criteria: the review checklist named by `docs.review_checklist` in `project.config.json` (when set), and the `## Invariants` of the leaf `AGENTS.md` for each directory the diff touches.
 

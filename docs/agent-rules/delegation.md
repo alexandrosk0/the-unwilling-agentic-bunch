@@ -100,8 +100,9 @@ Each agent's prompt defines its report body (architect: the plan sections; the r
 - Prompt already specifies file paths + symbols + commit messages → design is resolved; **skip `architect`** and implement
 - "Refactor" that one regex + replacement expresses (rename, format pass, typo sweep) → mechanical edit per [`process-rules.md`](process-rules.md) § Mechanical edits; a refactor that moves an interface or module boundary → `architect`
 - "Review this" / pre-merge / `/review` → `code-review`; "address the CodeRabbit / Bugbot comments" → the `coderabbit-triage` skill
-- Crash / wrong output / "doesn't work" / regression without perf wording → the debug pause-loop ([`ship-loops.md`](ship-loops.md) § Debug-mode pause-loop); slow AND wrong → the wrong output first, then the perf workflow
-- Slow / FPS / lag / hitch / stutter / perf regression → the perf workflow guide + the `perf-measure` / `perf-instrument` / `perf-gatekeeper` skills
+- "Prove it" / "double-check your work" before declaring your own edits done → the [`but-for-real`](../../agents/_shared/skills/but-for-real/SKILL.md) skill (a self-review, no spawn)
+- Crash / wrong output / "doesn't work" / a hang that never recovers / regression without perf wording → the debug pause-loop ([`ship-loops.md`](ship-loops.md) § Debug-mode pause-loop); slow AND wrong → the wrong output first, then the perf workflow
+- Slow / FPS / lag / hitch / stutter / freeze / brief or intermittent stall / spike / optimize / profile / high memory or CPU / perf regression → the perf workflow guide (a stall that recovers on its own → its § Spikes) + the `perf-measure` / `perf-instrument` / `perf-gatekeeper` skills
 - Else the orchestrator handles it directly
 
 ## Model tiering

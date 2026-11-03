@@ -1,12 +1,15 @@
 ---
 name: perf-measure
-description: Run a perf measurement — `scenario.run --spawn`, or `perf.reset` → `perf.snapshot` against a running app — read the JSON and return the top rows by `lastTotalMs`, `perf_temp:` rows separated from pre-existing ones, plus `maxMs` / `p99Ms` for spike work. Load when a perf investigation needs numbers ("what's hot right now", "measure scenario X", before/after a perf fix, the app is slow / low FPS / laggy / hitching / stuttering / freezing), after markers are in. Holds the CLI-gap halt contract: never falls back to a manual UI session or reads FPS by eye. The investigation itself lives in the project perf guide.
+description: Run a perf measurement — `scenario.run --spawn`, or `perf.reset` → `perf.snapshot` against a running app — read the JSON and return the top rows by `lastTotalMs`, `perf_temp:` rows separated from pre-existing ones, plus `maxMs` / `p99Ms` for spike work. Load when a perf investigation needs numbers ("what's hot right now", "measure scenario X", before/after a perf fix, an "optimize X" or "profile X" request, the app is slow / low FPS / laggy / hitching / stuttering / freezing, a brief or intermittent stall / spike that recovers on its own), after markers are in. Holds the CLI-gap halt contract: never falls back to a manual UI session or reads FPS by eye. The investigation itself lives in the project perf guide.
 triggers:
   - measure
   - snapshot
   - scenario
   - perf-run
-version: 3
+  - optimize
+  - profile
+  - spike
+version: 4
 ---
 
 # perf-measure (skill)

@@ -13,12 +13,12 @@ A new agent needs a reason the three existing ones do not cover: a role whose va
 ## How a skill reaches every harness
 
 - **Claude Code** auto-discovers every skill: `setup-harness.sh claude-code` links each `agents/_shared/skills/<name>/` into `.claude/skills/`, and the skill's `description:` decides when it loads.
-- **Codex, Cursor, pi and generic harnesses** read [`AGENTS.md`](../../AGENTS.md) and have no skill discovery, so a skill reaches them only through a row in its § Project rules on-demand table (trigger → `agents/_shared/skills/<name>/SKILL.md`). A skill without that row is Claude-Code-only.
+- **Codex, Cursor, pi and generic harnesses** read [`AGENTS.md`](../../AGENTS.md) and have no skill discovery, so a skill reaches them only by a path link to `agents/_shared/skills/<name>/SKILL.md`: a row in its § Project rules on-demand table, or a link from a doc that AGENTS.md routes to (the work-item review and close skills, for example, are linked from [`work-items.md`](work-items.md) and [`review-panels.md`](review-panels.md) where those steps run).
 
 So every skill ships with both:
 
 1. A `description:` that names the user-visible symptoms and requests that should load it ("crash", "wrong output", "doesn't work", "address the CodeRabbit comments") — not only the procedure's name.
-2. A trigger row in the AGENTS.md on-demand table, unless the skill is deliberately Claude-Code-only (say so in its description).
+2. A route on every harness: an on-demand row when the trigger is a user request any session can raise; otherwise a path link at the step of a routed doc where the procedure runs. A skill named only in prose, without its path, reaches Claude Code alone.
 
 ## Shaping a skill
 

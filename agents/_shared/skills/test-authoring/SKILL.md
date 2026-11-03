@@ -19,7 +19,7 @@ triggers:
   - screenshot-scan
   - sanitizer-test
   - mock-tracker
-version: 2
+version: 3
 ---
 
 <!-- The single home for test automation: judgement + verification gate + unit-rig
@@ -42,8 +42,8 @@ Run it at three points: at plan time (find the automation path before coding), a
 |---|---|---|
 | **A. Headless CLI probe / unit test** | "Function X returns Y" / "Lua snippet outputs Z" | A doctest case (§ Unit rig), or `debug.lua_eval` / a new `debug.<feature>_test` returning JSON that bash asserts on (§ Pattern A) |
 | **B. Scenario + perf snapshot** | "Frame budget under N ms" / "Cache hit rate = 100% in steady state" | An `IScenario` subclass drives N frames and returns rows; bash asserts on row values (§ Pattern B) |
-| **C. Screenshot diff** | "Cell renders red text" / "Icon visible" | `debug.window.screenshot` capture + sentinel-colour scan or golden diff (§ Pattern C) |
-| **D. Sanitizer build** | "No UAF on shutdown" / "No leak after N runs" | Run the scenario under ASan / UBSan; the exit code is the assertion (§ Pattern D) |
+| **C. Screenshot diff** | "Cell renders red text" / "Icon visible" | A screenshot-scenario PNG capture + sentinel-colour scan or golden diff (§ Pattern C) |
+| **D. Sanitizer build** | "No UAF on shutdown" / "No leak after N runs" | Run the scenario on a sanitizer build (ASan; UBSan only on a native-Clang lane); the exit code is the assertion (§ Pattern D) |
 | **E. UI test engine** | "Drag column to position X" / "Type into editor and see autocomplete" / "Click menu item and observe state" | The ImGui Test Engine drives the real widget tree — clicks, typing and drags become recorded test cases (§ Bucket E). Nothing escapes automation here; it only costs more setup. |
 
 Every plan § Verification item maps to A, B, C, D or E. An item that fits no bucket marks a gap in the **test infrastructure**, not in the item: name the missing piece (e.g. "needs new CLI probe `debug.dock.layout_dump`", "needs a UI-engine harness for the dock layout") and file it as a **bucket-E follow-up** — never "manual forever". The same rule applies when drafting a plan: classify each Verification item into a bucket before coding; a step that is interactive today is bucket E with an explicit "wire the UI-engine test before or alongside the slice" follow-up.
@@ -208,15 +208,21 @@ Bash drives it with `scenario.run --name=<name> --frames=<N> --mcp-port=<...> --
 
 ### Pattern C — Screenshot scan
 
-For visual regressions (red text, icon visible, layout shift), use `debug.window.screenshot` to write a PPM file then scan pixels for a sentinel colour (or count non-bg pixels).
+For visual regressions (red text, icon visible, layout shift), capture a PNG and scan its pixels for a sentinel colour (or count non-background pixels). Two capture paths:
+
+- **Screenshot scenario (drivers)** — a scenario drives the UI to a known state and requests the capture itself; the `--spawn` parent waits for it and copies it to the path you asked for. Working driver: `scripts/dev/test-screenshot-diff.sh`.
+- **Running instance (ad hoc)** — `debug.window.screenshot --path=<name>.png` takes one required, relative `path`, confined under `<userData>/screenshots/` (absolute and `..` paths are rejected); the main loop writes the PNG on the next frame at the returned `data.path`.
+
+Either way the file is a PNG and lands a frame after the command returns, so poll for a non-empty file before reading it.
 
 ```bash
-"$EXE" cmd debug.window.screenshot --outPath=/tmp/shot.ppm --window=Scripting ...
-# count red pixels in the "Lua Errors" panel region
-"$PY" -c "import sys; data=open('/tmp/shot.ppm','rb').read(); ..."
+"$EXE" cmd scenario.run --name=<screenshot-scenario> --frames=20 --warmupFrames=16 \
+  --screenshotPath="$TMP_DIR/shot.png" --mcp-port="$TEST_PORT" --spawn --yes
+for _ in $(seq 1 40); do [ -s "$TMP_DIR/shot.png" ] && break; sleep 0.05; done
+# decode the PNG and count red pixels (a small compiled helper, or Python zlib + struct)
 ```
 
-Coordinate-based slicing of the PPM is brittle; prefer counting global colour-class occurrences (e.g. "≥ 100 pixels with R≥240 G≤80 B≤80 → red ErrorItems present"). Pink-clear (`glClearColor(1,0,1,1)`) is the existing pattern for UI-gap detection — see AGENTS.md § Debug techniques.
+Coordinate-based slicing of the capture is brittle; prefer counting global colour-class occurrences (e.g. "≥ 100 pixels with R≥240 G≤80 B≤80 → red ErrorItems present"). Pink-clear (`glClearColor(1,0,1,1)`) is the existing pattern for UI-gap detection — see AGENTS.md § Debug techniques.
 
 Prefer dual-capture-no-golden patterns (`scripts/dev/test-theme-roundtrip.sh`) when both states are produced at runtime within the same test — no checked-in artefact to enshrine.
 
@@ -236,13 +242,13 @@ Then prove it: capture twice back-to-back and require the self-diff within toler
 
 ### Pattern D — Sanitizer build run
 
-For UAF / leak / heap-overflow checks at shutdown, run the scenario under ASan / UBSan. `cmake/Sanitizers.cmake` already wires the flags; the existing CMakePresets has sanitizer variants. Test script invocation:
+For UAF / leak / heap-overflow checks at shutdown, run the scenario on a sanitizer build of the app; the exit code is the assertion. `cmake/Sanitizers.cmake` wires the flags and the host build doc lists the sanitizer presets. An MSVC or `clang-cl` ASan preset applies **ASan only**; undefined-behaviour checks (UBSan) need a native-Clang sanitizer lane — when that lane builds only the unit tests, cover the UB item with a doctest case (§ Unit rig) run there. Placeholders: `<asan>` and `<target>` from `project.config.json` `build.presets` / `build.targets`, `<exe>` from `build.exe_path`.
 
 ```bash
-cmake --preset ninja-msvc-asan
-cmake --build --preset ninja-msvc-asan --target SmatchetStandalone
-build/ninja-msvc-asan/Smatchet.exe cmd scenario.run --name=<feature>-stress --frames=600 --mcp-port=<...> --spawn --yes
-# Exit code != 0 OR stderr contains "==ERROR: AddressSanitizer:" → fail
+cmake --preset <asan>
+cmake --build --preset <asan> --target <target>
+<exe> cmd scenario.run --name=<feature>-stress --frames=600 --mcp-port=<...> --spawn --yes
+# Exit code != 0, OR stderr contains "==ERROR: AddressSanitizer:" (ASan) or "runtime error:" (UBSan) → fail
 ```
 
 ## Mock-tracker setup

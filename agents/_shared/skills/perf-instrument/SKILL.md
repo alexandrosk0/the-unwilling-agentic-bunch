@@ -1,12 +1,15 @@
 ---
 name: perf-instrument
-description: Add or strip temporary `SMATCHET_UI_PERF_SCOPE("perf_temp:...")` perf markers. Load when a perf investigation needs numbers on a suspected hot path or blocking call — the app is slow, low FPS, laggy, hitches, stutters or freezes, a grid scroll or startup is slow, a perf regression needs locating — and again to strip every `perf_temp:` marker when the round ends. Encodes the overhead rules (string-literal names, one outer scope always safe, no nesting in million-call loops, no double-wrap, mandatory `perf_temp:` prefix, header include check). The investigation itself (hypothesis, steady-state vs spike, validation) lives in the project perf guide.
+description: Add or strip temporary `SMATCHET_UI_PERF_SCOPE("perf_temp:...")` perf markers. Load when a perf investigation needs numbers on a suspected hot path or blocking call — an "optimize X" or "profile X" request, the app is slow, low FPS, laggy, hitches, stutters or freezes, a brief or intermittent stall / spike recovers on its own, a grid scroll or startup is slow, a perf regression needs locating — and again to strip every `perf_temp:` marker when the round ends. Encodes the overhead rules (string-literal names, one outer scope always safe, no nesting in million-call loops, no double-wrap, mandatory `perf_temp:` prefix, header include check). The investigation itself (hypothesis, steady-state vs spike, validation) lives in the project perf guide.
 triggers:
   - instrument
   - perf-scope
   - perf-marker
   - perf-cleanup
-version: 3
+  - optimize
+  - profile
+  - spike
+version: 4
 ---
 
 # perf-instrument (skill)

@@ -196,16 +196,35 @@ fi
 
 | `mrc` | Meaning | Action |
 |---|---|---|
-| 0 | Armed (or merged) | wait for `MERGED` (below) |
+| 0 | Armed (or merged) | bounded wait for `MERGED` (below) |
 | 1 | Refused: gates did not pass, or the head moved after the poll | back to the gate step; never bypass |
 | 2 | Usage or dependency error (`gh` / `jq` missing) | HALT |
 | 3 | Gate-poll precondition (PR closed or merged, `gh` down, head undeterminable) | re-check state: `MERGED` → the one-PR path; otherwise HALT |
 | 4 | Required run cancelled while pending | run the printed `gh run rerun <id>` line(s), then re-run `safe-merge.sh` |
 | other | `gh pr merge` failed to arm (its status, passed through) | HALT and surface gh's error |
 
-Then wait for `MERGED` (a merge queue can hold it past the budget) and check the row:
+Then wait for `MERGED` (a merge queue can hold it past `safe-merge.sh`'s budget), bounded, and check the row. Auto-merge waits on every branch-protection required check and a user skip does not bypass that, so a red or pending one never merges: the wait HALTs on `CLOSED`, on auto-merge disarmed on two polls in a row (the head moved after the arm, or a dequeue), on three `gh` failures in a row, or past `JANITOR_MERGE_WAIT_SECONDS` (default 1800):
 ```bash
-until [ "$(gh pr view "$N" --json state --jq .state)" = MERGED ]; do sleep 10; done
+q='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){state autoMergeRequest{enabledAt} isInMergeQueue}}}'
+deadline=$(( $(date +%s) + ${JANITOR_MERGE_WAIT_SECONDS:-1800} )); fails=0; unarmed=0
+while :; do
+    if st=$(gh api graphql -f query="$q" -f o="$OWNER" -f r="$REPO" -F n="$N" --jq \
+        '.data.repository.pullRequest | .state + (if .autoMergeRequest or .isInMergeQueue then " armed" else " unarmed" end)'); then
+        fails=0
+    else
+        fails=$((fails + 1)); st=""
+    fi
+    case "$st" in
+        MERGED*) break ;;
+        CLOSED*) echo "PR #$N closed without merging — HALT" >&2; exit 1 ;;
+        "OPEN unarmed") unarmed=$((unarmed + 1)) ;;   # two in a row: not a queue hand-off
+        *) unarmed=0 ;;
+    esac
+    [ "$unarmed" -lt 2 ] || { echo "PR #$N auto-merge disarmed (head moved or dequeued) — back to the gate step" >&2; exit 1; }
+    [ "$fails" -lt 3 ] || { echo "gh failed 3 polls in a row — HALT" >&2; exit 1; }
+    [ "$(date +%s)" -lt "$deadline" ] || { echo "PR #$N not MERGED within the wait budget — HALT: a required check is red or pending" >&2; exit 1; }
+    sleep 10
+done
 SHA=$(gh pr view "$N" --json mergeCommit --jq .mergeCommit.oid)
 ledger="${PROJECT_ROOT:-$MAIN_REPO}/docs/self-improvement/merge-snapshots.jsonl"
 grep -qF "\"pr\":$N," "$ledger" || echo "no ledger row for #$N yet" >&2

@@ -73,13 +73,13 @@ If the pass finds nothing actionable, the body is a single line saying so — th
 
 A post-implementation leg (`5-` prefix) ends its review file with a machine-readable trailer: a
 `## Verdict` heading followed by one fenced `json` object (fields and veto policy:
-adversarial-code-review skill § Panel leg). The verdict lives *inside* the leg's review file
+[`adversarial-code-review`](../../agents/_shared/skills/adversarial-code-review/SKILL.md) skill § Panel leg). The verdict lives *inside* the leg's review file
 because the write guard's expected set is exactly the review file paths — a sibling verdict file
 would trip the stray-path report. Pre-implementation legs (`4-`) carry no trailer: the verifier
 gate scores code diffs, not artifacts.
 
-The flow (run by the addresser after the round is resolved — address-review-feedback skill
-step 6): `agents/scripts/core/panel_verdicts.py --subject NN --round N --authoring-harness <tag>`
+The flow (run by the addresser after the round is resolved —
+[`address-review-feedback`](../../agents/_shared/skills/address-review-feedback/SKILL.md) skill step 6): `agents/scripts/core/panel_verdicts.py --subject NN --round N --authoring-harness <tag>`
 collects one sample per leg → `scripts/dev/verifier-sidecar.py aggregate` merges the samples into
 one verdict → `review-ack.sh --record --branch --verdict` pins it to the branch content.
 

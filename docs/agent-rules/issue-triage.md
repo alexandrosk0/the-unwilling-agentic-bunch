@@ -49,7 +49,7 @@ Run per open Issue (the `issue-sweep.sh` automates this; verdict keys on **autho
 | Real but obsolete (fixed / code removed) | **`flag-stale`** — surface for human close; never auto-close unless bot-authored + provably fixed |
 | Unlabeled product bug, real | **`flag-relabel`** — propose labels, apply if bot-authored |
 
-**Autonomous-action rule:** the sweep may auto-act (close / relabel) **only** on **bot**-authored Issues. Every **human**-authored Issue is **report-only** — surfaced for a human, never auto-mutated beyond an additive label suggestion. `--dry-run` is the default; `--apply` performs the mutations.
+**Autonomous-action rule:** the sweep may auto-act (close / relabel) **only** on **bot**-authored Issues. Every **human**-authored Issue is **report-only** — surfaced for a human, never auto-mutated beyond an additive label suggestion. Dry-run is the default (no flag; the script rejects `--dry-run`); `--apply` performs the mutations.
 
 ## Issue ↔ backlog backlink convention
 
@@ -90,7 +90,7 @@ Managed by [`agents/scripts/project/sync-issue-labels.sh`](../../agents/scripts/
 
 ## Triage cadence
 
-- **Closeout sweep** — `issue-sweep.sh --dry-run` runs in the ship-loop closeout: surfaces triage verdicts (`--apply` only on explicit authorisation) **and** emits the top-`P0`/`P1` `[issue-propose]` line (§ Fixing an Issue) — propose-only, never auto-fix, never pauses.
+- **Closeout sweep** — `issue-sweep.sh` (no flag: dry-run is the default) runs in the ship-loop closeout: surfaces triage verdicts (`--apply` only on explicit authorisation) **and** emits the top-`P0`/`P1` `[issue-propose]` line (§ Fixing an Issue) — propose-only, never auto-fix, never pauses.
 - **Periodic janitor pass** — off the ship-loop, keeps Issues labelled, deduped and stale-swept. The project's scheduled `issue-janitor.yml` workflow runs the sweep dry-run only and reports to its job log; the mutating pass runs in a session, when the user asks ("issue triage", "sweep the issues", "clean up issues") or after a burst of CodeRabbit activity (strays accumulate):
   1. `bash agents/scripts/core/issue-sweep.sh` (dry-run) — read every verdict first.
   2. `issue-sweep.sh --apply` — acts on **bot**-authored strays only (relabel, mirror-then-close); a human-authored Issue stays report-only, at most an additive label suggestion.

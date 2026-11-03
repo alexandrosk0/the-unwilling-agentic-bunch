@@ -1,6 +1,6 @@
 ---
 name: debug-instrument
-description: Diagnose a behavioural bug — a crash, assert, exception or access violation, wrong output, a regression ("this used to work"), a hang, something that "doesn't work" / is "broken" / "looks wrong", a sanitizer report (ASan / UBSan / TSan / MSan) or a minidump — as a paused, reproducer-first, hypothesis-driven loop with temporary `[temp-debug]` instrumentation, then hand the fix off. A debug request suspends the autonomous ship-loop (ship-loops.md § Debug-mode pause-loop). Not for sustained slowness, low FPS or frame hitches (perf skills). SKILL.md holds the judgement, the pause-loop, the NDJSON helper contract and the report shapes; REFERENCE.md holds the recipes.
+description: Diagnose a behavioural bug — a crash, assert, exception or access violation, wrong output, a regression ("this used to work"), a hang that never recovers (a wedged process), something that "doesn't work" / is "broken" / "looks wrong", a sanitizer report (ASan / UBSan / TSan / MSan) or a minidump — as a paused, reproducer-first, hypothesis-driven loop with temporary `[temp-debug]` instrumentation, then hand the fix off. A debug request suspends the autonomous ship-loop (ship-loops.md § Debug-mode pause-loop). Not for sustained slowness, low FPS, frame hitches, or a brief / intermittent stall that recovers on its own (perf skills and the perf guide § Spikes). SKILL.md holds the judgement, the pause-loop, the NDJSON helper contract and the report shapes; REFERENCE.md holds the recipes.
 triggers:
   - debug
   - bug
@@ -16,7 +16,7 @@ triggers:
   - minidump
   - temp-debug
   - debug-instrument
-version: 2
+version: 3
 ---
 
 # debug-instrument
@@ -25,9 +25,9 @@ Run this loop in whatever context received the bug — the main session or a spa
 
 ## Scope and classification
 
-**Own**: crashes, assertions, exceptions, access violations; wrong output, stale UI state, bad serialization, incorrect command behaviour; regressions ("worked yesterday", "only happens after X"); hangs; suspected races, lifetime bugs, data corruption, ordering bugs.
+**Own**: crashes, assertions, exceptions, access violations; wrong output, stale UI state, bad serialization, incorrect command behaviour; regressions ("worked yesterday", "only happens after X"); hangs that never recover — a wedged process, captured with `debug.dump_self` (§ 3); suspected races, lifetime bugs, data corruption, ordering bugs.
 
-**Not this loop**: sustained slowness, low FPS or throughput, and intermittent hitches / stutter → the perf skills (`perf-instrument`, `perf-measure`) and the project's perf workflow guide; a *perf* regression caught by the scenario gate ("regression check", "perf regression", a named scenario or baseline) → `perf-gatekeeper`, while a "regression" without perf wording is behavioural and stays here; a build failure unrelated to the bug → [`build.md`](../../../../docs/agent-rules/build.md). Classify an ambiguous symptom first — do not instrument until the bug belongs to this loop.
+**Not this loop**: sustained slowness, low FPS or throughput, intermittent hitches / stutter, and a brief or recurring stall that recovers on its own ("sometimes hangs for a second" — a perf spike) → the perf skills (`perf-instrument`, `perf-measure`) and the project's perf workflow guide § Spikes; a *perf* regression caught by the scenario gate ("regression check", "perf regression", a named scenario or baseline) → `perf-gatekeeper`, while a "regression" without perf wording is behavioural and stays here; a build failure unrelated to the bug → [`build.md`](../../../../docs/agent-rules/build.md). Classify an ambiguous symptom first — do not instrument until the bug belongs to this loop.
 
 Search order: semantic search first, file skeletons over full reads, text-search once semantic search has narrowed the area, full reads only for exact control flow, lifetimes, ownership or call-site detail. Never hide a bug with retries, caches, broad null checks or feature disablement.
 
@@ -131,7 +131,7 @@ Before § 12 strips the rest, keep a line permanently only if **all** hold: it s
 
 ### 12. Cleanup
 
-Four mandatory steps (REFERENCE.md § Cleanup): **12a** strip every `[temp-debug]` marker (expect zero hits); **12b** delete the per-investigation helper **only if you rolled it** — never the tracked production helper; **12c** delete the NDJSON log; **12d** rebuild clean. Remove every diagnostic toggle, temporary repro artefact and temporary behaviour change not explicitly approved to stay; gitignore patterns are a safety net, not a substitute — delete explicitly. Report cleanup status and the final build.
+Four mandatory steps (REFERENCE.md § Cleanup): **12a** strip every `[temp-debug]` marker (expect zero hits in code — the sweep skips docs and Markdown, which may mention the token in prose); **12b** delete the per-investigation helper **only if you rolled it** — never the tracked production helper; **12c** delete the NDJSON log; **12d** rebuild clean. Remove every diagnostic toggle, temporary repro artefact and temporary behaviour change not explicitly approved to stay; gitignore patterns are a safety net, not a substitute — delete explicitly. Report cleanup status and the final build.
 
 ### Standing rules
 
@@ -156,8 +156,8 @@ Check first: `git ls-files tests/_debug/SmatchetAgentDebug.h`. Two helpers coexi
 - **Line fields**: `ts` ISO-8601 UTC with milliseconds; `category` from a closed set — `backend-call`, `ui-event`, `worker-handoff`, `lock-claim`, `scenario-phase`, `cli-command`, `temp-debug` (an out-of-set category prints an error to stderr and drops the line); `pid`; `tid` string; `scope` `<file>:<line>`; `payload` a caller-supplied JSON object (by convention `backend-call` carries `{method, url, status}`; the helper does not check keys). Investigation breadcrumbs use `temp-debug`.
 - **Build flag**: ON in `ninja-iter-agentdebug-msvc` (iteration speed, its own `build/ninja-iter-agentdebug-msvc/` tree), the debug presets, the ui-test presets and the ASan presets; OFF everywhere else — `ninja-iter-msvc`, `ninja-test-msvc` and the publish presets included — where `SMATCHET_AGENT_DEBUG_LOG` is `((void)0)` and the sink stays empty however you instrument. `LOG_AGENT_DEBUG(category, msg)` (`Logger.h`) is always callable: NDJSON with `payload = {"msg": msg}` when ON, `LOG_DEBUG("[agent-debug:<category>] ...")` when OFF. Two iter-shaped exes exist — name the one you built and the one you ran.
 - **Session id**: `SMATCHET_AGENT_DEBUG_SESSION_ID` when set at launch, otherwise `<unix-epoch>-<pid>`, exported to child processes. Pin it — export it before launching — so the read path is known; never guess. If the id is unknown and the run cannot be repeated with it pinned, halt with `## Outcome: aborted — SMATCHET_AGENT_DEBUG_SESSION_ID not set; re-run the scenario with it exported on an agent-debug build`.
-- **Directory**: `SMATCHET_AGENT_DEBUG_DIR`, else `%LOCALAPPDATA%\Smatchet\agent-debug` (temp-dir fallback) on Windows and `$HOME/.smatchet/agent-debug` elsewhere; doctest redirects to `tests/_debug/scratch/<test-name>.ndjson`. One file per session, truncated at open, capped at 50 MB — on overflow a terminal `scenario-phase` line with `"name":"_overflow"` is written and logging stops. Each line is flushed (it survives a process crash); `SMATCHET_AGENT_DEBUG_FSYNC=true` only counts writes today — the stream sink does not fsync.
-- **Empty-file semantic**: an empty file after a run means the instrumentation never fired — the scenario never reached a wrapped scope (no product code logs to it permanently; only breadcrumbs do). First rule out an OFF-build exe; then treat it as a signal: phase 0.5 picks a different scenario or phase 1 adds a scope on the real code path. It is never a pass.
+- **Directory**: `SMATCHET_AGENT_DEBUG_DIR`, else `%LOCALAPPDATA%\Smatchet\agent-debug` (temp-dir fallback) on Windows and `$HOME/.smatchet/agent-debug` elsewhere; doctest redirects to `tests/_debug/scratch/<test-name>.ndjson`. One file per session, created (truncated) on the first emit — the directory too — and capped at 50 MB — on overflow a terminal `scenario-phase` line with `"name":"_overflow"` is written and logging stops. Each line is flushed (it survives a process crash); `SMATCHET_AGENT_DEBUG_FSYNC=true` only counts writes today — the stream sink does not fsync.
+- **Missing- or empty-file semantic**: no `<session-id>.ndjson` after a run means the instrumentation never fired — the scenario never reached a wrapped scope (no product code logs to it permanently; only breadcrumbs do). A file that exists but is empty means every emit used an out-of-set category: check stderr for `[SmatchetAgentDebug] ERROR: invalid category`. First rule out an OFF-build exe; then treat it as a signal: phase 0.5 picks a different scenario or phase 1 adds a scope on the real code path. It is never a pass.
 
 ### Instrument with the production helper (tracked)
 
@@ -175,7 +175,7 @@ git ls-files tests/_debug/SmatchetAgentDebug.h | grep -q . || {
 }
 ```
 
-API: `SmatchetAgentNdjsonLog(location, hypothesisId, message, dataInt)` appends one line to `SmatchetAgentDebugLogPath()` — on Windows the first ancestor of the exe's directory (≤ 12 levels) that holds `.git`, else the exe's directory; elsewhere the process working directory. `SmatchetAgentDebugTempLogPath()` (`Smatchet-debug-<hex>.log` in TEMP / `/tmp`) exists but the logger never writes it. The template does not escape strings: keep `location` / `message` fixed text without quotes or backslashes. `static` functions give per-TU copies (no ODR conflicts across instrumented TUs); it pulls no GLFW / OpenGL / DX12, so it compiles into both `SmatchetStandalone` and `SmatchetCore_DX12`; it uses `ghc::filesystem`. One `dataInt` per call — when a hypothesis needs strings or several ints, extend the rolled helper inline (still gitignored, still deleted) rather than letting the call sites drift. Call-site shape: REFERENCE.md § Instrument.
+API: `SmatchetAgentNdjsonLog(location, hypothesisId, message, dataInt)` appends one line to `SmatchetAgentDebugLogPath()` — on Windows the first ancestor of the exe's directory (≤ 12 levels) that holds a `.git` **directory**, else the exe's directory — a linked worktree's `.git` is a file, so a worktree nested inside the main clone logs at the main clone's root and one outside it logs beside the exe; elsewhere the process working directory. `SmatchetAgentDebugTempLogPath()` (`Smatchet-debug-<hex>.log` in TEMP / `/tmp`) exists but the logger never writes it. The template does not escape strings: keep `location` / `message` fixed text without quotes or backslashes. `static` functions give per-TU copies (no ODR conflicts across instrumented TUs); it pulls no GLFW / OpenGL / DX12, so it compiles into both `SmatchetStandalone` and `SmatchetCore_DX12`; it uses `ghc::filesystem`. One `dataInt` per call — when a hypothesis needs strings or several ints, extend the rolled helper inline (still gitignored, still deleted) rather than letting the call sites drift. Call-site shape: REFERENCE.md § Instrument.
 
 ## Report shapes
 
@@ -237,7 +237,7 @@ After fix:  <observed value or sequence>
 <the REFERENCE.md § Handoff packet, including adversarial-RCA for P0 / crash-class>
 
 ## Cleanup
-`[temp-debug]` text-search: 0 hits
+`[temp-debug]` code text-search (REFERENCE.md § Cleanup 12a): 0 hits
 Helper: rolled template deleted | tracked production helper untouched
 NDJSON log deleted: <path> → absent
 Final build: <targets> → <status>

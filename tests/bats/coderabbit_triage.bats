@@ -8,7 +8,8 @@
 #     override table; coderabbit-triage.py is its executable mirror; both carry a
 #     `triage-rules-version:` marker that must stay in lockstep.
 #   - `area` — first-match-wins routing over the project's area map
-#     (<project root>/docs/area-map.json; AREA_MAP_FILE names a fixture).
+#     (<project root>/docs/area-map.json, the root project-config.sh resolves;
+#     AREA_MAP_FILE names a fixture).
 #
 # Requires: bash, a working python3 (exec-validated — the WinStore alias exits
 # 49 on `-c ''`), bats, git.
@@ -99,8 +100,10 @@ JSON
 }
 
 @test "selftest validates the host area map when the layer is mounted in a host" {
-    super="$(git -C "$REPO_ROOT" rev-parse --show-superproject-working-tree 2>/dev/null)"
-    if [ -z "$super" ] || [ ! -f "$super/docs/area-map.json" ]; then
+    # The host is the PROJECT_ROOT project-config.sh resolves, exactly as the script does.
+    local host
+    host="$(PC_ROOTS_ONLY=1 . "$REPO_ROOT/scripts/dev/project-config.sh" >/dev/null 2>&1; printf '%s' "${PROJECT_ROOT:-}")"
+    if [ -z "$host" ] || [ ! -f "$host/docs/area-map.json" ]; then
         skip "standalone layer: no host area map"
     fi
     run "$PY" "$PY_SRC" selftest
@@ -204,6 +207,41 @@ JSON
     [ "$status" -eq 0 ]
     [[ "$output" == *$'src/a.cpp\tnet'* ]]
     [[ "$output" == *$'src/net/b.cpp\t-\t-'* ]]
+}
+
+# Run the real script with the project-root env cleared, then the given assignments.
+run_rooted() {
+    run env -u PROJECT_ROOT -u PC_PROJECT_ROOT -u AGENT_LAYER_ROOT -u PC_AGENT_LAYER_ROOT \
+        -u SMATCHET_PROJECT_ROOT_OVERRIDE -u SMATCHET_PROJECT_CONFIG "$@"
+}
+
+@test "area: finds the map under a SMATCHET_PROJECT_CONFIG host, like sync-issue-labels.sh" {
+    good_map
+    run_rooted SMATCHET_PROJECT_CONFIG="$WORK/proj" "$PY" "$PY_SRC" area src/net/a.cpp
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'src/net/a.cpp\tnet\tsrc/net/AGENTS.md'* ]]
+    run_rooted SMATCHET_PROJECT_CONFIG="$WORK/proj" "$PY" "$PY_SRC" selftest
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"area map OK (4 routes)"* ]]
+}
+
+@test "area: honours PROJECT_ROOT only with SMATCHET_PROJECT_ROOT_OVERRIDE=1" {
+    good_map
+    run_rooted PROJECT_ROOT="$WORK/proj" SMATCHET_PROJECT_ROOT_OVERRIDE=1 "$PY" "$PY_SRC" area src/ui/x.cpp
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'src/ui/x.cpp\tui\tsrc/ui/AGENTS.md'* ]]
+    run_rooted PROJECT_ROOT="$WORK/proj" "$PY" "$PY_SRC" area src/ui/x.cpp
+    [[ "$output" == *"ignoring PROJECT_ROOT"* ]]
+    [[ "$output" != *$'src/ui/x.cpp\tui'* ]]
+}
+
+@test "area: a fixture copy without project-config.sh ignores an inherited PROJECT_ROOT" {
+    good_map
+    mirror
+    run_rooted PROJECT_ROOT="$WORK/proj" SMATCHET_PROJECT_ROOT_OVERRIDE=1 \
+        "$PY" "$WORK/agents/scripts/core/coderabbit-triage.py" area src/ui/x.cpp
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"no area map at $WORK/docs/area-map.json"* ]]
 }
 
 @test "area: exits 2 when there is no area map" {

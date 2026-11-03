@@ -37,7 +37,7 @@ Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) 
 **Pillar 3**: the project must terminate cleanly under all observed inputs. Crashes in dev block the next merge until fixed; crashes in shipped builds are P0 regressions.
 
 **Enforceable invariants:**
-- **Pre-merge sanitizer build** mandatory on any PR that touches `Source/Core/` C++: `cmake --build --preset ninja-test-msvc` runs the doctest rig under ASan / UBSan (when toolchain supports it). The [`debug-instrument`](../../agents/_shared/skills/debug-instrument/SKILL.md) skill runs a sanitizer build for every crash-suspect investigation.
+- **Pre-merge sanitizer build** mandatory on any PR that touches `Source/Core/` C++: the PR sanitizer CI lane builds and runs the doctest rig under ASan (MSVC has no UBSan); locally, build the ASan preset per [`build.md`](build.md) § ASan over the test rig. The [`debug-instrument`](../../agents/_shared/skills/debug-instrument/SKILL.md) skill runs a sanitizer build for every crash-suspect investigation.
 - **RAII enforced**: no raw `new` / `delete` outside the documented edge cases (sol2 user data, ImGui callback shims). Use `std::unique_ptr` + `make_unique`. `code-review` flags raw heap ops.
 - **Bounds-checked**: every container index goes through `at()` / explicit length check; `cppcheck` `boundsError` / `arrayIndexOutOfBounds` blocks merge.
 - **No silent UB**: dereferenced `nullptr`, unsigned wrap-around, signed overflow, use-after-free — all blocking. UBSan output during the regression gate is a fail.

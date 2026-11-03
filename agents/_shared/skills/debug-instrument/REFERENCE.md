@@ -87,10 +87,10 @@ jq -c 'select(.category == "temp-debug")' <session-id>.ndjson
 jq -c '{ts, tid, scope, payload}' <session-id>.ndjson
 ```
 
-**Template helper** — `debug-<hex>.log`: on Windows at the repo root (first `.git` ancestor of the exe) or beside the exe; elsewhere in the process working directory:
+**Template helper** — `debug-<hex>.log`: on Windows at the root of the first ancestor clone with a `.git` directory (from a linked worktree nested in the main clone, that is the main clone, the parent of `--git-common-dir`) or beside the exe; elsewhere in the process working directory:
 
 ```bash
-ls -la "$(git rev-parse --show-toplevel)/debug-<hex>.log" "$(dirname <exe>)/debug-<hex>.log"
+ls -la "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/debug-<hex>.log" "$(dirname <exe>)/debug-<hex>.log"
 jq -c 'select(.hypothesisId == "h1")' debug-<hex>.log            # one hypothesis
 jq -c 'select(.location == "ApplySort")' debug-<hex>.log         # one call site
 jq -c '{ts: .timestamp, loc: .location, h: .hypothesisId, i: .data.i, msg: .message}' debug-<hex>.log
@@ -193,19 +193,19 @@ The packet:
 ## Cleanup
 
 ```bash
-# 12a. Strip markers; expect zero hits outside vendored / build trees
-git grep --untracked -n "\[temp-debug\]" -- . ':(exclude)ThirdParty' ':(exclude)build'
+# 12a. Strip markers; expect zero hits in code (docs and Markdown may mention the token in prose)
+git grep --untracked -n "\[temp-debug\]" -- . ':(exclude)ThirdParty' ':(exclude)build' ':(exclude)docs' ':(exclude)*.md'
 
 # 12b. Delete the helper ONLY when you rolled the template; a tracked helper is the
 #      committed production helper — leave it, only your include/call lines go in 12a.
 git ls-files <helper> | grep -q . || rm -f <helper>
 
 # 12c. Delete the NDJSON logs this investigation wrote
-rm -f "$(git rev-parse --show-toplevel)/debug-<hex>.log" "$(dirname <exe>)/debug-<hex>.log"
+rm -f "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/debug-<hex>.log" "$(dirname <exe>)/debug-<hex>.log"
 rm -f <debug-dir>/<session-id>.ndjson
 
 # 12d. Rebuild clean
 cmake --build --preset <iter> --target <target>
 ```
 
-Report: zero `[temp-debug]` hits · helper state (rolled template deleted, or tracked helper untouched) · log deleted · final build status · fresh exe path + mtime.
+Report: zero `[temp-debug]` hits in the 12a scope · helper state (rolled template deleted, or tracked helper untouched) · log deleted · final build status · fresh exe path + mtime.
