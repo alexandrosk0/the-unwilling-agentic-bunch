@@ -119,7 +119,8 @@ run_reconcile() {
         # PRIMARY (precise): survivors. A FULLY SUPERSEDED banner means EVERY line
         # that PR introduced was since rewritten/removed at develop — the cited
         # file:line cannot still hold the original bug. This is the high-confidence
-        # drop signal (git-blame attribution, no heuristic).
+        # drop signal (git-blame attribution, no heuristic). A NOTHING TO ASSESS banner
+        # (the PR added no reviewable lines) deliberately does not match: it stays OPEN.
         if bash "$CORE_DIR/historical-review-survivors.sh" --pr "$pr" 2>/dev/null \
              | grep -q 'FULLY SUPERSEDED'; then
             verdict="LIKELY-SUPERSEDED (fully superseded at develop)"

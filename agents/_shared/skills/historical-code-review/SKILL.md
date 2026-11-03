@@ -34,6 +34,9 @@ list, no risk of re-flagging fixed code.
 
 2. **Short-circuit.** If the digest says `FULLY SUPERSEDED`, report
    "nothing to review — every introduced line was since changed/removed" and stop.
+   If it says `NOTHING TO ASSESS` (no added lines: submodule pointers, binaries,
+   pure deletions or renames), report
+   "nothing reviewable" and stop; that is not a supersede verdict.
 
 3. **Review only the survivors.** Feed the digest to a `code-review`-style pass
    (the project's `code-review` agent, opus/high). Rules:
