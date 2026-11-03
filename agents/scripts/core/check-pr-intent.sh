@@ -484,8 +484,8 @@ case "${1:-}" in
         shift
         FILES=""
         case "${1:-}" in
-            --changed-files) FILES="${2:-}"; shift; shift || true ;;
             --changed-files=*) FILES="${1#--changed-files=}"; shift ;;
+            --changed-files) FILES="${2:-}"; shift; shift || true ;;
         esac
         [ -n "$FILES" ] ||
             { echo "check-pr-intent: usage: --independent-review --changed-files <file> [<body-file>]" >&2; exit 2; }
