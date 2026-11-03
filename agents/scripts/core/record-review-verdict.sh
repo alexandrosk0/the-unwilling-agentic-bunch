@@ -591,6 +591,10 @@ case "${1:-}" in
         _record_independent "$2"
         exit $?
         ;;
+    --independent=*)
+        _record_independent "${1#--independent=}"
+        exit $?
+        ;;
     "")
         echo "record-review-verdict: missing verdict tail." >&2
         echo "  usage: bash record-review-verdict.sh \"N findings, <disposition>\" | \"n/a — <reason>\" [<base-ref>] [--sync-pr <n>]" >&2

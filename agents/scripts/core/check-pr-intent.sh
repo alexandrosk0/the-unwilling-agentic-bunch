@@ -482,10 +482,13 @@ case "${1:-}" in
     --check-workflow-sync) check_workflow_sync; exit $? ;;
     --independent-review)
         shift
-        [ "${1:-}" = "--changed-files" ] && [ -n "${2:-}" ] ||
+        FILES=""
+        case "${1:-}" in
+            --changed-files) FILES="${2:-}"; shift; shift || true ;;
+            --changed-files=*) FILES="${1#--changed-files=}"; shift ;;
+        esac
+        [ -n "$FILES" ] ||
             { echo "check-pr-intent: usage: --independent-review --changed-files <file> [<body-file>]" >&2; exit 2; }
-        FILES="$2"
-        shift 2
         if [ -n "${1:-}" ]; then
             [ -f "$1" ] || { echo "check-pr-intent: no such file: $1" >&2; exit 2; }
             BODY="$(cat "$1")"
