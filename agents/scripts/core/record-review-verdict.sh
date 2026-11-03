@@ -51,6 +51,10 @@
 #     # into-pr-body: the hand-copied head= hex is a typo class). The rewrite
 #     # goes through lib/pr-body-edit.sh, which refuses a body that lost a
 #     # `lock-slug:` / `holds-lock:` line. No gh on PATH -> a message, exit 0.
+#   bash record-review-verdict.sh --independent "<reviewer>; N findings[, <disposition>]"
+#     # prints `independent-review: … (head=<sha>)`, the second line a diff on
+#     # the review-enforcement surface needs (check-pr-intent.sh
+#     # --independent-review): a review by someone other than the author.
 #   bash record-review-verdict.sh --selftest
 #
 # Exit: 0 = tail validated + marker written + line printed; 1 = tail rejected
@@ -515,6 +519,23 @@ run_selftest() {
     fi
 
     rm -rf "$tmpd" "$tmp2" "$tmp3"
+
+    # --independent: a named reviewer is printed head-bound; a self-review is refused.
+    local ind
+    if ! ind="$(bash "$SELF" --independent "code-review agent run; 1 finding, fixed" 2>&1)"; then
+        echo "record-review-verdict --selftest: FAIL — --independent refused a named reviewer:" >&2
+        printf '%s\n' "$ind" | sed 's/^/    /' >&2
+        return 1
+    fi
+    case "$ind" in
+        "independent-review: code-review agent run; 1 finding, fixed (head="*")") ;;
+        *) echo "record-review-verdict --selftest: FAIL — --independent printed an unexpected line: $ind" >&2
+           return 1 ;;
+    esac
+    if bash "$SELF" --independent "self; 0 findings" >/dev/null 2>&1; then
+        echo "record-review-verdict --selftest: FAIL — --independent accepted a self-review" >&2
+        return 1
+    fi
     echo "record-review-verdict --selftest: PASS"
 }
 
@@ -537,9 +558,39 @@ if [ -n "$SYNC_PR" ] && ! [[ "$SYNC_PR" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
+# _record_independent <"reviewer; N findings[, disposition]"> — print the
+# `independent-review:` line for HEAD, validated by the same checker CI runs.
+# No marker: the pre-push hook keys on the author's own verdict, not this one.
+_record_independent() {
+    local tail_text="$1" head files line rc=0
+    head="$(git rev-parse --verify HEAD 2>/dev/null)" || {
+        echo "record-review-verdict: no HEAD to bind the independent review to" >&2
+        return 2
+    }
+    line="independent-review: ${tail_text} (head=${head:0:12})"
+    files="$(mktemp)" || return 2
+    # Any enforcement-surface path makes the checker require the line.
+    printf '%s\n' "agents/scripts/core/check-pr-intent.sh" > "$files"
+    PR_HEAD_SHA="$head" bash "$CHECKER" --independent-review --changed-files "$files" <<< "$line" >/dev/null || rc=$?
+    rm -f "$files"
+    if [ "$rc" -ne 0 ]; then
+        echo "record-review-verdict: rejected '$tail_text' — expected \"<reviewer>; N findings[, <disposition>]\" naming someone other than the author" >&2
+        return 1
+    fi
+    printf '%s\n' "$line"
+}
+
 case "${1:-}" in
     --selftest) run_selftest; exit $? ;;
     --help | -h) sed -n '2,64p' "$0"; exit 0 ;;
+    --independent)
+        [ -n "${2:-}" ] || {
+            echo "record-review-verdict: usage: --independent \"<reviewer>; N findings[, <disposition>]\"" >&2
+            exit 2
+        }
+        _record_independent "$2"
+        exit $?
+        ;;
     "")
         echo "record-review-verdict: missing verdict tail." >&2
         echo "  usage: bash record-review-verdict.sh \"N findings, <disposition>\" | \"n/a — <reason>\" [<base-ref>] [--sync-pr <n>]" >&2
