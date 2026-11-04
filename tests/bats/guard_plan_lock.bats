@@ -973,6 +973,58 @@ fake_limiter() { # $1 = name, $2 = absent|real
     ! grep -qs "$slug" "$TMPDIR"/.smatchet-planlock-unresolved-*
 }
 
+@test "auto-claim: re-adding the path to the same hand lock after the remediation is a person's claim and passes" {
+    command -v timeout >/dev/null 2>&1 || skip "no timeout(1)"
+    enable_autoclaim
+    reg "$REGDIR" sibling-a
+    PLANT_OWNER=alice plant_lock mywork "$AC_BRANCH" Source/Core/src/Sync/A.cpp
+    plant_lock theirs feat/other Source/Core/src/Sync/C.cpp
+    seed_mywork_cache
+    install_git_shim
+    # The extension lands; the restore's push hangs (as in the failed-restore case).
+    cat > "$SHIM_DIR/git" <<SHIM2
+#!/usr/bin/env bash
+args=" \$* "
+if [ "\$1" = push ] && [ -e "$AC_SANDBOX/armed" ] && [[ "\$args" == *"refs/locks/mywork"* ]]; then
+    exec sleep 30 </dev/null >/dev/null 2>&1
+fi
+"$SHIM_REAL_GIT" "\$@"; rc=\$?
+if [ "\$1" = push ] && [[ "\$args" == *"refs/locks/mywork"* ]]; then : > "$AC_SANDBOX/armed"; fi
+exit "\$rc"
+SHIM2
+    chmod +x "$SHIM_DIR/git"
+    SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT=4 run run_hook "Source/Core/src/Sync/C.cpp"
+    [[ "$(reason_of "$output")" == *"did not complete"* ]]
+    rm -f "$AC_SANDBOX/armed" "$SHIM_DIR/git"
+    # The remediation (drop the path), then the coordinated re-add, both by hand.
+    printf '%s\n' Source/Core/src/Sync/A.cpp > "$AC_SANDBOX/ws-a"
+    printf '%s\n' Source/Core/src/Sync/A.cpp Source/Core/src/Sync/C.cpp > "$AC_SANDBOX/ws-ac"
+    (cd "$PROJ" && LOCK_BRANCH="$AC_BRANCH" AGENT_ID=alice bash "$REPO_ROOT/agents/scripts/core/lock-claim-update.sh" mywork "$AC_SANDBOX/ws-a") >/dev/null 2>&1
+    (cd "$PROJ" && LOCK_BRANCH="$AC_BRANCH" AGENT_ID=alice bash "$REPO_ROOT/agents/scripts/core/lock-claim-update.sh" mywork "$AC_SANDBOX/ws-ac") >/dev/null 2>&1
+    [ "$(ws_of mywork)" = '["Source/Core/src/Sync/A.cpp","Source/Core/src/Sync/C.cpp"]' ]
+    rm -f "$(table_cache_file)"
+    run run_hook "Source/Core/src/Sync/C.cpp"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    ! grep -qs 'C.cpp' "$TMPDIR"/.smatchet-planlock-unresolved-*
+}
+
+@test "lock-table-cache: a record lock dir left by a killed writer is broken after a minute" {
+    local lib="$REPO_ROOT/agents/scripts/core/lock-table-cache.sh"
+    run bash -c '
+        . "$1"; cd "$2" || exit 9
+        ltc_unresolved_add feat/a slug src/x.cpp deadbeef || exit 8
+        f="$(_ltc_unresolved_path "$(_ltc_repo_key)")"
+        mkdir "$f.lock" || exit 7
+        python3 -c "import os, sys, time; t = time.time() - 120; os.utime(sys.argv[1], (t, t))" "$f.lock" || exit 6
+        ltc_unresolved_drop feat/a src/x.cpp
+        if ltc_unresolved_get feat/a src/x.cpp >/dev/null; then echo kept; else echo dropped; fi
+        [ -d "$f.lock" ] && echo lockdir-left || echo lockdir-gone' _ "$lib" "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"dropped"* ]]
+    [[ "$output" == *"lockdir-gone"* ]]
+}
+
 @test "lock-table-cache: concurrent record adds and no-op drops lose no record" {
     local lib="$REPO_ROOT/agents/scripts/core/lock-table-cache.sh" n
     run bash -c '
@@ -981,7 +1033,7 @@ fake_limiter() { # $1 = name, $2 = absent|real
         ( for i in $(seq 60); do ltc_unresolved_drop feat/a "p-nomatch"; done ) &
         for i in $(seq 60); do ltc_unresolved_add feat/a slug "p$i"; done
         wait
-        for i in $(seq 60); do ltc_unresolved_slug feat/a "p$i" >/dev/null || echo "lost p$i"; done
+        for i in $(seq 60); do ltc_unresolved_get feat/a "p$i" >/dev/null || echo "lost p$i"; done
         echo done' _ "$lib" "$PROJ"
     [ "$status" -eq 0 ]
     [[ "$output" == *"done"* ]]

@@ -299,7 +299,7 @@ planlock_slugs_named() {
     local doc="$1" id msgs ann set reasons
     id="$(jq -r --arg self "$SELF_NAME" "$ACG_DEFS"' acg_planlock_waiver_id($self)' "$doc")" || return 1
     if [ -z "$id" ]; then echo true; return 0; fi
-    if msgs="$(jq -er '.planlock_annotations | if type == "array" then map(tostring | gsub("[[:cntrl:]]"; " ")) | join("\n") else error("unreadable") end' \
+    if msgs="$(jq -er '.planlock_annotations | if type == "array" then map(tostring | gsub("[[:cntrl:]\u0080-\u009f]"; " ")) | join("\n") else error("unreadable") end' \
         "$doc" 2>/dev/null)"; then
         ann="$(printf '%s\n' "$msgs" | _mg_planlock_gate_slugs annotations)"
         case "$ann" in

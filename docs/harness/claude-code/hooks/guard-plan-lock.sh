@@ -34,8 +34,8 @@
 #     fetch is "could not run", never a read of stale local refs. A rollback
 #     that did not complete is recorded on this machine (lock-table-cache.sh
 #     ltc_unresolved_*), and later edits of the path stay DENIED while the
-#     lock it names still covers the path for this branch and the other
-#     branch's lock does too. An overlap the hook did not make
+#     lock it names is still at the commit the hook wrote, still covers the
+#     path for this branch, and the other branch's lock does too. An overlap the hook did not make
 #     (a hand claim, or another branch claiming over this one later) passes.
 #     The new slug already held (exit 1, normally this branch seen through a
 #     stale cache) -> fresh re-read: another branch covers -> DENY; this branch
@@ -313,11 +313,20 @@ deny_overlap() { # $1 = the other branch's slug, $2 = this branch's lock the hoo
 ltc_covering_slug "$rel" same "$mybr" >/dev/null; cov=$?
 case "$cov" in
   0)
-    if uslug="$(ltc_unresolved_slug "$mybr" "$rel")"; then
-      # The record holds only while the lock it names still covers the path for
-      # this branch (not released, the path not dropped, the branch not reused)
-      # AND another branch's lock covers it too. Either one gone: resolved.
-      ltc_covering_slug "$rel" same-slug "$mybr" "" "$uslug" >/dev/null; ucov=$?
+    if urec="$(ltc_unresolved_get "$mybr" "$rel")"; then
+      uslug="${urec%%$'\t'*}"
+      usha="${urec#*$'\t'}"
+      # The record holds only while the lock it names is still at the commit
+      # this hook wrote (any later write, a person's update, release or
+      # re-claim, means someone acted on it), still covers the path for this
+      # branch, AND another branch's lock covers it too. Any one gone: resolved.
+      # The local ref is the one locks-show fetched with the table.
+      utip="$(git rev-parse --verify --quiet "refs/locks/${uslug}^{commit}" 2>/dev/null)" || utip=""
+      if [ -n "$usha" ] && [ "$utip" != "$usha" ]; then
+        ucov=1
+      else
+        ltc_covering_slug "$rel" same-slug "$mybr" "" "$uslug" >/dev/null; ucov=$?
+      fi
       if [ "$ucov" -eq 0 ]; then
         oslug="$(ltc_covering_slug "$rel" other "$mybr")"; ocov=$?
         case "$ocov" in
@@ -512,7 +521,7 @@ rollback_extend() {
 # which is safe). Another branch covers the path -> roll back best-effort, then
 # DENY, also when the budget is spent and the rollback did not run. Re-read
 # undetermined -> allow with the note, fail-open, saying the re-check did not run.
-crosscheck_after_claim() { # $1 = rollback function, $2 = the claimed slug, $3 = the allow note
+crosscheck_after_claim() { # $1 = rollback function, $2 = the claimed slug, $3 = the allow note, $4 = the commit the claim wrote
   local xslug xrc rb
   xslug="$(other_cover_fresh)"; xrc=$?
   case "$xrc" in
@@ -521,7 +530,7 @@ crosscheck_after_claim() { # $1 = rollback function, $2 = the claimed slug, $3 =
       if rb="$("$1")"; then
         ltc_unresolved_drop "$mybr" "$rel"
       else
-        ltc_unresolved_add "$mybr" "$2" "$rel" ||
+        ltc_unresolved_add "$mybr" "$2" "$rel" "${4:-}" ||
           rb="$rb (This machine could not record it, so a retry may not be denied.)"
       fi
       drop_table_cache
@@ -586,7 +595,7 @@ if [ -n "$own" ]; then
   extend_own || extend_own ||
     fail_open "plan-lock '${own}' changed again while this hook re-read it (${ext_err}); nothing was written"
   drop_table_cache
-  crosscheck_after_claim rollback_extend "$own" "Plan-lock: ${count} other live session(s) share this repo, so this edit hook extended your plan-lock '${own}' on branch '${mybr}' with '${rel}' (${n} paths now; none dropped). Keep editing; release it with the rest of the work as usual."
+  crosscheck_after_claim rollback_extend "$own" "Plan-lock: ${count} other live session(s) share this repo, so this edit hook extended your plan-lock '${own}' on branch '${mybr}' with '${rel}' (${n} paths now; none dropped). Keep editing; release it with the rest of the work as usual." "$new_sha"
 fi
 
 # Claim a new lock for this branch under its deterministic slug.
@@ -598,7 +607,7 @@ case "$rc" in
   0)
     claim_sha="$(printf '%s\n' "$out" | sed -n 's/.* claimed at \([0-9a-f]\{40,64\}\) (owner=.*/\1/p' | tail -n 1)"
     drop_table_cache
-    crosscheck_after_claim rollback_new "$aslug" "Plan-lock: ${count} other live session(s) share this repo, so this edit hook auto-claimed plan-lock '${aslug}' for '${rel}' on branch '${mybr}'. Later uncovered edits on this branch extend it. Set its plan with LOCK_PLAN=<your plan-doc> bash agents/scripts/core/lock-claim-update.sh ${aslug} <full-write-set-file>, and release it with the rest of the work as usual."
+    crosscheck_after_claim rollback_new "$aslug" "Plan-lock: ${count} other live session(s) share this repo, so this edit hook auto-claimed plan-lock '${aslug}' for '${rel}' on branch '${mybr}'. Later uncovered edits on this branch extend it. Set its plan with LOCK_PLAN=<your plan-doc> bash agents/scripts/core/lock-claim-update.sh ${aslug} <full-write-set-file>, and release it with the rest of the work as usual." "$claim_sha"
     ;;
   1)
     # The slug is already held. It is derived from this branch, so the holder is

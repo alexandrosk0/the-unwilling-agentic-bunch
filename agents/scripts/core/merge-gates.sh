@@ -340,7 +340,7 @@ _MG_PLANLOCK_ANN_FULL='__mg_planlock_annotations_page_full__'
 _MG_PLANLOCK_ANN_JQ='if (type != "array") then error("not an annotation list")
     elif (length >= 100) then "'"$_MG_PLANLOCK_ANN_FULL"'"
     else (.[] | select((.annotation_level // "failure") == "failure")
-          | (.message // "") | gsub("[[:cntrl:]]"; " ")) end'
+          | (.message // "") | gsub("[[:cntrl:]\u0080-\u009f]"; " ")) end'
 _mg_planlock_annotations() {
     local owner="$1" repo="$2" sha="$3" id out
     [ -n "$sha" ] || return 1
@@ -1260,7 +1260,7 @@ poll_merge_gates() {
         # was crossed or why (GitHub strips the label post-merge, so the reason
         # is otherwise unrecoverable — #2160). Field 39; the red stays in ci_fail.
         if [ "${fields[39]:-false}" = "true" ]; then
-            echo "WARN: plan-lock-out-of-band present but NOT honoured — a plan-lock-out-of-band downgrade also requires a 'plan-lock-disposition:<reason>' label or PR-body marker naming the lock slug(s) the Plan-lock gate reported and why crossing them is safe. Add one to merge past the 'Plan-lock gate' red; if the red is stale (the lock was released or aged out), re-run the gate instead." >&2
+            echo "WARN: plan-lock-out-of-band present but NOT honoured — a plan-lock-out-of-band downgrade also requires a disposition whose reason opens with each lock slug the Plan-lock gate reported: a 'plan-lock-disposition:<slug>' label or a PR-body line 'plan-lock-disposition: <slug> — <why crossing it is safe>'. Add one to merge past the 'Plan-lock gate' red; if the red is stale (the lock was released or aged out), re-run the gate instead." >&2
         fi
 
         # Duplicate-context divergence (backlog merge-gate-duplicate-check-name-drift).

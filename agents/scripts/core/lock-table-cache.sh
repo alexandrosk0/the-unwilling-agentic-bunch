@@ -32,7 +32,7 @@
 #
 # Public functions: ltc_sibling_count, ltc_covering_slug, ltc_lock_rows,
 # ltc_lock_table_json, ltc_invalidate_table, ltc_unresolved_add,
-# ltc_unresolved_slug, ltc_unresolved_drop. `_ltc_*` names are internal.
+# ltc_unresolved_get, ltc_unresolved_drop. `_ltc_*` names are internal.
 #
 # Test/override seams (read-only):
 #   LTC_PROJ           force the repo root (default CLAUDE_PROJECT_DIR | $PWD)
@@ -143,48 +143,58 @@ ltc_lock_table_json() {
 # --- unresolved auto-claim rollbacks -----------------------------------------
 # When the Layer A hook's own claim loses a cross-branch race and rolling it
 # back does not complete, this branch's lock is left overlapping another
-# branch's on that path. The hook records it here (branch<TAB>slug<TAB>path) so
-# later edits of the path stay denied until the overlap is resolved. Only the
+# branch's on that path. The hook records it here (branch<TAB>slug<TAB>path<TAB>
+# commit: the lock commit the hook's own claim wrote) so later edits of the
+# path stay denied until the overlap is resolved. Only the
 # hook's own failed rollbacks are recorded: an overlap a person claimed by hand,
 # or one another branch made later over this branch's earlier claim, is never
-# denied here. A record only denies while its own lock still covers the path
-# for this branch and another branch's lock does too (guard-plan-lock.sh): a
-# record outliving either is dropped on the next edit of the path. Per machine
+# denied here. A record only denies while its lock is still at the commit the
+# hook wrote (any later write, a person's update, release or re-claim, means
+# someone acted on it), still covers the path for this branch, and another
+# branch's lock does too (guard-plan-lock.sh): a record outliving any of those
+# is dropped on the next edit of the path. Per machine
 # and per repo, like the table cache; a cleared TMPDIR drops the record and the
 # deny fails open (Layers B and C still check). Values reach awk through
 # ENVIRON, never -v, so a backslash in a path stays literal. Writers serialise
-# on a mkdir lock beside the file (portable where flock is not); a drop that
-# cannot take it keeps the file as it is, and an add that cannot take it
-# appends anyway, so a contended or stale lock never loses a record.
+# on a mkdir lock beside the file (portable where flock is not). A lock dir
+# older than a minute is a killed writer's (the critical section takes
+# milliseconds) and is broken; a drop that still cannot take the lock keeps
+# the file as it is, and an add appends anyway, so no record is ever lost.
 _ltc_unresolved_path() { printf '%s/.smatchet-planlock-unresolved-%s' "$(_ltc_cache_dir)" "$1"; }
 _ltc_unresolved_lock() { # $1 = record file; rc 0 once its lock dir is held (about 1 s of tries)
   local n=0
   while ! mkdir "$1.lock" 2>/dev/null; do
     n=$((n + 1))
-    [ "$n" -lt 20 ] || return 1
+    if [ "$n" -ge 20 ]; then
+      # A stale lock (its writer was killed): break it once, then try again.
+      [ -n "$(find "$1.lock" -prune -mmin +1 2>/dev/null)" ] || return 1
+      rmdir "$1.lock" 2>/dev/null || return 1
+      mkdir "$1.lock" 2>/dev/null
+      return
+    fi
     sleep 0.05 2>/dev/null || sleep 1
   done
   return 0
 }
 _ltc_unresolved_unlock() { rmdir "$1.lock" 2>/dev/null || :; }
-ltc_unresolved_add() { # $1 = branch, $2 = slug, $3 = path; rc 1 when it cannot be recorded
+ltc_unresolved_add() { # $1 = branch, $2 = slug, $3 = path, $4 = commit (may be empty); rc 1 when it cannot be recorded
   local key f rc locked=0
   key="$(_ltc_repo_key)" || return 1
   [ -n "$key" ] || return 1
   f="$(_ltc_unresolved_path "$key")"
   _ltc_unresolved_lock "$f" && locked=1
-  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$f" 2>/dev/null; rc=$?
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}" >> "$f" 2>/dev/null; rc=$?
   [ "$locked" -eq 0 ] || _ltc_unresolved_unlock "$f"
   return "$rc"
 }
-ltc_unresolved_slug() { # $1 = branch, $2 = path -> the recorded slug; rc 0 found, 1 not
+ltc_unresolved_get() { # $1 = branch, $2 = path -> "slug<TAB>commit" of the latest record; rc 0 found, 1 not
   local key f
   key="$(_ltc_repo_key)" || return 1
   [ -n "$key" ] || return 1
   f="$(_ltc_unresolved_path "$key")"
   [ -f "$f" ] || return 1
-  LTC_B="$1" LTC_P="$2" awk -F '\t' '$1 == ENVIRON["LTC_B"] && $3 == ENVIRON["LTC_P"] { s = $2 }
-    END { if (s == "") exit 1; print s }' "$f" 2>/dev/null
+  LTC_B="$1" LTC_P="$2" awk -F '\t' '$1 == ENVIRON["LTC_B"] && $3 == ENVIRON["LTC_P"] && $2 != "" { s = $2; c = $4 }
+    END { if (s == "") exit 1; printf "%s\t%s\n", s, c }' "$f" 2>/dev/null
 }
 ltc_unresolved_drop() { # $1 = branch, $2 = path; always rc 0
   local key f

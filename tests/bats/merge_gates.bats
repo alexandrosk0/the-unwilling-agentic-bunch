@@ -1842,7 +1842,7 @@ plan_lock_red_fixture() {
     [[ "$output" == *"1 fail"* ]]
     [[ "$output" == *"0 warn-downgraded"* ]]
     [[ "$output" == *"plan-lock-out-of-band present but NOT honoured"* ]]
-    [[ "$output" == *"plan-lock-disposition:<reason>"* ]]
+    [[ "$output" == *"plan-lock-disposition:<slug>"* ]]
     rm -f "$f"
 }
 
@@ -2338,6 +2338,37 @@ plan-lock-gate: 'b' overlaps the write set of plan-lock 'docs', held by a differ
     [ "$status" -eq 0 ]
     [[ "$output" == *"GATES_PASSED"* ]]
     rm -f "$f"
+}
+
+@test "planlock_disposition_subjects uses only engine-neutral regex classes (jq and gh's gojq must cut alike)" {
+    # Oniguruma jq reads [[:space:]] and [[:cntrl:]] Unicode-wide; gh's RE2-based
+    # gojq reads them ASCII-only. The poller can run on either engine, the
+    # aggregate and the admin path on jq, so the def must spell its classes out.
+    local def
+    def="$(printf '%s\n' "$_MG_JQ_DISPOSITION_DEF" | sed -n '/^def planlock_disposition_subjects/,/;$/p')"
+    [ -n "$def" ]
+    [[ "$def" != *"[[:space:]]"* ]]
+    [[ "$def" != *"[[:blank:]]"* ]]
+    # [[:cntrl:]] appears only with the C1 range spelled out beside it.
+    [[ "$def" != *'[[:cntrl:]]'* ]]
+    [[ "$def" == *'[[:cntrl:]\u0080-\u009f]'* ]]
+}
+
+@test "planlock_disposition_subjects cuts alike under jq and gojq" {
+    local gojq b j g
+    gojq="${MERGE_GATES_TEST_GOJQ:-$(command -v gojq || true)}"
+    [ -n "$gojq" ] || [ ! -x "$HOME/go/bin/gojq" ] || gojq="$HOME/go/bin/gojq"
+    [ -n "$gojq" ] || skip "no gojq (gh's jq engine) on PATH; set MERGE_GATES_TEST_GOJQ to run it"
+    for b in \
+        "$(printf 'plan-lock-disposition: tracker-refactor\302\240\342\200\224 only touches docs/plans/INDEX.md')" \
+        "$(printf 'plan-lock-disposition: tracker-refactor\302\205\342\200\224 only touches docs')" \
+        "$(printf 'plan-lock-disposition: a, b \342\200\223 why docs')" \
+        'plan-lock-disposition: p -- q docs' 'plan-lock-disposition: m (n docs)' 'plan-lock-disposition: k - l docs'; do
+        j="$(jq -rn --arg b "$b" "$_MG_JQ_DISPOSITION_DEF"' planlock_disposition_subjects(["plan-lock-disposition:x:docs"]; $b)')"
+        g="$("$gojq" -rn --arg b "$b" "$_MG_JQ_DISPOSITION_DEF"' planlock_disposition_subjects(["plan-lock-disposition:x:docs"]; $b)')"
+        [ "$j" = "$g" ]
+        [[ "$j" != *docs* ]]
+    done
 }
 
 @test "planlock_disposition_subjects cuts each reason at its first spaced dash, colon or parenthesis" {

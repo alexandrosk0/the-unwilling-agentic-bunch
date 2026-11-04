@@ -723,8 +723,10 @@ _mk_lint_fixture() {
 
 @test "a full reference whose label is a code span renders as its label" {
     _mk_lint_fixture
-    printf '# Doc\n\n## Use [`run.sh`][run] now\n\n[run]: a.md\n' > "$FIXTURE_DIR/docs/rules.md"
-    printf '# a\n\n[r](rules.md#use-runsh-now)\n' > "$FIXTURE_DIR/docs/a.md"
+    printf '# Doc\n\n## Use [`run.sh`][run] now\n\n## See [`a`](a.md) and [b][zz]\n\n[run]: a.md\n' > "$FIXTURE_DIR/docs/rules.md"
+    # The second heading mixes an inline link (renders as its label) with an
+    # undefined reference (renders literally): GitHub's slug is see-a-and-bzz.
+    printf '# a\n\n[r](rules.md#use-runsh-now) [s](rules.md#see-a-and-bzz)\n' > "$FIXTURE_DIR/docs/a.md"
     run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
     [ "$status" -eq 0 ]
     [[ "$output" != *"BROKEN_LINK"* ]]
@@ -736,7 +738,8 @@ _mk_lint_fixture() {
     for body in \
         '## Foo\n\n- a\n  - b\n\n  para\n\n    ## Foo\n\n## Foo\n' \
         '## Foo\n\n1. Step\nlazy\n\n    ## Foo\n\n## Foo\n' \
-        '## Foo\n\n- Step\n\n\t## Foo\n\n## Foo\n'; do
+        '## Foo\n\n- Step\n\n\t## Foo\n\n## Foo\n' \
+        '## Foo\n\n1.  Step\n    - sub\n    ## Foo\n\n## Foo\n'; do
         printf "# Doc\n\n$body" > "$FIXTURE_DIR/docs/rules.md"
         printf '# a\n\n[f](rules.md#foo-2)\n' > "$FIXTURE_DIR/docs/a.md"
         run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all

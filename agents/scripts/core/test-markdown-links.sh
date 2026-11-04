@@ -693,9 +693,10 @@ def _render_inline(seg, strip_emphasis, keep_refs=False):
     return re.sub(r"\x00(\d+)\x00", lambda m: escaped[int(m.group(1))], seg)
 
 
-# An inline link or image, or a full / collapsed reference, its label allowed
-# one level of nested brackets.
-_HEADING_LINK_RE = re.compile(r"!?\[((?:[^\[\]]|\[[^\[\]]*\])*)\](?:\([^)]*\)|\[[^\]]*\])")
+# An inline link or image, and a full / collapsed reference, each with a label
+# allowed one level of nested brackets.
+_HEADING_INLINE_LINK_RE = re.compile(r"!?\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\([^)]*\)")
+_HEADING_REF_LINK_RE = re.compile(r"!?\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\[[^\]]*\]")
 
 
 def heading_renderings(raw):
@@ -705,10 +706,14 @@ def heading_renderings(raw):
     (`[`x.sh`](x.sh)`, `[`x.sh`][x]`) renders as its label; and full /
     collapsed references are rendered both resolved and literal."""
     out = []
-    sources = [raw]
-    delinked = _HEADING_LINK_RE.sub(r"\1", raw)
-    if delinked != raw:
-        sources.append(delinked)
+    # Inline links and references are delinked separately as well as together:
+    # an undefined reference renders literally next to an inline link that
+    # renders as its label, so no single pass covers every heading.
+    inline = _HEADING_INLINE_LINK_RE.sub(r"\1", raw)
+    sources = []
+    for src in (raw, inline, _HEADING_REF_LINK_RE.sub(r"\1", raw), _HEADING_REF_LINK_RE.sub(r"\1", inline)):
+        if src not in sources:
+            sources.append(src)
     for src in sources:
         for strip_emphasis in (True, False):
             for keep_refs in (False, True):
@@ -779,8 +784,12 @@ def heading_sources(lines):
         lead = content[:len(content) - len(content.lstrip(" \t"))]
         cols = lead.expandtabs(4) + content[len(lead):]
         indent = len(cols) - len(cols.lstrip(" "))
-        # A thematic break (`- - -`, `* * *`) wins over a list marker.
+        # A thematic break (`- - -`, `* * *`) wins over a list marker, and a
+        # marker indented more than 3 past the innermost open item's content
+        # (or past column 3 at the top level) is that item's continuation text.
         lm = None if _THEMATIC_BREAK_RE.match(cols) else _LIST_MARKER_RE.match(cols)
+        if lm and indent > (items[-1] if items else 0) + 3:
+            lm = None
         target = content
         if lm:
             # A marker closes every open item nested at or past its column.
@@ -790,10 +799,13 @@ def heading_sources(lines):
             items.append(lm.end() if target.strip() else lm.end() + 1)
         elif cols.strip():
             if items and indent < items[-1]:
-                top_heading = _ATX_HEADING_RE.match(cols) is not None
-                if last_text and not top_heading:
-                    pass  # a lazy continuation line keeps every item open
-                else:
+                # A heading at any enclosing item's column (or at the top level)
+                # interrupts the paragraph; any other text after a text line is
+                # a lazy continuation and keeps every item open.
+                heading_here = any(
+                    indent >= c and _ATX_HEADING_RE.match(cols[c:]) is not None
+                    for c in [0] + items)
+                if not (last_text and not heading_here):
                     while items and items[-1] > indent:
                         items.pop()
             if items and indent >= items[-1]:
