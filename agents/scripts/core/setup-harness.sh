@@ -164,6 +164,10 @@ link_dir() {
 # § Existing utilities reused warns about.
 # shellcheck source=agents/scripts/core/lib/agents-dir-current.sh
 . "$ROOT/agents/scripts/core/lib/agents-dir-current.sh"
+# The subsystem-leaf set (shims below + the Codex leaf report) — one definition
+# shared with test-subsystem-docs.sh and test-leaf-doc-discovery.sh.
+# shellcheck source=agents/scripts/core/lib/leaf-docs.sh
+. "$ROOT/agents/scripts/core/lib/leaf-docs.sh"
 
 link_agents() {
   local dest=".claude/agents" f base
@@ -238,20 +242,65 @@ link_file() {
 # Generate gitignored CLAUDE.md shims beside each subsystem leaf AGENTS.md.
 # Claude Code lazy-loads nested CLAUDE.md (not nested AGENTS.md) when a file in
 # that dir is touched; the one-line `@AGENTS.md` import pulls in the leaf rules.
-# The shim is gitignored (`.gitignore` Source/Core/src/**/CLAUDE.md) so the
-# committed tree stays AGENTS.md-only (portable to Codex/Cursor, which read
-# AGENTS.md natively). Registry of leaves: root CONTEXT-MAP.md.
+# The leaf set is lib/leaf-docs.sh's (tracked AGENTS.md below Source/, minus the
+# lint exempt zones), the same set test-subsystem-docs.sh and
+# test-leaf-doc-discovery.sh check; registry of leaves: root CONTEXT-MAP.md.
+# A shim is written ONLY when no CLAUDE.md exists there yet and the host's ignore
+# rules already ignore that path, so the committed tree stays AGENTS.md-only
+# (portable to Codex/Cursor, which read AGENTS.md natively). A CLAUDE.md that is
+# not our shim — tracked, or the user's own untracked notes — is never
+# overwritten; every skip is reported with the fix.
 gen_subsystem_claude_shims() {
-  local count=0 agents shim
+  local count=0 skipped=0 agents shim
   while IFS= read -r agents; do
     [[ -z "$agents" ]] && continue
     shim="$(dirname "$agents")/CLAUDE.md"
-    if [[ ! -f "$shim" ]] || ! grep -q '^@AGENTS.md' "$shim" 2>/dev/null; then
-      printf '@AGENTS.md\n\n<!-- Generated gitignored shim (setup-harness.sh). Claude Code lazy-loads nested CLAUDE.md, not AGENTS.md; this imports the sibling leaf rules. Edit AGENTS.md, not this file. -->\n' > "$shim"
-      count=$((count + 1))
+    if [[ -f "$shim" ]] && grep -q '^@AGENTS.md' "$shim" 2>/dev/null; then
+      continue
     fi
-  done < <(git_cmd ls-files 'Source/Core/src/*/AGENTS.md' 2>/dev/null || true)
-  echo "  subsystem-shims  $count new CLAUDE.md shim(s) beside Source/Core/src/*/AGENTS.md (gitignored)"
+    if git_cmd ls-files --error-unmatch -- "$shim" >/dev/null 2>&1; then
+      echo "  WARN  subsystem-shims: $shim is tracked and does not import the leaf; add an '@AGENTS.md' line to it so Claude Code auto-loads $agents" >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if [[ -e "$shim" ]]; then
+      echo "  WARN  subsystem-shims: $shim exists (not a generated shim) and was left as is; add an '@AGENTS.md' line to it so Claude Code auto-loads $agents" >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if ! git_cmd check-ignore -q -- "$shim" >/dev/null 2>&1; then
+      echo "  WARN  subsystem-shims: $shim is not ignored, so it was not written; ignore it (e.g. Source/**/CLAUDE.md in .gitignore) for Claude Code to auto-load $agents" >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    printf '@AGENTS.md\n\n<!-- Generated gitignored shim (setup-harness.sh). Claude Code lazy-loads nested CLAUDE.md, not AGENTS.md; this imports the sibling leaf rules. Edit AGENTS.md, not this file. -->\n' > "$shim"
+    count=$((count + 1))
+  done < <(leaf_agents_files Source)
+  echo "  subsystem-shims  $count new CLAUDE.md shim(s) beside leaf AGENTS.md files; $skipped skipped"
+}
+
+# Remove LAYER-OWNED links under $1 whose target no longer exists: a skill or
+# workflow deleted or renamed in the layer leaves its old link behind, and
+# link_dir / link_file only replace a dangling link they are asked to create
+# again. Only a dangling symlink/junction whose recorded target points into the
+# layer's skill or workflow dirs is removed; a link the user made (to their own
+# dotfiles, say), a live link, a real directory or a hardlinked copy is never
+# touched. Windows' hardlink fallback (link_file under no symlink privilege)
+# leaves a real file behind, which this cannot tell from a user's file.
+prune_dangling_links() {
+  local dir="$1" entry target
+  [[ -d "$dir" ]] || return 0
+  for entry in "$dir"/*; do
+    [[ -L "$entry" && ! -e "$entry" ]] || continue
+    target="$(readlink -- "$entry" 2>/dev/null)" || continue
+    target="${target//\\//}"
+    case "$target" in
+      *agents/_shared/skills/*|*agents/_shared/workflows/*|*agents/project/workflows/*) ;;
+      *) continue ;;
+    esac
+    rm -f -- "$entry"
+    echo "  prune      $entry (dangling layer link removed)"
+  done
 }
 
 # _template_history_match <layer-rel-src> <dst>
@@ -410,6 +459,7 @@ PY
       link_dir ".claude/skills/$skill_name" "agents/_shared/skills/$skill_name"
     done
   fi
+  prune_dangling_links ".claude/skills"
 
   # Auto-link every saved Workflow under agents/_shared/workflows/ into the
   # gitignored .claude/workflows/ so the Workflow tool resolves them by name
@@ -434,6 +484,7 @@ PY
       link_file ".claude/workflows/$(basename "$wf")" "$wf"
     done
   fi
+  prune_dangling_links ".claude/workflows"
 
   # Special case: token-tracking lives at a non-conforming path
   # (agents/_shared/token-tracking/, not agents/_shared/skills/token-tracking/).
@@ -686,7 +737,7 @@ setup_codex() {
     echo "  OK  no duplicate agent basenames across core/project"
   fi
 
-  leaf_count="$(git_cmd ls-files 'Source/Core/src/*/AGENTS.md' 2>/dev/null | wc -l | tr -d ' ' || true)"
+  leaf_count="$(leaf_agents_files Source | grep -c . || true)"
   echo "  OK  Codex native nearest-AGENTS leaf rules = $leaf_count file(s)"
 
   if [[ -f ".codex/config.toml" && -f ".codex/hooks.json" ]]; then

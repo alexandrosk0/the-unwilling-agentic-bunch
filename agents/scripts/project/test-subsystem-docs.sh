@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 # test-subsystem-docs.sh — coverage + staleness gate for per-subsystem agent docs.
 # ----------------------------------------------------------------------------
-# Per-subsystem leaf docs live at Source/Core/src/<ctx>/{AGENTS,CONTEXT,README}.md
-# and are registered in the root CONTEXT-MAP.md. This gate keeps the registry,
-# the on-disk leaves, and the central code-review.md checklist in sync.
+# Per-subsystem leaf docs live at <dir>/{AGENTS,CONTEXT,README}.md for a <dir>
+# below Source/ (Source/Core/src/<ctx>/, a plugin dir, ...) and are registered in
+# the root CONTEXT-MAP.md. This gate keeps the registry, the on-disk leaves, and
+# the central review checklists in sync.
 #
 # FAIL (exit 1) on any structural breakage:
 #   1. A leaf listed in CONTEXT-MAP.md is missing on disk.
-#   2. An on-disk Source/Core/src/<ctx>/AGENTS.md is absent from CONTEXT-MAP.md.
-#   3. A leaf invariant bullet is duplicated verbatim in agents/core/code-review.md
-#      (central<->leaf drift — the rule must live in ONE place: the leaf).
+#   2. An on-disk leaf AGENTS.md below Source/ (lib/leaf-docs.sh: tracked, outside
+#      the lint exempt zones) is absent from CONTEXT-MAP.md.
+#   3. A leaf invariant bullet is duplicated verbatim in a central checklist:
+#      agents/core/code-review.md, plus the host checklist named by
+#      project.config.json docs.review_checklist when set (central<->leaf drift —
+#      the rule must live in ONE place: the leaf). A configured checklist that
+#      does not exist FAILs.
 #
 # WARN (never changes exit code), only in --diff mode:
-#   4. A context's .cpp/.h changed vs <ref> but its README.md did not (stale orientation).
+#   4. A registered leaf's .cpp/.h changed vs <ref> but its registered README.md
+#      did not (stale orientation).
 #
 # Modes:
 #   (no args)          structural checks 1-3 + staleness WARN vs origin/develop when that
@@ -20,7 +26,7 @@
 #   --diff[=]<ref>     structural checks 1-3 + staleness WARN vs <ref> (e.g. origin/develop).
 #   --selftest         assert the registry parses and matches on-disk leaves; checks 1-2 only.
 #
-# Project-bound (hardcodes Source/Core/src paths) — lives in agents/scripts/project/,
+# Project-bound (hardcodes the Source/ leaf root) — lives in agents/scripts/project/,
 # not core/, per the portable/project split. Goes through test-shell-lint.sh (5 rules).
 # ----------------------------------------------------------------------------
 set -uo pipefail
@@ -29,26 +35,39 @@ set -uo pipefail
 # the superproject once this script lives in the agent-layer/ submodule, and to this
 # checkout before the flip. A climb from this script's own path would land in the
 # layer after the flip.
-# The central checklist (agents/core/code-review.md) is layer content, read from
-# this script's own tree.
+# The layer checklist (agents/core/code-review.md) is layer content, read from
+# this script's own tree; the optional host checklist (docs.review_checklist) is
+# host content, relative to PROJECT_ROOT.
 _tsd_self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 _tsd_layer="$(cd "$(dirname "$_tsd_self")/../../.." && pwd)"
+unset PC_DOCS_REVIEW_CHECKLIST
+_tsd_config_err=0
 if [ -f "$_tsd_layer/scripts/dev/project-config.sh" ]; then
+    # Full load, not PC_ROOTS_ONLY: check 3 reads docs.review_checklist and the
+    # leaf set reads the lint exempt zones. A failed load (no working python, a
+    # malformed config) still exports the roots; see the policy after fail=0.
     # shellcheck source=scripts/dev/project-config.sh
-    PC_ROOTS_ONLY=1 . "$_tsd_layer/scripts/dev/project-config.sh" || true
+    . "$_tsd_layer/scripts/dev/project-config.sh" || _tsd_config_err=1
 else
     unset PROJECT_ROOT AGENT_LAYER_ROOT  # no config beside this script (a fixture copy): its own tree, never an inherited root
 fi
-cd "${PROJECT_ROOT:-$_tsd_layer}"
+cd "${PROJECT_ROOT:-$_tsd_layer}" || { echo "test-subsystem-docs: cannot cd to ${PROJECT_ROOT:-$_tsd_layer}" >&2; exit 2; }
 
 # MAP/SRC_GLOB are read-only override seams (no command-from-env injection) so
 # --selftest can point check 1 (registered-leaf-missing-on-disk) at a synthetic
 # temp registry and assert the REAL detection path FAILS on a known-bad fixture.
 # Defaults are unchanged in every real invocation (no env set) — a test seam, not
 # a logic change. SUBSYS_DOCS_NEGCHECK guards against selftest re-entrancy.
+# shellcheck source=agents/scripts/core/lib/leaf-docs.sh
+. "$_tsd_layer/agents/scripts/core/lib/leaf-docs.sh" \
+  || { echo "test-subsystem-docs: missing $_tsd_layer/agents/scripts/core/lib/leaf-docs.sh" >&2; exit 2; }
+
 MAP="${SUBSYS_DOCS_MAP:-CONTEXT-MAP.md}"
-SRC_GLOB="${SUBSYS_DOCS_SRC_GLOB:-Source/Core/src}"
-CENTRAL="$_tsd_layer/agents/core/code-review.md"
+SRC_GLOB="${SUBSYS_DOCS_SRC_GLOB:-Source}"
+CENTRAL_FILES=("$_tsd_layer/agents/core/code-review.md")
+if [[ -n "${PC_DOCS_REVIEW_CHECKLIST:-}" ]]; then
+  CENTRAL_FILES+=("$PC_DOCS_REVIEW_CHECKLIST")
+fi
 
 # Default (no args, as test-all.sh invokes it): structural checks + staleness vs
 # origin/develop when that ref resolves. --diff names an explicit ref; --selftest
@@ -94,12 +113,24 @@ fi
 fail=0
 warn=0
 
+# A config that could not be loaded must not silently drop a configured host
+# checklist: FAIL when its raw text names docs.review_checklist, else WARN (the
+# layer checklist alone loses nothing that was configured).
+if [[ "$_tsd_config_err" == 1 ]]; then
+  if [[ -f "${PC_CONFIG_FILE:-}" ]] && grep -q '"review_checklist"' "$PC_CONFIG_FILE"; then
+    echo "test-subsystem-docs: FAIL — ${PC_CONFIG_FILE} names docs.review_checklist but could not be loaded; fix it (or the python it needs) so check 3 can read it." >&2
+    fail=1
+  else
+    echo "test-subsystem-docs: WARN — project.config.json not loaded; checking against agents/core/code-review.md only, and no lint exempt zones." >&2
+  fi
+fi
+
 if [[ ! -f "$MAP" ]]; then
   echo "test-subsystem-docs: FAIL — registry $MAP not found" >&2
   exit 1
 fi
 
-# --- Parse the registry: every backtick-wrapped Source/Core/src/<ctx>/<X>.md path
+# --- Parse the registry: every backtick-wrapped Source/<dir>/<X>.md path
 # inside the `## Registry` section ONLY (awk scopes to it, so format-contract examples
 # and the growth-path `<ctx>` placeholder elsewhere in the doc don't get parsed as real
 # leaves). The `<` filter is a belt-and-braces guard against any placeholder path.
@@ -117,8 +148,10 @@ while IFS= read -r leaf; do
 done <<< "$registered"
 
 # --- Check 2: every on-disk leaf AGENTS.md is registered.
-# git ls-files = tracked files only (matches the repo's tracked-vs-ignored discipline).
-ondisk_agents="$(git ls-files "$SRC_GLOB/*/AGENTS.md" 2>/dev/null | sort -u)"
+# The leaf set is lib/leaf-docs.sh's (tracked AGENTS.md at any depth below
+# $SRC_GLOB, minus the lint exempt zones such as vendored ThirdParty/), the same
+# set setup-harness.sh shims.
+ondisk_agents="$(leaf_agents_files "$SRC_GLOB" | sort -u)"
 while IFS= read -r leaf; do
   [[ -z "$leaf" ]] && continue
   if ! grep -qF "$leaf" <<< "$registered"; then
@@ -128,7 +161,7 @@ while IFS= read -r leaf; do
   fi
 done <<< "$ondisk_agents"
 
-# --- Check 3: no leaf invariant bullet duplicated verbatim in the central checklist.
+# --- Check 3: no leaf invariant bullet duplicated verbatim in a central checklist.
 # Normalise a line to plain lowercase text (strip markdown emphasis/backticks/list
 # marker, collapse whitespace) so a copy-paste is caught regardless of formatting.
 # Skip --selftest (structure-only).
@@ -136,8 +169,9 @@ _normalize() {
   sed -E 's/[`*_]//g; s/^[[:space:]]*-[[:space:]]+//; s/[[:space:]]+/ /g; s/^ //; s/ $//' \
     | tr '[:upper:]' '[:lower:]'
 }
-if [[ "$MODE" != "selftest" && -f "$CENTRAL" ]]; then
-  central_norm="$(_normalize < "$CENTRAL")"
+_check_central() { # $1 = central checklist; FAILs on each leaf bullet it restates
+  local central="$1" central_norm leaf bullet norm
+  central_norm="$(_normalize < "$central")"
   while IFS= read -r leaf; do
     [[ -z "$leaf" || ! -f "$leaf" ]] && continue
     # Only bullet lines inside the leaf that read as rules (start with "- "), long
@@ -146,7 +180,7 @@ if [[ "$MODE" != "selftest" && -f "$CENTRAL" ]]; then
       norm="$(printf '%s' "$bullet" | _normalize)"
       [[ "${#norm}" -lt 60 ]] && continue
       if grep -qF "$norm" <<< "$central_norm"; then
-        echo "test-subsystem-docs: FAIL — leaf rule duplicated in $CENTRAL:" >&2
+        echo "test-subsystem-docs: FAIL — leaf rule duplicated in $central:" >&2
         echo "    leaf: $leaf" >&2
         echo "    rule: ${norm:0:80}..." >&2
         echo "    keep the rule in the leaf only; the central file points, it does not restate." >&2
@@ -154,14 +188,26 @@ if [[ "$MODE" != "selftest" && -f "$CENTRAL" ]]; then
       fi
     done < <(grep -E '^- ' "$leaf")
   done <<< "$ondisk_agents"
+}
+if [[ "$MODE" != "selftest" ]]; then
+  for central in "${CENTRAL_FILES[@]}"; do
+    if [[ -f "$central" ]]; then
+      _check_central "$central"
+    elif [[ "$central" != "${CENTRAL_FILES[0]}" ]]; then
+      echo "test-subsystem-docs: FAIL — project.config.json docs.review_checklist names a missing file: $central" >&2
+      fail=1
+    fi
+  done
 fi
 
 # --- Check 4 (diff mode only): README staleness WARN.
 if [[ "$MODE" == "diff" ]]; then
   changed="$(git diff --name-only "$DIFF_REF"...HEAD 2>/dev/null || git diff --name-only "$DIFF_REF" 2>/dev/null || true)"
-  # Discover every context dir that owns a README.md (data-driven — picks up new ones).
+  # Every README the registry names (data-driven — a new row is picked up). Only
+  # registered orientation docs: a vendored or plugin README below Source/ is not
+  # a leaf and must not WARN.
   while IFS= read -r readme; do
-    [[ -z "$readme" ]] && continue
+    [[ -z "$readme" || ! -f "$readme" ]] && continue
     ctx_dir="$(dirname "$readme")"
     code_touched="$(grep -E "^${ctx_dir}/.*\.(cpp|h)$" <<< "$changed" || true)"
     readme_touched="$(grep -Fx "$readme" <<< "$changed" || true)"
@@ -170,7 +216,7 @@ if [[ "$MODE" == "diff" ]]; then
       echo "    review $readme; if still accurate, touch it or add PR label 'subsystem-docs-out-of-band'." >&2
       warn=1
     fi
-  done < <(git ls-files "$SRC_GLOB/*/README.md" 2>/dev/null | sort -u)
+  done < <(grep -E '/README\.md$' <<< "$registered" || true)
 fi
 
 if [[ "$fail" -ne 0 ]]; then

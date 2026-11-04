@@ -13,7 +13,9 @@
 # MY-BRANCH lock (exact or dir-prefix) -> allow; an OTHER-branch lock is not my
 # cover (the branch-key / owner-collision canary); union-of-distinct sibling
 # count dedups a sid across regdirs; bypass + detached-HEAD + out-of-repo all
-# fail open.
+# fail open; the two review artifacts (.review-findings.json, .review-ack) are
+# never gated while untracked, ignored plain files, but every other ignored path,
+# a tracked or different-case copy, and a symlink/hardlink to a tracked file are.
 # ----------------------------------------------------------------------------
 
 setup() {
@@ -258,4 +260,104 @@ mk_nested_wt() {
     [ "$status" -eq 0 ]
     [[ "$output" == *'"permissionDecision":"deny"'* ]]
     [[ "$output" == *"covering 'sub/file.txt' on branch 'develop'"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# The review artifacts the commit / push gates require (.review-findings.json,
+# .review-ack) are never gated while they are untracked, ignored plain files.
+# Every other ignored path stays gated (it can still be force-added), and so does
+# an artifact path that would write through to a tracked file.
+# ---------------------------------------------------------------------------
+
+commit_gitignore() { # $1 = checkout
+    printf '.review-findings.json\n.review-ack\nbuild/\n' > "$1/.gitignore"
+    git -C "$1" add .gitignore
+    git -C "$1" commit -qm ignore
+}
+
+@test "review artifact: contended + untracked ignored .review-findings.json is ALLOWED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    run run_hook ".review-findings.json"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "review artifact: an existing untracked ignored .review-ack is ALLOWED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    printf 'fp\n' > "$PROJ/.review-ack"
+    run run_hook ".review-ack"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "review artifact: any OTHER ignored path (build/ scratch) is still DENIED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    run run_hook "build/run-1/findings/charter.jsonl"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+}
+
+@test "review artifact: a TRACKED (force-added) .review-ack is still DENIED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    printf 'fp\n' > "$PROJ/.review-ack"
+    git -C "$PROJ" add -f .review-ack
+    git -C "$PROJ" commit -qm tracked
+    run run_hook ".review-ack"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    [[ "$output" == *"covering '.review-ack'"* ]]
+}
+
+@test "review artifact: a different-case tracked copy (case-insensitive checkout) is still DENIED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    git -C "$PROJ" config core.ignorecase true
+    printf 'fp\n' > "$PROJ/.Review-Ack"
+    git -C "$PROJ" add -f .Review-Ack
+    git -C "$PROJ" commit -qm tracked-case
+    run run_hook ".review-ack"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+}
+
+@test "review artifact: an ignored SYMLINK to a tracked file is still DENIED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    ln -s seed.txt "$PROJ/.review-findings.json"
+    run run_hook ".review-findings.json"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+}
+
+@test "review artifact: an ignored HARDLINK to a tracked file is still DENIED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    ln "$PROJ/seed.txt" "$PROJ/.review-ack"
+    run run_hook ".review-ack"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+}
+
+@test "review artifact: the main tree's ignore rules do not exempt a worktree whose branch lacks them" {
+    reg "$REGDIR" sibling-a
+    mk_nested_wt
+    # .gitignore lands on develop AFTER the worktree branched, so feat/nested has
+    # no ignore rule: the worktree's .review-ack is an ordinary untracked file there.
+    commit_gitignore "$PROJ"
+    HOOK_CWD="$NWT" run run_hook ".claude/worktrees/nested/.review-ack"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+}
+
+@test "review artifact: nested worktree + its own ignored .review-ack is ALLOWED" {
+    reg "$REGDIR" sibling-a
+    commit_gitignore "$PROJ"
+    mk_nested_wt   # branches from the commit that carries .gitignore
+    HOOK_CWD="$NWT" run run_hook ".claude/worktrees/nested/.review-ack"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }

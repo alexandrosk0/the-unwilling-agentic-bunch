@@ -12,6 +12,11 @@
 #   7. sync-settings-hooks.sh heals missing template hooks additively.
 #   8. Codex setup verifies native discovery, generates Codex-native
 #      hooks/custom agents, and does not clobber Claude Code setup.
+#   9. Leaf CLAUDE.md shims are written beside leaves at any depth under
+#      Source/ only where no CLAUDE.md exists and the path is ignored (a tracked
+#      or user-owned CLAUDE.md is left alone); dangling LAYER links under
+#      .claude/skills + .claude/workflows are pruned, a user's own links and
+#      dirs are not (hermetic temp host, no global git config).
 #
 # Auto-enrolled by scripts/dev/test-all.sh.
 
@@ -364,6 +369,93 @@ if [[ -f ".claude/settings.json" && -e ".claude/skills/perf-measure/SKILL.md" ]]
 else
     nope "codex setup clobbered Claude Code adapter files"
 fi
+
+# -------------------------------------------------------------------- Test 9
+note "Test 9 — leaf shims (ignored, absent paths only; any depth under Source/); dangling layer links pruned"
+# Hermetic: a throwaway host repo, so the live tree's adapter is never touched;
+# no global/system git config (commit signing, a global excludesFile listing
+# CLAUDE.md) can change the result; and no GIT_DIR-family variable a git hook may
+# have exported can aim the fixture's git commands at the caller's repository.
+# SMATCHET_PROJECT_ROOT_OVERRIDE=1 aims the layer's setup at that host.
+T9_HOST="$(mktemp -d)"
+T9_HOST="$(cd "$T9_HOST" && pwd -P)"
+trap '_restore_harness_snapshot; rm -rf "$T9_HOST"' EXIT
+T9_GIT_ENV=(-u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR
+            -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1)
+t9_fixture() {
+    cd "$T9_HOST" || return 1
+    git init -q -b develop . || return 1
+    git config user.email t@local
+    git config user.name t
+    git config commit.gpgsign false
+    mkdir -p Source/Core/src/Alpha Source/Core/src/Epsilon Source/Plugins/Beta \
+             Source/Plugins/Gamma Source/Plugins/Delta
+    for leaf in Source/Core/src/Alpha Source/Core/src/Epsilon Source/Plugins/Beta \
+                Source/Plugins/Gamma Source/Plugins/Delta; do
+        printf '# %s rules\n' "${leaf##*/}" > "$leaf/AGENTS.md"
+    done
+    # Every leaf's CLAUDE.md is ignored except Gamma's.
+    printf 'Source/**/CLAUDE.md\n!Source/Plugins/Gamma/CLAUDE.md\n.claude/\n' > .gitignore
+    # Delta: a tracked (force-added) CLAUDE.md with the team's own content.
+    printf '# team notes\n' > Source/Plugins/Delta/CLAUDE.md
+    git add -A && git add -f Source/Plugins/Delta/CLAUDE.md && git commit -qm seed || return 1
+    # Epsilon: the user's own untracked (ignored) CLAUDE.md notes.
+    printf '# my local notes\n' > Source/Core/src/Epsilon/CLAUDE.md
+    mkdir -p .claude/skills/zz-user-skill .claude/workflows
+    printf 'user-owned\n' > .claude/skills/zz-user-skill/SKILL.md
+    ln -s ../../agent-layer/agents/_shared/skills/zz-removed .claude/skills/zz-removed-skill
+    ln -s ../../agents/_shared/workflows/zz-removed.js .claude/workflows/zz-removed.js
+    ln -s ../../no-such-dotfiles/my-skill .claude/skills/zz-user-link
+}
+if ! env "${T9_GIT_ENV[@]}" bash -c "$(declare -f t9_fixture); T9_HOST='$T9_HOST' t9_fixture" >/dev/null 2>&1; then
+    nope "Test 9 fixture setup failed (git init/commit in a temp host)"
+else
+    T9_OUT="$(env "${T9_GIT_ENV[@]}" SMATCHET_PROJECT_ROOT_OVERRIDE=1 \
+        PROJECT_ROOT="$T9_HOST" AGENT_LAYER_ROOT="$LAYER" bash "$SETUP_HARNESS" claude-code 2>&1)" || true
+    if grep -qx '@AGENTS.md' "$T9_HOST/Source/Core/src/Alpha/CLAUDE.md" 2>/dev/null \
+        && grep -qx '@AGENTS.md' "$T9_HOST/Source/Plugins/Beta/CLAUDE.md" 2>/dev/null; then
+        ok "shims written beside ignored leaves (Source/Core/src/<ctx>/ and a plugin dir)"
+    else
+        nope "shim missing beside an ignored leaf (Alpha or Beta)"
+    fi
+    if [[ ! -e "$T9_HOST/Source/Plugins/Gamma/CLAUDE.md" ]] \
+        && grep -q 'Source/Plugins/Gamma/CLAUDE.md is not ignored' <<< "$T9_OUT"; then
+        ok "no shim beside a leaf whose CLAUDE.md is not ignored, and the skip is reported"
+    else
+        nope "shim written (or skip not reported) beside a leaf whose CLAUDE.md is not ignored"
+    fi
+    if [[ "$(cat "$T9_HOST/Source/Plugins/Delta/CLAUDE.md" 2>/dev/null)" == '# team notes' ]] \
+        && grep -q 'Source/Plugins/Delta/CLAUDE.md is tracked' <<< "$T9_OUT"; then
+        ok "a tracked CLAUDE.md beside a leaf is left as is, and the skip names the fix"
+    else
+        nope "a tracked CLAUDE.md beside a leaf was overwritten (or the skip was not reported)"
+    fi
+    if [[ "$(cat "$T9_HOST/Source/Core/src/Epsilon/CLAUDE.md" 2>/dev/null)" == '# my local notes' ]] \
+        && grep -q 'Source/Core/src/Epsilon/CLAUDE.md exists' <<< "$T9_OUT"; then
+        ok "the user's own untracked CLAUDE.md beside a leaf is left as is"
+    else
+        nope "the user's own untracked CLAUDE.md beside a leaf was overwritten (or not reported)"
+    fi
+    if [[ -z "$(git -C "$T9_HOST" status --porcelain 2>/dev/null)" ]]; then
+        ok "setup left the host's tracked tree clean (shims are ignored)"
+    else
+        nope "setup left untracked or modified files in the host: $(git -C "$T9_HOST" status --porcelain | tr '\n' ' ')"
+    fi
+    if [[ ! -L "$T9_HOST/.claude/skills/zz-removed-skill" && ! -L "$T9_HOST/.claude/workflows/zz-removed.js" ]]; then
+        ok "dangling layer skill + workflow links pruned"
+    else
+        nope "dangling layer skill or workflow link left behind"
+    fi
+    if [[ -L "$T9_HOST/.claude/skills/zz-user-link" && -f "$T9_HOST/.claude/skills/zz-user-skill/SKILL.md" \
+        && -e "$T9_HOST/.claude/skills/perf-measure/SKILL.md" ]]; then
+        ok "a user's own link (even dangling), a user skill dir and live layer links survive the prune"
+    else
+        nope "prune removed a user-owned link or dir, or a live layer skill link"
+    fi
+fi
+rm -rf "$T9_HOST"
+trap _restore_harness_snapshot EXIT
 
 # -------------------------------------------------------------------- Report
 echo

@@ -4,7 +4,9 @@
 # Bucket A (CLI) per AGENTS.md § Verification automation. Zero manual steps.
 # Auto-enrolled by scripts/dev/test-all.sh via the test-*.sh glob.
 # Implementation in Python next to this shim (bash regex too brittle for the
-# heading-extraction + reference-matching shape).
+# heading-extraction + reference-matching shape). A reference that names a
+# subsystem leaf by path (<dir>/AGENTS.md, then the section sign) resolves
+# against that leaf's own headings.
 
 set -uo pipefail
 
@@ -40,4 +42,11 @@ else
 fi
 cd "${PROJECT_ROOT:-$(git rev-parse --show-toplevel)}" || exit 2
 export PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
+# Selftest first (a synthetic tree; asserts a pass and a failure) so a broken
+# resolver can never report a vacuous PASS on the real tree.
+# selftest: asserts-failure — delegated to test_doc_anchors.py --selftest (a wrong
+# leaf section must fail).
+if [ "${1:-}" != "--selftest" ]; then
+    "$PY" "$_tda_self/test_doc_anchors.py" --selftest || exit 1
+fi
 exec "$PY" "$_tda_self/test_doc_anchors.py" "$@"

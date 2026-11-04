@@ -43,8 +43,17 @@ verbatim earlier version of it (a user-modified copy is left alone with a
 | `hooks/skill-load-log.py` | file link | `agents/_shared/token-tracking/skill-load-log.py` |
 
 The script also generates in-tree subsystem `CLAUDE.md` shims beside each
-subsystem-leaf `AGENTS.md` (so Claude Code auto-loads the leaf doc when you edit
-that subsystem) — those live in the source tree, not under `.claude/`.
+subsystem-leaf `AGENTS.md` below `Source/` (so Claude Code auto-loads the leaf doc
+when you edit that subsystem) — those live in the source tree, not under
+`.claude/`, and are written only where no `CLAUDE.md` exists yet and the host
+already ignores that path (a tracked or hand-written `CLAUDE.md` is left alone).
+
+Each run also removes dangling links under `.claude/skills/` and
+`.claude/workflows/` that point into the layer (a skill or workflow deleted or
+renamed there). A link you made yourself, a live link, a real directory (your own
+skill) or a hardlinked copy is never touched, so the Windows hardlink fallback
+leaves a deleted workflow's copy behind; `.claude/agents/` is rebuilt whenever the
+agent set changes.
 
 ## Why links (not copies) for agents + shared skills
 

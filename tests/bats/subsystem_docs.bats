@@ -13,13 +13,19 @@
 # ----------------------------------------------------------------------------
 
 setup() {
+    # The host's test-all.sh runs layer suites with PROJECT_ROOT pointed at the
+    # layer and SMATCHET_PROJECT_ROOT_OVERRIDE=1; the sandbox below is its own
+    # project, so no inherited root or config may redirect the gate under test.
+    unset PROJECT_ROOT AGENT_LAYER_ROOT PC_PROJECT_ROOT PC_AGENT_LAYER_ROOT
+    unset SMATCHET_PROJECT_ROOT_OVERRIDE SMATCHET_PROJECT_CONFIG
     REPO_ROOT="$(git rev-parse --show-toplevel)"
     GATE_SRC="$REPO_ROOT/agents/scripts/project/test-subsystem-docs.sh"
     SANDBOX="$(mktemp -d)"
 
-    mkdir -p "$SANDBOX/agents/scripts/project" "$SANDBOX/agents/core" \
-             "$SANDBOX/Source/Core/src/Tracker"
+    mkdir -p "$SANDBOX/agents/scripts/project" "$SANDBOX/agents/scripts/core/lib" \
+             "$SANDBOX/agents/core" "$SANDBOX/Source/Core/src/Tracker"
     cp "$GATE_SRC" "$SANDBOX/agents/scripts/project/test-subsystem-docs.sh"
+    cp "$REPO_ROOT/agents/scripts/core/lib/leaf-docs.sh" "$SANDBOX/agents/scripts/core/lib/leaf-docs.sh"
 
     printf '# code-review\n\nGlobal rules only; subsystem invariants live in the leaves.\n' \
         > "$SANDBOX/agents/core/code-review.md"
@@ -134,4 +140,155 @@ MAP
     [ "$status" -eq 0 ]
     [[ "$output" == *"Source/Core/src/Persistence"* ]]
     [[ "$output" == *"WARN"* ]]
+}
+
+# --- Leaves below Source/ outside Source/Core/src, and the host checklist -----
+
+# The sandbox gains the real project-config.sh + a minimal project.config.json so
+# the gate's full config load reads docs.review_checklist (and the lint exempt
+# zones) from the sandbox host.
+_with_config() { # $1 = docs object JSON, $2 = optional lint object JSON
+    mkdir -p "$SANDBOX/scripts/dev"
+    cp "$REPO_ROOT/scripts/dev/project-config.sh" "$SANDBOX/scripts/dev/project-config.sh"
+    printf '{"docs": %s, "lint": %s}\n' "$1" "${2:-{\}}" > "$SANDBOX/project.config.json"
+    _commit "config"
+}
+
+_register_plugin_leaf() {
+    mkdir -p "$SANDBOX/Source/Plugins/Mcp"
+    printf '# Mcp rules\n\n## Invariants\n- Tool descriptions are written for an LLM consumer because clients show them verbatim.\n' \
+        > "$SANDBOX/Source/Plugins/Mcp/AGENTS.md"
+    cat > "$SANDBOX/CONTEXT-MAP.md" <<'MAP'
+# CONTEXT-MAP
+
+## Registry
+
+| Subsystem | Rules | Glossary | Orientation |
+|---|---|---|---|
+| Tracker | `Source/Core/src/Tracker/AGENTS.md` | — | — |
+| Mcp | `Source/Plugins/Mcp/AGENTS.md` | — | — |
+
+## Growth path
+Add a row when content exists.
+MAP
+    _commit "add Mcp plugin leaf"
+}
+
+@test "leaf outside Source/Core/src: unregistered FAILs" {
+    mkdir -p "$SANDBOX/Source/Plugins/Mcp"
+    printf '# Mcp rules\n' > "$SANDBOX/Source/Plugins/Mcp/AGENTS.md"
+    _commit "add unregistered plugin leaf"
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"on-disk leaf not in"*"Source/Plugins/Mcp/AGENTS.md"* ]]
+}
+
+@test "leaf outside Source/Core/src: registered passes, and its bullets are checked against the central checklist" {
+    _register_plugin_leaf
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+    printf -- '- Tool descriptions are written for an LLM consumer because clients show them verbatim.\n' \
+        >> "$SANDBOX/agents/core/code-review.md"
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"leaf rule duplicated"*"Source/Plugins/Mcp/AGENTS.md"* ]]
+}
+
+@test "staleness covers only registered READMEs: an unregistered one never WARNs" {
+    # Under Source/Core/src/, where the old gate warned on ANY README.
+    mkdir -p "$SANDBOX/Source/Core/src/Orphan"
+    printf '# Orphan readme\n' > "$SANDBOX/Source/Core/src/Orphan/README.md"
+    printf 'int x = 1;\n' > "$SANDBOX/Source/Core/src/Orphan/Orphan.cpp"
+    _commit "orphan baseline"
+    printf 'int x = 2;\n' > "$SANDBOX/Source/Core/src/Orphan/Orphan.cpp"
+    _commit "change orphan code"
+    run bash "$GATE" --diff HEAD~1
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARN"* ]]
+}
+
+@test "host checklist (docs.review_checklist): a leaf rule restated there FAILs" {
+    mkdir -p "$SANDBOX/docs/guides"
+    printf '# Review checklist\n\n- No backend leak into the shared tracker interface family for any concrete backend.\n' \
+        > "$SANDBOX/docs/guides/review-checklist.md"
+    _with_config '{"review_checklist": "docs/guides/review-checklist.md"}'
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"leaf rule duplicated in docs/guides/review-checklist.md"* ]]
+}
+
+@test "host checklist (docs.review_checklist): a clean checklist passes" {
+    mkdir -p "$SANDBOX/docs/guides"
+    printf '# Review checklist\n\n- Trace execution order through the scheduler, never lexical order.\n' \
+        > "$SANDBOX/docs/guides/review-checklist.md"
+    _with_config '{"review_checklist": "docs/guides/review-checklist.md"}'
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Passed: 1  Failed: 0"* ]]
+}
+
+@test "host checklist (docs.review_checklist): a configured path that does not exist FAILs" {
+    _with_config '{"review_checklist": "docs/guides/no-such-checklist.md"}'
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"docs.review_checklist names a missing file: docs/guides/no-such-checklist.md"* ]]
+}
+
+@test "no docs.review_checklist key: only the layer checklist is used" {
+    _with_config '{"taxonomy_exceptions": []}'
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Passed: 1  Failed: 0"* ]]
+}
+
+@test "a vendored AGENTS.md inside a lint exempt zone is not a leaf" {
+    mkdir -p "$SANDBOX/Source/Core/ThirdParty/SomeLib"
+    printf '# Upstream agent notes\n' > "$SANDBOX/Source/Core/ThirdParty/SomeLib/AGENTS.md"
+    _with_config '{}' '{"zones": {"exempt": ["ThirdParty", "build"]}}'
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Passed: 1  Failed: 0"* ]]
+}
+
+@test "without exempt zones the same vendored AGENTS.md is an unregistered leaf (FAIL)" {
+    mkdir -p "$SANDBOX/Source/Core/ThirdParty/SomeLib"
+    printf '# Upstream agent notes\n' > "$SANDBOX/Source/Core/ThirdParty/SomeLib/AGENTS.md"
+    _with_config '{}' '{"zones": {"exempt": []}}'
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Source/Core/ThirdParty/SomeLib/AGENTS.md"* ]]
+}
+
+@test "a leaf path with non-ASCII characters is read unquoted and matched to its registry row" {
+    mkdir -p "$SANDBOX/Source/Plugins/Ünï"
+    printf '# rules\n' > "$SANDBOX/Source/Plugins/Ünï/AGENTS.md"
+    printf '| Unicode | `Source/Plugins/Ünï/AGENTS.md` | — | — |\n' > "$SANDBOX/row.txt"
+    awk 'FNR==NR{row=$0; next} /^\| Tracker/{print; print row; next} {print}' \
+        "$SANDBOX/row.txt" "$SANDBOX/CONTEXT-MAP.md" > "$SANDBOX/map.tmp"
+    mv "$SANDBOX/map.tmp" "$SANDBOX/CONTEXT-MAP.md"
+    rm "$SANDBOX/row.txt"
+    _commit "unicode leaf"
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+}
+
+@test "an unloadable config that names docs.review_checklist FAILs (never silently dropped)" {
+    mkdir -p "$SANDBOX/scripts/dev"
+    cp "$REPO_ROOT/scripts/dev/project-config.sh" "$SANDBOX/scripts/dev/project-config.sh"
+    printf '{"docs": {"review_checklist": "docs/guides/rc.md",}\n' > "$SANDBOX/project.config.json"
+    _commit "malformed config"
+    run bash "$GATE"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"names docs.review_checklist but could not be loaded"* ]]
+}
+
+@test "an unloadable config without docs.review_checklist only WARNs" {
+    mkdir -p "$SANDBOX/scripts/dev"
+    cp "$REPO_ROOT/scripts/dev/project-config.sh" "$SANDBOX/scripts/dev/project-config.sh"
+    printf '{"docs": {"taxonomy_exceptions": [],}\n' > "$SANDBOX/project.config.json"
+    _commit "malformed config"
+    run bash "$GATE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARN — project.config.json not loaded"* ]]
+    [[ "$output" == *"Passed: 1  Failed: 0"* ]]
 }

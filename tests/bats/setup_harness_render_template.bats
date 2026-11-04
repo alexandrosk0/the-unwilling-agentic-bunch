@@ -171,7 +171,8 @@ run_cursor_setup() {
         "$L/agents/core" "$L/agents/_shared"
     cp "$LAYER_ROOT/agents/scripts/core/setup-harness.sh" "$L/agents/scripts/core/"
     cp "$LAYER_ROOT"/agents/scripts/core/lib/render-template.sh \
-        "$LAYER_ROOT"/agents/scripts/core/lib/agents-dir-current.sh "$L/agents/scripts/core/lib/"
+        "$LAYER_ROOT"/agents/scripts/core/lib/agents-dir-current.sh \
+        "$LAYER_ROOT"/agents/scripts/core/lib/leaf-docs.sh "$L/agents/scripts/core/lib/"
     cp "$LAYER_ROOT/docs/harness/cursor/rules/agents.mdc" "$L/docs/harness/cursor/rules/"
     printf 'agent\n' > "$L/agents/core/sample.md"
     run bash -c 'cd "$1" && bash agents/scripts/core/setup-harness.sh cursor' _ "$L"

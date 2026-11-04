@@ -126,8 +126,9 @@ record-review-verdict: REFUSED — substantive diff ($reason) has no proof a rev
   scripts/dev/pre-ship.sh --ack-review already requires before push
   (ship-loops.md § [pre-first-push gate] item 1). This closes the hole where a
   hand-written "n/a — <reason>" satisfied the gate with no review behind it.
-  1) run the code-review skill/agent on the diff vs $base_ref (it writes
-     .review-findings.json),
+  1) run the project's code-review subagent (agents/core/code-review.md) on the
+     diff vs $base_ref; it writes .review-findings.json. The harness's built-in
+     /code-review command does not write that file,
   2) bash scripts/dev/pre-ship.sh --ack-review $base_ref
   3) re-run this script.
   (Emergency bypass: SMATCHET_SKIP_REVIEW_GATE=1 — logged, discouraged.)

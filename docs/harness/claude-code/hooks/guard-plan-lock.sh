@@ -10,7 +10,9 @@
 # When >=1 other session is live AND the edited path is NOT covered by a
 # refs/locks/* claim whose `branch` == the session's own checkout's HEAD branch
 # (this session's own seed; the checkout comes from the payload's `cwd`), DENY with a copy-paste lock-claim.sh remediation. Solo
-# (0 siblings) -> allow. Identity is keyed on BRANCH, never owner/AGENT_ID
+# (0 siblings) -> allow. The two gitignored review artifacts the commit/push
+# gates require are never gated (they cannot reach another branch). Identity is
+# keyed on BRANCH, never owner/AGENT_ID
 # (unprovisioned in prod). Same-tree-same-branch contention is out of scope (the
 # tree guards own that); plan-locks target cross-BRANCH parallel work.
 #
@@ -154,6 +156,36 @@ case "$FP_N" in
   *) exit 0 ;;
 esac
 [ -n "$rel" ] || exit 0
+
+# The review artifacts the commit/push gates require (.review-findings.json,
+# .review-ack at the checkout root) are per-checkout scratch, gitignored and never
+# committed, so no other branch can collide on them; gating them blocked the very
+# writes the gates demand. The exemption is an allowlist of exactly those two
+# paths, and only while the write lands on that untracked file itself:
+#   - ignored in the checkout that owns it (check-ignore also skips tracked files);
+#   - no index entry under ANY letter case (a case-insensitive filesystem would
+#     otherwise let ".Review-Ack" in the index be written through ".review-ack");
+#   - not a symlink, and no second hardlink (either could point at a tracked
+#     file, as the .claude/ adapter's links do).
+# Anything else ignored (build/ scratch, a loosely matched fixture) can still be
+# force-added and committed, so it stays gated.
+review_artifact_exempt() { # $1 = checkout-relative path, $2 = checkout top, $3 = absolute path
+  local links
+  case "$1" in
+    .review-findings.json|.review-ack) ;;
+    *) return 1 ;;
+  esac
+  git -C "$2" check-ignore -q -- "$1" 2>/dev/null || return 1
+  [ -z "$(git -C "$2" ls-files -- ":(icase)$1" 2>/dev/null)" ] || return 1
+  [ -L "$3" ] && return 1
+  if [ -e "$3" ]; then
+    [ -f "$3" ] || return 1
+    links="$(stat -c %h -- "$3" 2>/dev/null || stat -f %l -- "$3" 2>/dev/null)"
+    [ "$links" = "1" ] || return 1
+  fi
+  return 0
+}
+review_artifact_exempt "$rel" "$PROJ_TOP" "$FP_N" && exit 0
 
 # Allow iff covered by a lock whose branch == mine. rc: 0 covered, 1 not, 2
 # undetermined (table unavailable -> fail-open allow).

@@ -114,7 +114,7 @@ CI_SKIP_RE='(test-p4-dual-vcs|test-doctor|test-plan-index|test-docs|test-guard-h
 #   test-harness-provisioned-bats        scripts/dev/doctor.sh
 #   test-preship-review-artifact-bats    scripts/dev/pre-ship.sh
 #   test-verifier-preship-wiring-bats    scripts/dev/pre-ship.sh + scripts/dev/verifier-*.py
-#   test-subsystem-docs                  CONTEXT-MAP.md + Source/Core/src/*/AGENTS.md
+#   test-subsystem-docs                  CONTEXT-MAP.md + the Source/ leaf AGENTS.md files
 #   test-agent-build-facts               CMakePresets.json
 #   test-autonomous-debug-loop           a cmake + cl.exe product build
 #   test-dead-export-audit               Source/Core/include/** (cross-TU exports)
