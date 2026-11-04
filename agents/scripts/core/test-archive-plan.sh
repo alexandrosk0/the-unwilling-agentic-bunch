@@ -13,7 +13,7 @@
 #
 # Auto-enrolled by scripts/dev/test-all.sh via the test-*.sh glob.
 #
-# Exit codes (test-author convention):
+# Exit codes (test-script convention, scripts/dev/test-all.sh header):
 #   0 — all assertions passed.
 #   1 — at least one assertion failed.
 #   2 — missing prerequisite (git / python / sibling scripts).

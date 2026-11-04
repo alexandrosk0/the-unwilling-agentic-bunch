@@ -1,43 +1,31 @@
-# Agent vs skill — the decision rubric
+# Agent vs skill — the decision rule
 
-> The live home of the skill-vs-agent criteria. Lifted verbatim from
-> [`docs/plans/shipped/agents-skill-conversion.md`](../plans/shipped/agents-skill-conversion.md)
-> § Decision criteria (which named this file as its intended home but left it
-> uncreated). Use this when deciding whether a new recurring procedure should be
-> an **agent** (`agents/core/` or `agents/project/`) or a **skill**
-> (`agents/_shared/skills/<name>/SKILL.md`).
+Use this when a recurring procedure needs a home: an **agent** (`agents/core/<name>.md`, a spawned subagent with its own context) or a **skill** (`agents/_shared/skills/<name>/SKILL.md`, loaded into the main thread).
 
-## Skill when **ALL** hold
+## The rule
 
-- Deterministic procedure or rule-sheet (no investigation loop).
-- Bounded context footprint (≤ 3 file reads, ≤ 2 file edits typical).
-- No multi-round user-feedback or PR-comment loop.
-- No parallel-dispatchable subtask spawn.
-- Output is direct action / inline result, not a return-summary the main thread synthesizes.
+- **An agent only where a separate context is the capability.** Independent review (`code-review`, `security-review`) is worth something because the reviewer did not write the diff and does not carry the author's assumptions; design (`architect`) is worth a fresh context because it reads widely across subsystems before anything is edited. Specialist knowledge alone is not a reason: a subsystem's rules belong in its leaf `AGENTS.md`, where every session that touches it reads them.
+- **A skill for every bounded procedure the main thread runs** — debugging, perf measurement, test authoring, PR-bot triage, cleanup, plan authoring. The main thread already holds the task's context; spawning a specialist to run a procedure costs that context and buys nothing.
+- **Broad read-only fan-out uses the built-in agents** (`Explore`, `general-purpose`), not a custom one — [`workflow-fleets.md`](workflow-fleets.md) § Fan-out-safe roster.
 
-## Agent when **ANY** hold
+A new agent needs a reason the three existing ones do not cover: a role whose value is that it does **not** share the main thread's context. Everything else is a skill, a rule doc, or a leaf `AGENTS.md` bullet.
 
-- Heavy exploration / context-bloat risk.
-- Multi-round loop.
-- Isolated worktree / spawned-child orchestration.
-- Parallel-dispatchable.
-- Delegates to other agents.
+## How a skill reaches every harness
 
-## Cross-harness consideration
+- **Claude Code** auto-discovers every skill: `setup-harness.sh claude-code` links each `agents/_shared/skills/<name>/` into `.claude/skills/`, and the skill's `description:` decides when it loads.
+- **Codex, Cursor, pi and generic harnesses** read [`AGENTS.md`](../../AGENTS.md) and have no skill discovery, so a skill reaches them only by a path link to `agents/_shared/skills/<name>/SKILL.md`: a row in its § Project rules on-demand table, or a link from a doc that AGENTS.md routes to (the work-item review and close skills, for example, are linked from [`work-items.md`](work-items.md) and [`review-panels.md`](review-panels.md) where those steps run).
 
-Codex + Cursor read `agents/*.md` directly per the [agents.md spec](https://agents.md/) — they have no skill concept today. Until the spec (or a per-harness adapter) covers skills, conversions that **delete** an agent file break cross-harness discovery. **Dual-publish** is the safe pattern: keep the agent `.md` for Codex/Cursor, add a Claude `@`-import `SKILL.md` alias. A pure conversion (delete the agent, keep only the skill) is safe **only** under an explicit Claude-only gate — not the default.
+So every skill ships with both:
 
-A **skill-only** helper (no agent twin) is legitimate when the procedure is orchestrator-inline + bounded + needs no cross-harness agent discovery — register it in `SKILL_ONLY_HELPERS` in [`agents/scripts/core/test-skill-vs-agent-parity.sh`](../../agents/scripts/core/test-skill-vs-agent-parity.sh) so the parity guard doesn't demand a matching `agents/` file (precedents: `drain-memory`, `author-plan-doc`, `gate-escape-postmortem`).
+1. A `description:` that names the user-visible symptoms and requests that should load it ("crash", "wrong output", "doesn't work", "address the CodeRabbit comments") — not only the procedure's name.
+2. A route on every harness: an on-demand row when the trigger is a top-level task class (debugging, perf, tests, PR-bot feedback, cleanup); otherwise a path link from a doc that AGENTS.md routes to, at the step where the procedure runs or in a heuristic bullet (`delegation.md` links the self-check and session-recall skills that way). AGENTS.md has a hard line cap, so a narrow trigger takes a link, not a row. A skill named only in prose, without its path, reaches Claude Code alone.
 
-## Extracting procedure-bodies out of a heavy agent (not just whole-agent conversion)
+## Shaping a skill
 
-The rubric above decides where a *new* procedure lives. It applies equally **inside** an existing heavy agent: when an agent prompt grows large, the bloat is usually **deterministic procedure + verbatim shell/code recipe** inlined next to genuine reasoning. The recipe is a skill living in the wrong place. Extract it, leaving the agent a thin reasoning/routing layer (the goal is a **readable** agent — the size gate `agent_size_audit.py` keeps it that way; see AGENTS.md § Project rules § Prompt/contract size).
+- **SKILL.md holds the judgement**: when to load, scope and boundaries, hard rules, the loop, the report shape. **REFERENCE.md** beside it holds the verbatim recipes (long shell blocks, command sets, cleanup commands) once SKILL.md nears the ~400-line soft cap — the reasoning stays readable and the recipes load only when run.
+- **Keep the hot path inline.** A rule the procedure always applies stays in SKILL.md; only conditional, standalone recipes move to REFERENCE.md.
+- **Project facts go to the host.** A skill under `agents/_shared/` is a portable dir: build presets, paths and target names come from `project.config.json` or a host doc the skill points at, never a literal (`test-portable-purity`).
 
-**The reasoning/recipe seam** — cut strictly along this line:
+The same seam applies inside an agent prompt that grows large: its reasoning (scope, hypothesis ranking, refusals, report shape) stays; a deterministic recipe it runs occasionally is a skill in the wrong place — extract it and leave a one-line *what + when + path* pointer. The size gate (`agent_size_audit.py`, [`AGENTS.md`](../../AGENTS.md) § Project rules § Prompt/contract size) keeps agents readable.
 
-- **STAYS in the agent** (the *judgment* — what you read to understand how it thinks): scope/boundary, hypothesis ranking, evidence/metric choice, multi-round loops, refusal/hard rules, hand-off, report shape. Anything the agent's logic depends on inline stays inline (never split mid-reasoning). A **hot-path** rule the agent always applies stays inline too — relocating an always-needed rule *hurts* readability (now you read two files for the always-case). Only **conditional / standalone-recipe** sections (the long shell blocks the agent runs occasionally) extract cleanly.
-- **EXTRACTS to a skill** (the *mechanics* — verbatim shell you copy-paste-run, rarely re-read for logic): instrumentation recipes, the exact command sets, cleanup commands.
-
-**Extraction checklist (portable-dir gotcha):** a skill (`agents/_shared/skills/`) or rule-doc (`docs/agent-rules/`) extracted from a project agent is inevitably project-specific (it carries the same build presets / paths / target names). Those are **portable dirs**, so `test-portable-purity` flags the literals as new leaks. The fix is the sanctioned `--refresh` — but the scanner reads **tracked files only** (`git ls-files`), so you must `git add` the new file **before** running `bash agents/scripts/core/test-portable-purity.sh --refresh` (refreshing while the file is still untracked silently misses it, and CI catches it later). Same pattern as the pre-existing `perf-instrument`/`perf-measure` skill literals already in the baseline.
-
-**Cross-harness mechanism (locked): summary + explicit pointer, never auto-injection.** The long verbatim blocks move to `SKILL.md`; the agent retains a compact *what + when + "full recipe: `agents/_shared/skills/<name>/SKILL.md`"* pointer. Claude Code loads the skill on demand (context saved); Codex/Cursor — which read `agents/*.md` literally and have no skill concept — see the summary + a readable path (graceful degradation: they execute from the summary or open the file). Each such extraction is a **skill-only** helper → register it in `SKILL_ONLY_HELPERS`. **Rejected:** `@`-import of shared snippets (Codex/Cursor don't expand `@`, would lose the content); dual-publishing the full recipe (doesn't shrink the agent at all — defeats the goal). The skill-only registration mechanism's precedent is `gate-escape-postmortem`; `perf-instrument` is the precedent for the *content/shape* of an instrumentation-recipe skill (but it is dual-published, with an agent twin — do not copy its twin wiring).
+**Purity-refresh gotcha:** `test-portable-purity.sh --refresh` reads **tracked files only** (`git ls-files`), so `git add` a new skill or rule doc before refreshing the baseline; refreshing while the file is untracked silently misses it, and CI catches it later.

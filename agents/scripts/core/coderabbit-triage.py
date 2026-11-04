@@ -3,8 +3,8 @@
 coderabbit-triage — classify CR findings against Smatchet invariants.
 
 Phase 3 of `docs/plans/shipped/smatchet-merge-watcher.md`. Python port of
-`agents/core/coderabbit-triage.md`'s rejection table (the agent doc stays
-the source-of-truth for the rules; this is the executable mirror).
+the override table in `agents/_shared/skills/coderabbit-triage/SKILL.md` (the
+skill stays the source-of-truth for the rules; this is the executable mirror).
 
 When `merge-watcher.py`'s daemon polls a PR + sees the gate BLOCKED on
 CR findings (state == BLOCKED + last-CR-review has `Actionable comments
@@ -12,6 +12,10 @@ posted: N` with N > 0), it invokes this script:
 
   coderabbit-triage classify <owner> <repo> <pr>     # print per-finding verdicts
   coderabbit-triage post-comment <owner> <repo> <pr> # also POST a triage summary
+
+and the skill's routing step runs:
+
+  coderabbit-triage area <path>...                   # first matching area-map route
 
 Each finding gets one of three verdicts:
 
@@ -32,7 +36,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -40,14 +46,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-# triage-rules-version: 4
-# Shared rules-version marker — MUST match agents/core/coderabbit-triage.md.
-# `coderabbit-triage.py selftest` greps both files for this token and fails if
-# they disagree (run in CI by tests/bats/coderabbit_triage.bats). Bump in BOTH
-# whenever the login allow-list, override table, severity
-# parse, or noise filter changes. v4 (bugbot-merge-gate): PR-bot login allow-list
-# {coderabbitai[bot], cursor[bot]} + Bugbot body-shape severity parse +
-# couldn't-run / usage-limit noise filter.
+# triage-rules-version: 5
+# Shared rules-version marker — MUST match
+# agents/_shared/skills/coderabbit-triage/SKILL.md. `coderabbit-triage.py selftest`
+# greps both files for this token and fails if they disagree (run in CI by
+# tests/bats/coderabbit_triage.bats). Bump in BOTH whenever the login allow-list,
+# override table, severity parse, or noise filter changes. v5: the skill replaces
+# the agent + handoff skill; routing reads the project's area map. v4
+# (bugbot-merge-gate): PR-bot login allow-list {coderabbitai[bot], cursor[bot]} +
+# Bugbot body-shape severity parse + couldn't-run / usage-limit noise filter.
 
 # PR-bot login allow-list (lower-cased substring match — covers both the REST
 # `[bot]` suffix and the GraphQL-stripped form). CodeRabbit + Cursor Bugbot are
@@ -93,10 +100,10 @@ class Finding:
 # Each entry: (regex, one-line reason). If CR's finding body matches the
 # regex, the finding is REJECT_INVARIANT.
 #
-# Sourced from AGENTS.md § Project rules. The agent file
-# (`agents/core/coderabbit-triage.md`) is the long-form authoritative source;
-# this list is the executable mirror — keep in sync per the watcher
-# plan-doc § Risks § Phase 3 duplication drift.
+# Sourced from AGENTS.md § Project rules. The skill's override table
+# (`agents/_shared/skills/coderabbit-triage/SKILL.md`) is the long-form
+# authoritative source; this list is the executable mirror — keep in sync per
+# the watcher plan-doc § Risks § Phase 3 duplication drift.
 INVARIANT_REJECTS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"\bstd::string_view\b|`string_view`|<string_view>", re.IGNORECASE),
@@ -414,16 +421,224 @@ def cmd_post_comment(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# selftest — md<->py rules-version drift guard
+# Area map — the project's path -> area routing table
+# ---------------------------------------------------------------------------
+# The map is HOST data (it names product paths), so it lives in the project tree,
+# not in this layer: <project root>/docs/area-map.json. The project root is the
+# PROJECT_ROOT that scripts/dev/project-config.sh resolves (roots-only), the same
+# ladder sync-issue-labels.sh reads the map through: SMATCHET_PROJECT_CONFIG, the
+# superproject when this layer is a submodule, else this layer's own tree, which
+# has no map (routing then falls back to the skill's generic rows); a caller's
+# PROJECT_ROOT counts when it names that tree or SMATCHET_PROJECT_ROOT_OVERRIDE=1.
+# Without project-config.sh beside this script (a fixture copy) the root is its
+# own tree; without a runnable bash (or a root python cannot open), the
+# superproject probe alone decides.
+# AREA_MAP_FILE names another map (bats fixtures). Doc paths resolve against the
+# directory above the map's own directory — the project root for docs/area-map.json.
+AREA_MAP_REL = Path("docs") / "area-map.json"
+
+
+def _layer_root() -> Path:
+    # This script lives at agents/scripts/core/ under the layer root.
+    return Path(__file__).resolve().parents[3]
+
+
+# Sources project-config.sh roots-only and prints PROJECT_ROOT, as a mixed-form
+# Windows path under Git Bash (cygpath) so a native python can open it.
+_ROOTS_SNIPPET = (
+    'PC_ROOTS_ONLY=1 . "$1" || exit 1; '
+    'if command -v cygpath >/dev/null 2>&1; then cygpath -m "${PROJECT_ROOT:-}"; '
+    'else printf %s "${PROJECT_ROOT:-}"; fi'
+)
+
+
+_WINDOWS_BASH_CANDIDATES = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+    r"C:\msys64\usr\bin\bash.exe",
+)
+
+
+def _bash_bin() -> str | None:
+    """A bash that can source project-config.sh, or None (the superproject probe then decides).
+
+    On Windows a bare `bash` often resolves to the WSL launcher (System32\\bash.exe or the
+    WindowsApps store shim), which cannot source a C:/ path; use Git for Windows' bash instead,
+    the way merge-watcher.py resolves it.
+    """
+    found = shutil.which("bash")
+    if os.name != "nt":
+        return found
+    if found:
+        low = found.lower()
+        if not (low.endswith("\\system32\\bash.exe") or "\\windowsapps\\" in low):
+            return found
+    for candidate in _WINDOWS_BASH_CANDIDATES:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _project_root() -> Path:
+    layer = _layer_root()
+    config_sh = layer / "scripts" / "dev" / "project-config.sh"
+    if not config_sh.is_file():
+        return layer
+    bash = _bash_bin()
+    try:
+        if bash is None:
+            raise OSError("no usable bash")
+        proc = subprocess.run(
+            [bash, "-c", _ROOTS_SNIPPET, "_", config_sh.as_posix()],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)  # project-config.sh's WARN on an ignored PROJECT_ROOT
+        resolved = proc.stdout.strip() if proc.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        resolved = ""
+    if resolved and Path(resolved).is_dir():
+        return Path(resolved)
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(layer), "rev-parse", "--show-superproject-working-tree"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        out = ""
+    return Path(out) if out else layer
+
+
+def _area_map_path() -> Path:
+    override = os.environ.get("AREA_MAP_FILE", "").strip()
+    return Path(override) if override else _project_root() / AREA_MAP_REL
+
+
+def glob_to_regex(glob: str) -> re.Pattern[str]:
+    """Compile an area-map glob: `**/` = any directories (or none), `**` = any
+    characters, `*` / `?` = within one path segment, `{a,b}` = alternatives."""
+    out: list[str] = []
+    i = 0
+    while i < len(glob):
+        if glob.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif glob.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif glob[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif glob[i] == "?":
+            out.append("[^/]")
+            i += 1
+        elif glob[i] == "{" and "}" in glob[i:]:
+            j = glob.index("}", i)
+            out.append("(?:" + "|".join(re.escape(a) for a in glob[i + 1:j].split(",")) + ")")
+            i = j + 1
+        else:
+            out.append(re.escape(glob[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+def load_area_map(path: Path) -> dict[str, Any]:
+    """Parse the area map. Raises ValueError (with the reason) when malformed."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path}: not valid JSON ({exc})") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("routes"), list):
+        raise ValueError(f"{path}: top level must be an object with a `routes` list")
+    return data
+
+
+def area_map_errors(data: dict[str, Any], doc_root: Path) -> list[str]:
+    """Structural problems in a parsed area map (empty list = sound)."""
+    errors: list[str] = []
+    seen: set[str] = set()
+    for i, route in enumerate(data["routes"]):
+        where = f"routes[{i}]"
+        if not isinstance(route, dict):
+            errors.append(f"{where}: not an object")
+            continue
+        area = route.get("area")
+        if area is not None and (not isinstance(area, str) or not area.strip()):
+            errors.append(f"{where}: `area` must be a non-empty string or null")
+        elif isinstance(area, str):
+            if area in seen:
+                errors.append(f"{where}: area `{area}` appears in more than one route")
+            seen.add(area)
+        globs = route.get("globs")
+        if not isinstance(globs, list) or not globs or not all(isinstance(g, str) and g for g in globs):
+            errors.append(f"{where}: `globs` must be a non-empty list of strings")
+        docs = route.get("docs")
+        if not isinstance(docs, list) or not docs or not all(isinstance(d, str) and d for d in docs):
+            errors.append(f"{where}: `docs` must be a non-empty list of strings")
+        else:
+            for d in docs:
+                if not (doc_root / d).exists():
+                    errors.append(f"{where}: doc `{d}` does not exist under {doc_root}")
+    generic = data.get("generic_areas", [])
+    if not isinstance(generic, list) or not all(isinstance(g, str) and g for g in generic):
+        errors.append("`generic_areas` must be a list of strings")
+    else:
+        for g in generic:
+            if g in seen:
+                errors.append(f"generic area `{g}` also owns a route")
+    return errors
+
+
+def route_for(data: dict[str, Any], path: str) -> dict[str, Any] | None:
+    """First route whose glob matches `path` (repo-relative), or None."""
+    norm = path.replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    for route in data["routes"]:
+        if any(glob_to_regex(g).match(norm) for g in route.get("globs", [])):
+            return route
+    return None
+
+
+def cmd_area(args: argparse.Namespace) -> int:
+    """Print `<path>\t<area|->\t<docs>` for each path (first matching route)."""
+    path = _area_map_path()
+    if not path.is_file():
+        print(f"coderabbit-triage: no area map at {path}", file=sys.stderr)
+        return 2
+    try:
+        data = load_area_map(path)
+    except ValueError as exc:
+        print(f"coderabbit-triage: {exc}", file=sys.stderr)
+        return 2
+    for p in args.paths:
+        route = route_for(data, p)
+        if route is None:
+            print(f"{p}\t-\t-")
+        else:
+            print(f"{p}\t{route.get('area') or '-'}\t{' '.join(route.get('docs', []))}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# selftest — skill<->py rules-version drift guard + area-map integrity
 # (core-agent-prompts-03: implement the sync-check the docs advertise;
-#  core-scripts-python-03: give the .py a --selftest against the .md.)
+#  core-scripts-python-03: give the .py a --selftest against the rules doc.)
 # ---------------------------------------------------------------------------
 _RULES_VERSION_RE = re.compile(r"triage-rules-version:\s*(\d+)")
 
 
 def _triage_md_path() -> Path:
-    # This script lives at agents/scripts/core/; the agent doc is at agents/core/.
-    return Path(__file__).resolve().parents[2] / "core" / "coderabbit-triage.md"
+    # This script lives at agents/scripts/core/; the skill is at agents/_shared/skills/.
+    return Path(__file__).resolve().parents[2] / "_shared" / "skills" / "coderabbit-triage" / "SKILL.md"
 
 
 def _extract_rules_version(text: str) -> int | None:
@@ -432,12 +647,13 @@ def _extract_rules_version(text: str) -> int | None:
 
 
 def cmd_selftest(args: argparse.Namespace) -> int:
-    """Drift-guard: the .md is source-of-truth for the rules, the .py is its
-    executable mirror, and both carry a `triage-rules-version:` marker that must
-    stay in lockstep. This is the end-of-CI sync check both files advertise —
-    exercised by tests/bats/coderabbit_triage.bats in the Agentic self-tests lane.
-    Also asserts the invariant-reject table is structurally sound. Exit 0 = OK,
-    1 = drift/integrity failure."""
+    """Drift-guard: the skill's SKILL.md is source-of-truth for the rules, the
+    .py is its executable mirror, and both carry a `triage-rules-version:` marker
+    that must stay in lockstep. This is the end-of-CI sync check both files
+    advertise — exercised by tests/bats/coderabbit_triage.bats in the Agentic
+    self-tests lane. Also asserts the invariant-reject table is structurally
+    sound, and — when the project has an area map — that the map parses, names
+    each area once and cites only docs that exist. Exit 0 = OK, 1 = failure."""
     errors: list[str] = []
 
     py_marker = _extract_rules_version(Path(__file__).read_text(encoding="utf-8"))
@@ -447,15 +663,15 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     md_path = _triage_md_path()
     md_marker: int | None = None
     if not md_path.is_file():
-        errors.append(f"coderabbit-triage.md not found at {md_path}")
+        errors.append(f"coderabbit-triage SKILL.md not found at {md_path}")
     else:
         md_marker = _extract_rules_version(md_path.read_text(encoding="utf-8"))
         if md_marker is None:
-            errors.append(f"{md_path.name}: missing `triage-rules-version:` marker")
+            errors.append(f"{md_path}: missing `triage-rules-version:` marker")
 
     if py_marker is not None and md_marker is not None and py_marker != md_marker:
         errors.append(
-            f"rules-version DRIFT: coderabbit-triage.md={md_marker} vs "
+            f"rules-version DRIFT: SKILL.md={md_marker} vs "
             f"coderabbit-triage.py={py_marker} — bump the marker in BOTH files in lockstep"
         )
 
@@ -469,13 +685,28 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         if not isinstance(reason, str) or not reason.strip():
             errors.append(f"INVARIANT_REJECTS[{i}]: empty reason")
 
+    # Area map: optional (a standalone layer has none), validated when present.
+    map_path = _area_map_path()
+    map_note = f"no area map at {map_path} (skipped)"
+    if os.environ.get("AREA_MAP_FILE", "").strip() and not map_path.is_file():
+        errors.append(f"AREA_MAP_FILE names a missing file: {map_path}")
+    elif map_path.is_file():
+        try:
+            data = load_area_map(map_path)
+        except ValueError as exc:
+            errors.append(str(exc))
+        else:
+            doc_root = map_path.resolve().parent.parent
+            errors.extend(f"{map_path.name}: {e}" for e in area_map_errors(data, doc_root))
+            map_note = f"area map OK ({len(data['routes'])} routes)"
+
     if errors:
         for e in errors:
             print(f"coderabbit-triage --selftest: FAIL — {e}", file=sys.stderr)
         return 1
     print(
         f"coderabbit-triage --selftest: OK — rules-version={md_marker} "
-        f"(md<->py in sync), {len(INVARIANT_REJECTS)} invariant rules"
+        f"(skill<->py in sync), {len(INVARIANT_REJECTS)} invariant rules, {map_note}"
     )
     return 0
 
@@ -485,7 +716,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="coderabbit-triage",
         description=(
             "Classify CodeRabbit findings against Smatchet invariants. "
-            "Python port of agents/core/coderabbit-triage.md for "
+            "Python port of the coderabbit-triage skill's override table for "
             "smatchet-merge-watcher Phase 3."
         ),
     )
@@ -505,10 +736,16 @@ def build_parser() -> argparse.ArgumentParser:
             help="MERGE_WATCH_TRIAGE_BUDGET (default 3)",
         )
         sp.set_defaults(func=fn)
-    # selftest takes no positional args (md<->py drift + table integrity).
+    sp_area = sub.add_parser(
+        "area",
+        help="print the first matching area-map route (area + docs) for each path",
+    )
+    sp_area.add_argument("paths", nargs="+", help="repo-relative file paths")
+    sp_area.set_defaults(func=cmd_area)
+    # selftest takes no positional args (skill<->py drift + table + area map).
     sp_self = sub.add_parser(
         "selftest",
-        help="assert coderabbit-triage.md <-> .py rules-version sync + table integrity",
+        help="assert SKILL.md <-> .py rules-version sync, table integrity and the area map",
     )
     sp_self.set_defaults(func=cmd_selftest)
     return p

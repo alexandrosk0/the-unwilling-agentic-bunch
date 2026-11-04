@@ -1,8 +1,8 @@
 # Quality Pillars
 
-> Lifted from [`AGENTS.md`](../../AGENTS.md) § Quality Pillars per [`docs/plans/shipped/agents-md-reduction.md`](../plans/shipped/agents-md-reduction.md). AGENTS.md retains a load-bearing stub naming the pillars + their owning agents (with **UX Pillars** + **Engineering Pillars** sub-anchors) so external `AGENTS.md § <subsection>` references — including legacy `§ UX Pillars` — continue to resolve. Renamed from `ux-pillars.md` when DRY was added as an Engineering Pillar (ADR-0015). Edit this file directly — no parallel copy in AGENTS.md.
+> Lifted from [`AGENTS.md`](../../AGENTS.md) § Quality Pillars per [`docs/plans/shipped/agents-md-reduction.md`](../plans/shipped/agents-md-reduction.md). AGENTS.md retains a load-bearing stub naming the pillars + their owners (with **UX Pillars** + **Engineering Pillars** sub-anchors) so external `AGENTS.md § <subsection>` references — including legacy `§ UX Pillars` — continue to resolve. Renamed from `ux-pillars.md` when DRY was added as an Engineering Pillar (ADR-0015). Edit this file directly — no parallel copy in AGENTS.md.
 
-Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) are user-facing: 1-3 and 6 are **enforceable** (agents auto-fail PRs that violate them); 4 is **aspirational** today (flagged per § 4 below, not a merge block, until the supporting infrastructure lands). **Engineering Pillars** (5: DRY) govern code-maintainability and are enforced like UX 1-3.
+Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) are user-facing: 1-3 and 6 are **enforceable** (gates and review auto-fail PRs that violate them); 4 is **aspirational** today (flagged per § 4 below, not a merge block, until the supporting infrastructure lands). **Engineering Pillars** (5: DRY) govern code-maintainability and are enforced like UX 1-3.
 
 ## 1. Performance — sustain ≈ 144 Hz
 
@@ -11,11 +11,10 @@ Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) 
 **Enforceable invariants:**
 - Steady-state mean per-frame UI work `≤ 6.94 ms` measured by `perf.snapshot` over a representative scenario.
 - 100 Hz floor: no single frame > **10.0 ms** in normal operation; >10.0 ms outliers are spike-tracked at p99.
-- `perf-detective` regression-fails any commit that lifts steady-state mean above budget on the same scenario.
-- `spike-hunter` regression-fails any commit that introduces a new p99 > 10.0 ms on the UI thread under a previously-clean scenario.
-- CI-only exception: `docs/perf/regression-policy.json` `perScenario` may raise a scenario's CI ceiling above 10.0 ms when the shared 2-core runner is proven the bottleneck (first: `cell-edit-burst` at 15.0, Issue #973) — the real-hardware floor is unchanged and each override must carry a rationale + tracking Issue.
+- The Perf PR-fast CI gate (`perf-compare.py` against `docs/perf/regression-policy.json`) fails a PR that lifts a scenario's mean beyond the relative / absolute thresholds or pushes its p99 over 10.0 ms.
+- CI-only exception: `docs/perf/regression-policy.json` `perScenario` may raise a scenario's CI ceiling above 10.0 ms when the shared 2-core runner is proven the bottleneck — the real-hardware floor is unchanged and each override carries a rationale + tracking Issue (none today).
 
-**Tools**: `SMATCHET_UI_PERF_SCOPE("perf_temp:...")` markers per `agents/core/perf-instrument.md`; `perf.reset` → `scenario.run` → `perf.snapshot` loop per `agents/core/perf-measure.md`; `docs/guides/perf-workflow.md` for full ladder. **Baseline registry + delta gate** (Slice 1 of `docs/plans/shipped/pillar-1-2-perf-review-system.md`): `bash scripts/dev/perf-run.sh <scenario>` writes a fresh snapshot; `python scripts/dev/perf-compare.py <baseline> <fresh>` exits non-zero on regression beyond `docs/perf/regression-policy.json` thresholds. Baselines live at `docs/perf/baselines/<scenario>.<host>.json` (per-host per § D1 of the plan). Manage via `bash scripts/dev/perf-baseline.sh {list|init|bump}`.
+**Tools**: `SMATCHET_UI_PERF_SCOPE("perf_temp:...")` markers per the `perf-instrument` skill; `perf.reset` → `scenario.run` → `perf.snapshot` loop per the `perf-measure` skill; `docs/guides/perf-workflow.md` for full ladder. **Baseline registry + delta gate** (Slice 1 of `docs/plans/shipped/pillar-1-2-perf-review-system.md`): `bash scripts/dev/perf-run.sh <scenario>` writes a fresh snapshot; `python scripts/dev/perf-compare.py <baseline> <fresh>` exits non-zero on regression beyond `docs/perf/regression-policy.json` thresholds. Baselines live at `docs/perf/baselines/<scenario>.<host>.json` (per-host per § D1 of the plan). Manage via `bash scripts/dev/perf-baseline.sh {list|init|bump}`.
 
 ## 2. UI never freezes — predictable visual cue if it must
 
@@ -29,7 +28,7 @@ Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) 
 
 **Enforceable invariants:**
 - `code-review` flags any new synchronous call to `cpr`, `SQLite::Database`, `p4 …`, `std::ifstream`-on-disk, or `std::mutex::lock` from a function reachable from `ImGui::*`-frame as Critical.
-- `spike-hunter` enforces UI-thread p99 < 100 ms on the standard scenario; cue-less hitches above that line block merge.
+- Spikes are diagnosed per `docs/guides/perf-workflow.md` § Spikes; the Perf PR-fast p99 ceiling (10.0 ms) is the merge gate.
 
 **Worker-thread hand-off**: post results back to the UI thread via `MainThreadDispatcher` (`Source/Core/include/MainThreadDispatcher.h`); never touch ImGui state directly from a worker.
 
@@ -38,7 +37,7 @@ Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) 
 **Pillar 3**: the project must terminate cleanly under all observed inputs. Crashes in dev block the next merge until fixed; crashes in shipped builds are P0 regressions.
 
 **Enforceable invariants:**
-- **Pre-merge sanitizer build** mandatory on any PR that touches `Source/Core/` C++: `cmake --build --preset ninja-test-msvc` runs the doctest rig under ASan / UBSan (when toolchain supports it). `debug-detective` runs the sanitizer build for every crash-suspect investigation.
+- **Pre-merge sanitizer build** mandatory on any PR that touches `Source/Core/` C++: the PR sanitizer CI lane builds and runs the doctest rig under ASan (MSVC has no UBSan); locally, build the ASan preset per [`build.md`](build.md) § ASan over the test rig. The [`debug-instrument`](../../agents/_shared/skills/debug-instrument/SKILL.md) skill runs a sanitizer build for every crash-suspect investigation.
 - **RAII enforced**: no raw `new` / `delete` outside the documented edge cases (sol2 user data, ImGui callback shims). Use `std::unique_ptr` + `make_unique`. `code-review` flags raw heap ops.
 - **Bounds-checked**: every container index goes through `at()` / explicit length check; `cppcheck` `boundsError` / `arrayIndexOutOfBounds` blocks merge.
 - **No silent UB**: dereferenced `nullptr`, unsigned wrap-around, signed overflow, use-after-free — all blocking. UBSan output during the regression gate is a fail.
@@ -84,13 +83,13 @@ Six north-star quality invariants in two sub-groups. **UX Pillars** (1-4 and 6) 
 
 **Gates**: `offline-write-bypasses-queue` and `tracker-error-kind-collapsed` (absolute-0, whole tree) and `offline-failure-cached-as-loaded` and `offline-cache-cleared` (delta-gated per changed `.cpp`) block; `offline-loading-only-render`, `offline-inflight-latch-unguarded` and `offline-network-read-ungated` warn first (mechanics: [`cpp-rules.md`](cpp-rules.md) § Tiered enforcement). **Tests**: bucket A with `GlobalFakeNetwork()` (`tests/support/FakeNetworkSwitch.h`); bucket E with `scripts/dev/test-ui-offline-first.sh`. **Tools**: `Source/Core/include/OfflineFirstPure.h`, `KeyedLookupCache.h`, `DataFreshnessCue.h`; whole-tree sweep `bash agents/scripts/project/test-lint-rules.sh --scan-offline`.
 
-## Agent ownership
+## Ownership
 
-| Pillar | Primary agent | Notes |
+| Pillar | Owner (skills, agents, gates) | Notes |
 |---|---|---|
-| 1. Performance | `perf-detective` (sustained), `spike-hunter` (intermittent), helpers: `perf-instrument`, `perf-measure` | See `docs/guides/perf-workflow.md`. |
-| 2. UI never freezes | `code-review` (sync-on-UI sniff), `spike-hunter` (p99 enforcement), `debug-detective` (root-cause when a freeze ships) | UI-thread budget: any call reachable from `ImGui::*`-frame stack. |
-| 3. Never crash | `debug-detective` (diagnose), `code-review` (RAII / bounds / nullptr review), `build-doctor` (sanitizer build gate) | Crashes block merge unconditionally. |
+| 1. Performance | `perf-measure` + `perf-gatekeeper` skills (`perf-instrument` for markers), Perf PR-fast gate; spikes: `docs/guides/perf-workflow.md` § Spikes | See `docs/guides/perf-workflow.md`. |
+| 2. UI never freezes | `code-review` agent (sync-on-UI sniff), perf skills + the Perf PR-fast p99 gate, `debug-instrument` skill (root-cause when a hang ships) | UI-thread budget: any call reachable from `ImGui::*`-frame stack. |
+| 3. Never crash | `debug-instrument` skill (diagnose), `code-review` agent (RAII / bounds / nullptr review), sanitizer CI lanes (sanitizer build gate) | Crashes block merge unconditionally. |
 | 4. Accessibility | none today | Flag in backlog; reassess pillar hardening when keyboard-nav / zoom / contrast checks have automated test support. |
 | 5. DRY (Engineering) | `code-review` (reviewer-of-record + exemption sign-off) | `dup_audit.py` delta-gate is blocking; duplication triage + the coupling-CRITICAL guardrail are the reviewer's. |
-| 6. Offline-first | `offline-sync` (implementer), `code-review` (reviewer-of-record) | Four blocking offline gates + three WARN heuristics; the offline test lanes are the backstop. |
+| 6. Offline-first | the Sync / Persistence leaf `AGENTS.md` (implementer rules), `code-review` (reviewer-of-record) | Four blocking offline gates + three WARN heuristics; the offline test lanes are the backstop. |

@@ -4,11 +4,11 @@
 # Bucket A (CLI) per AGENTS.md § Verification automation. Zero manual steps.
 # Auto-enrolled by scripts/dev/test-all.sh via the test-*.sh glob.
 #
-# Wraps the bats suite for agents/scripts/core/coderabbit-triage.py `selftest`
-# (the md<->py rules-version drift guard) + emits the canonical
+# Wraps the bats suite for agents/scripts/core/coderabbit-triage.py `selftest` + `area`
+# (the SKILL.md<->py rules-version drift guard, area-map integrity, area routing) + emits the canonical
 # `Passed: N  Failed: M` line that test-all.sh greps for.
 #
-# Exit codes follow the test-author convention:
+# Exit codes follow the test-script convention (scripts/dev/test-all.sh header):
 #   0 — every bats test passed
 #   1 — at least one bats test failed
 #   2 — bats binary missing (BUILD.md § Dev-script CLI tools lists the install)

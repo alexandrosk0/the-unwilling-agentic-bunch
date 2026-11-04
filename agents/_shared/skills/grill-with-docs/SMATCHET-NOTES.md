@@ -34,9 +34,9 @@ The upstream skill talks about three artifact locations. Smatchet uses:
 
 ## When NOT to invoke
 
-- Single-symbol rename → `mechanic`, no grilling needed.
-- Mechanical bug fix → `debug-detective`, no grilling needed.
-- "Add a field to the grid" with no design tension → `grid-engine` or `tracker-backend` directly.
+- Single-symbol rename → a mechanical edit (`process-rules.md` § Mechanical edits), no grilling needed.
+- Mechanical bug fix → the `debug-instrument` skill, no grilling needed.
+- "Add a field to the grid" with no design tension → implement it directly, following the Ui and Tracker leaf `AGENTS.md`.
 
 The skill is for **plan stress-testing**, not for every change.
 

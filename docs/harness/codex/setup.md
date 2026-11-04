@@ -2,14 +2,15 @@
 
 Codex reads the project agent contract natively:
 
-- [`AGENTS.md`](../../../AGENTS.md) at the repo root - project rules, delegation table, and harness adapter pointers.
-- [`agents/core/*.md`](../../../agents/core/) + [`agents/project/*.md`](../../../agents/project/) - canonical agent definitions.
+- [`AGENTS.md`](../../../AGENTS.md) at the repo root - project rules, the on-demand trigger → rule-doc / skill table, delegation, and harness adapter pointers.
+- [`agents/core/*.md`](../../../agents/core/) - the three canonical agent definitions (`architect`, `code-review`, `security-review`), plus a host project's own `agents/project/*.md` when it has any.
+- [`agents/_shared/skills/*/SKILL.md`](../../../agents/_shared/skills/) - the skills. Codex does not auto-discover them; it reaches each one through its row in the on-demand table in `AGENTS.md` § Project rules.
 - Nearest nested `AGENTS.md` files - subsystem leaf rules, loaded by Codex per the agents.md spec.
 
 Codex also supports project-local lifecycle hooks and custom subagents under
 `.codex/`. The project keeps those files gitignored and regenerates them from
 tracked templates so Claude Code, Cursor, pi, and Codex continue to share the
-same canonical `agents/` prompts.
+same canonical `agents/` prompts and skills.
 
 ## Verify After Clone
 
@@ -45,7 +46,8 @@ project hooks through the Codex hook UI or `/hooks` flow for your Codex surface.
 These parts are covered after setup:
 
 - Agent/rule discovery: native `AGENTS.md` + `agents/{core,project}/*.md`.
-- Project specialist agents: generated `.codex/agents/*.toml` custom agents.
+- Spawnable agents: generated `.codex/agents/*.toml` custom agents.
+- Skills: the on-demand table in `AGENTS.md` § Project rules points at each `SKILL.md`.
 - Subsystem leaf rules: native nearest-`AGENTS.md` behavior.
 - SessionStart nudges: memory drain, owed postmortems, due follow-ups, and shipped-active-plan archival checks.
 - Stop hooks: committed-diff pre-ship gate and main-repo cleanliness warning.

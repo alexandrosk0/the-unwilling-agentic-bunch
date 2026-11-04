@@ -24,11 +24,11 @@ Budgets are sourced from project.config.json § agents (size_budget_lines / size
 contract_budget_lines / contract_warn_lines / sink_warn_lines); the constants below are the
 fallback + the value --selftest asserts the config still matches (drift guard).
 
-Delta semantics (grandfathering): a file is keyed by (rule, path). The current over-budget
-whales (debug-detective, git-janitor, test-author, AGENTS.md) live in the base set, so they
-never fire; a file fires only when it is brand-new over its cap or has just crossed it. A
-grandfathered 733-line agent shrinking to 300 stays grandfathered (still over 250, but it was
-over at base too) — so the whales can be slimmed without the gate fighting it; only REGROWTH
+Delta semantics (grandfathering): a file is keyed by (rule, path). A file already over budget
+at the merge base (snapshot: docs/high-integrity/agent-size-baseline.md) is in the base set,
+so it never fires; a file fires only when it is brand-new over its cap or has just crossed it.
+A grandfathered 733-line agent shrinking to 300 stays grandfathered (still over 250, but it was
+over at base too) — so a whale can be slimmed without the gate fighting it; only REGROWTH
 past the snapshot, or a NEW over-cap file, fails. An HTML-comment line anywhere in the file
 reading `<!-- SMATCHET_DEVIATION(rule=agent-too-long; ...) -->` suppresses it (file-unit gate,
 so the marker is file-scoped, not line-adjacent like the C++ rules). The `<!--` requirement is
@@ -478,8 +478,8 @@ def run_selftest():
     # (c) classify() behaviour: blocking prompts, blocking contract, non-blocking sinks, out-of-scope
     cases = [
         ("AGENTS.md", "contract", True),
-        ("agents/core/debug-detective.md", "agent-prompt", True),
-        ("agents/project/grid-engine.md", "agent-prompt", True),
+        ("agents/core/architect.md", "agent-prompt", True),
+        ("agents/project/example-agent.md", "agent-prompt", True),
         ("docs/agent-rules/process-rules.md", "rule-doc", False),
         ("agents/_shared/skills/perf-instrument/SKILL.md", "skill", False),
     ]

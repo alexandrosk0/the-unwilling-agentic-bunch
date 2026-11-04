@@ -125,9 +125,11 @@ Each file **records only problems**: issues found, each with its disposition (fi
   downstream cascade introduce a contradiction. It does **not** re-open decisions already settled.
   Performed by a **multi-model panel** plus the user's sign-off; **scaled to the item** (a line for a
   trivial one; a real pass for a substantial one). Findings cascade **downstream** per
-  [Handling changes](#handling-changes).
+  [Handling changes](#handling-changes). Each panel leg runs the
+  [`pre-implementation-review`](../../agents/_shared/skills/pre-implementation-review/SKILL.md) skill.
 - **Post-implementation review — the work product.** Reviews the diff; also sweeps the item's
-  spawned tracking work into `Spawned.md`.
+  spawned tracking work into `Spawned.md`. Each panel leg runs the
+  [`adversarial-code-review`](../../agents/_shared/skills/adversarial-code-review/SKILL.md) skill § Panel leg.
 
 **Verify, then stop.** Verify each finding against the actual artifacts/code before acting — a
 stale, duplicate, or incorrect finding gets a disposition (and a note), not a change. The loop ends
@@ -138,8 +140,9 @@ when a pass surfaces no new *actionable* finding; chasing marginal nits past tha
 A review panel produces findings; one **addresser** resolves them — the resolution counterpart to
 the review gates. The panel is deliberately many *independent* passes that don't consolidate; dedup,
 reconciling conflicts, and the **binding** disposition are the addresser's job (a reviewer's
-disposition is a *suggestion*). The same discipline applies at each entry point, the downstream
-target differing:
+disposition is a *suggestion*). The addresser runs the
+[`address-review-feedback`](../../agents/_shared/skills/address-review-feedback/SKILL.md) skill. The same discipline
+applies at each entry point, the downstream target differing:
 
 - **After pre-implementation review** — resolve into the spec/design/plan (cascade per
   [Handling changes](#handling-changes)).
@@ -257,7 +260,8 @@ At close the item's folder collapses into a single frozen summary at `docs/work/
 drain `Spawned.md` into the ledgers (assigning canonical IDs), retire the resolved ledger entries,
 diff the close against the binding dispositions (so a `fix` can't silently fail to land), write the
 summary, delete the folder. A closed item's summary is **frozen at close** — not updated afterward;
-anything further, including a follow-up, starts a new numbered folder.
+anything further, including a follow-up, starts a new numbered folder. The
+[`close-work-item`](../../agents/_shared/skills/close-work-item/SKILL.md) skill runs these steps and verifies the collapse.
 
 ## Retro
 

@@ -2,9 +2,10 @@
 # memory-drain-nudge.sh — SessionStart nudge when the auto-memory inbox needs draining.
 #
 # The harness auto-memory dir (~/.claude/projects/<slug>/memory/) is a transient
-# inbox, NOT a durable store (see docs/agent-rules/memory-drain.md + AGENTS.md
-# § Weekly memory drain). Items captured there rot — they go stale against the
-# code, duplicate AGENTS.md, or stay invisible to non-Claude-Code harnesses.
+# inbox, NOT a durable store (see the drain-memory skill at
+# agents/_shared/skills/drain-memory/SKILL.md). Items captured there rot — they go
+# stale against the code, duplicate AGENTS.md, or stay invisible to non-Claude-Code
+# harnesses.
 #
 # A remote/cloud routine cannot drain it (the dir is machine-local, outside the
 # repo). So instead of a calendar job, this SessionStart hook is event-driven:
@@ -54,7 +55,7 @@ case "$STALE" in ''|*[!0-9]*) STALE=0 ;; esac
 if [ "$COUNT" -ge "$THRESHOLD_COUNT" ] || [ "$STALE" -gt 0 ]; then
     printf '🧹 Memory-drain due: %s item(s) in the auto-memory inbox (%s older than %sd). ' \
         "$COUNT" "$STALE" "$THRESHOLD_DAYS"
-    printf 'Drain per docs/agent-rules/memory-drain.md — triage each into implement / backlog / toss, then clear. '
+    printf 'Drain with the drain-memory skill (agents/_shared/skills/drain-memory/SKILL.md) — triage each into implement / backlog / toss, then clear. '
     printf "Run \`/drain-memory\` or just say 'drain memory'.\n"
 fi
 

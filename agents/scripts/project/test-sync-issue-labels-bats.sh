@@ -5,7 +5,7 @@
 # Wraps the bats suite for agents/scripts/project/sync-issue-labels.sh (issue-triage
 # Slice 2) + emits the canonical `Passed: N  Failed: M` line test-all.sh greps for.
 #
-# Exit codes (test-author convention):
+# Exit codes (test-script convention, scripts/dev/test-all.sh header):
 #   0 — every bats test passed
 #   1 — at least one failed
 #   2 — bats binary missing

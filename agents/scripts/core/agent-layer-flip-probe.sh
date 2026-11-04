@@ -109,7 +109,8 @@ PROBES=(
     # which is what checks it — so it carries no control of its own.
     $'setup-harness\trc\t-\tbash {L}agents/scripts/core/setup-harness.sh claude-code'
     $'adapter-drift\tmatch:PASS\tctl\tbash {L}agents/scripts/core/test-adapter-drift.sh'
-    # The codex adapter's custom agents include the host's agents/project/.
+    # The codex adapter's custom agents include the host's agents/project/ (the
+    # fixture plants one; the host carries no project agent of its own).
     $'setup-harness-codex\tmatch:^# Source: agents/project/\tctl\tbash {L}agents/scripts/core/setup-harness.sh codex >/dev/null && grep -h "^# Source: agents/project/" .codex/agents/*.toml'
     $'harness-provisioned\tsame\tctl\tbash {L}agents/scripts/core/check-harness-provisioned.sh'
     # The deployed SessionStart commands, run as Claude Code runs them: the session
@@ -135,7 +136,6 @@ PROBES=(
     $'pre-push-merged-pr-guard\tsame\tctl\tbash {L}agents/scripts/core/test-pre-push-merged-pr-guard.sh'
     $'agent-contract\tsame\tctl\tbash {L}agents/scripts/core/test-agent-contract.sh'
     $'portable-agent-vexp\tmatch:agents/project/flip-probe-fixture\\.md\tctl\tbash {L}agents/scripts/core/test-portable-agent-vexp.sh'
-    $'skill-vs-agent-parity\tmatch:PASS: flip-probe-fixture \\(skill\tctl\tbash {L}agents/scripts/core/test-skill-vs-agent-parity.sh'
     $'subsystem-docs\tsame\tctl\tbash {L}agents/scripts/project/test-subsystem-docs.sh'
     $'plan-staleness\tmatch:- flip-probe-fixture-stale\tctl\tPATH="{STUB}:$PATH" bash {L}agents/scripts/project/test-plan-staleness.sh --warn'
     $'required-context-parity\tsame\tctl\tbash {L}agents/scripts/core/test-required-context-parity.sh'
@@ -212,10 +212,14 @@ fixture_portable_agent_vexp() { # a project agent naming a vexp tool
     local f="agents/project/$FIX.md"
     fx_new "$1" "$f" && printf 'Call %s%s first.\n' 'mcp__vexp' '__run_pipeline' > "$1/$f" && printf '%s\n' "$f"
 }
-fixture_skill_vs_agent_parity() { # a layer skill whose agent twin is a host project agent
-    local d="${2}agents/_shared/skills/$FIX" f="agents/project/$FIX.md"
-    fx_new "$1" "$d" && fx_new "$1" "$f" && mkdir "$1/$d" \
-        && printf '# %s\n' "$FIX" > "$1/$d/SKILL.md" && printf '# %s\n' "$FIX" > "$1/$f" && printf '%s\n' "$d" "$f"
+fixture_setup_harness_codex() { # a host project agent the codex generator must emit
+    local f="agents/project/$FIX.md"
+    fx_new "$1" "$f" && printf -- '---\nname: %s\ndescription: flip probe fixture\n---\n' "$FIX" > "$1/$f" \
+        && printf '%s\n' "$f"
+}
+fixture_agent_contract() { # a host project agent that breaks the output contract
+    local f="agents/project/$FIX.md"
+    fx_new "$1" "$f" && printf -- '---\nname: %s\n---\n' "$FIX" > "$1/$f" && printf '%s\n' "$f"
 }
 fixture_plan_staleness() { # every cited PR merged ({STUB}'s gh says so), every post-ship section a stub
     local f="$PLANS/active/$FIX-stale.md" stub='*(populated post-ship'

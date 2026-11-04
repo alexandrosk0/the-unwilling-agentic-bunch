@@ -7,9 +7,8 @@ entry — archived to applied.md once this lands).
 
 Why exists: Claude Code's SubagentStop hook captures token usage per subagent
 spawn, but skills load **inline** in the orchestrator's context. No SubagentStop
-fires for skill invocations. Without a separate hook the central claim of the
-2026-05-19 perf-instrument / perf-measure dual-publish ("skill form is lighter
-than agent form") is unmeasurable.
+fires for skill invocations. Without a separate hook the claim that a skill is
+lighter than an agent spawn is unmeasurable.
 
 Output: $CLAUDE_PROJECT_DIR/.claude/.skill-loads.jsonl (gitignored).
 One line per invocation:

@@ -7,8 +7,8 @@
 # breaks → the adapter keeps the OLD content, so the harness spawns the stale
 # model/prompt (confirmed: the code-review sonnet→opus/high change kept spawning
 # sonnet for ~a day off a stale adapter copy — tooling self-improvement
-# 2026-06-08 P2). test-agent-contract checks the CANONICAL banner↔frontmatter
-# parity (both update together → it passes) but NOT adapter staleness; this gate
+# 2026-06-08 P2). test-agent-contract checks the CANONICAL frontmatter (the
+# model keys update together → it passes) but NOT adapter staleness; this gate
 # closes that hole.
 #
 # LOCAL gate: the .claude adapter is gitignored / absent in CI, so this SKIPS

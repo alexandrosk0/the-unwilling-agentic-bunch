@@ -1,48 +1,6 @@
 # Weekly memory drain
 
-The harness's auto-memory (`~/.claude/projects/<slug>/memory/`) is a
-**transient inbox**, not a durable store. Facts captured there during sessions
-rot: they go stale against the code, duplicate `AGENTS.md`, or stay invisible to
-non-Claude-Code harnesses (Codex / Cursor / Aider read the repo, never user-private
-memory). The weekly drain converts that inbox into repo-resident truth.
-
-## Cadence
-
-Event-driven, not calendar. The `SessionStart` hook `agents/scripts/core/memory-drain-nudge.sh`
-checks the local inbox on every session start and prints a one-line nudge into
-context when the inbox holds ≥ 5 live items **or** any item is > 7 days old
-(both thresholds are env-overridable — see the hook script header). Act on
-the nudge with the `/drain-memory` skill, or run it any time the user says
-"drain memory". A remote/cloud routine **cannot** do this — the memory dir is
-machine-local, outside the repo; only a local session sees it.
-
-## Per-item triage — three verdicts
-
-For **every** memory file in the inbox, decide one:
-
-| Verdict | Action |
-|---|---|
-| **Implement** | The item is a durable behavioral rule or project invariant. Migrate it into the agentic structure: a 1-liner-or-less rule into `AGENTS.md` § Project rules, a fuller rule into the matching `docs/agent-rules/<topic>.md`. Then delete the memory file. |
-| **Backlog** | The item is real follow-up work (a regression, a missing guard, a tooling gap) but not yet a rule. Add a new per-entry file `docs/self-improvement/categories/<cat>/<YYYY-MM-DD>-<slug>.md` (one entry per file — see [`AGENT_SELF_IMPROVEMENT.md`](../self-improvement/AGENT_SELF_IMPROVEMENT.md) § Format) with a `Source: memory <slug> (drained <date>)` line. Then delete the memory file. |
-| **Toss** | The item is already guarded in code, machine-specific (not portable repo truth), or contradicted by the current tree. Delete the memory file. Note the reason in the drain summary. |
-
-## Verify before trusting
-
-Memories are point-in-time. Before implementing or backlogging, **verify the claim
-against the current tree** — cited file paths, function names, and "fixed in PR #N"
-notes drift. A recent directory restructure that renamed core source paths and
-moved config files already orphaned several memory citations. A memory that says
-"now wired into tooling" may describe a guard that has since regressed — that flips
-the verdict from *toss* to *backlog (regression)*.
-
-## After the sweep
-
-1. Reset `MEMORY.md` to the empty-inbox header (keep the banner + drain-spec link).
-2. Record the tally in the `_(inbox empty — last drained ...)_` line:
-   `N items → A implemented, B backlogged, C tossed`.
-3. Ship the doc/backlog edits as a **PR** (never direct-push to develop) — pure-docs
-   diff, skips build/tests. The memory-file deletions are user-private (outside the
-   repo) and are not part of the PR.
+The memory-drain process (cadence, the three verdicts, verify-before-trust, the after-sweep steps) lives in the [`drain-memory`](../../agents/_shared/skills/drain-memory/SKILL.md) skill; the SessionStart nudge `agents/scripts/core/memory-drain-nudge.sh` points there with `/drain-memory`. Auto-memory is a Claude Code feature, so the skill is the single home. This file keeps the drain log, which the skill's last step appends to.
 
 ## History
 

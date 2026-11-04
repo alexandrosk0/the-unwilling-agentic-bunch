@@ -5,7 +5,9 @@
 // agent against ONLY that leaf's rules, then a judge stage aggregates the
 // per-zone findings into one ranked drift report. All reviewers are read-only →
 // zero write-set collision, no worktree, no lock (fan-out-safety Boundary, see
-// docs/agent-rules/workflow-orchestration.md).
+// docs/agent-rules/workflow-fleets.md). An audit is not a gate review: auditors
+// write no review artifact and record no ack, so a zone audit can never stamp
+// the branch fingerprint the commit and push gates trust.
 //
 // PORTABLE (lives in agents/_shared/workflows/, purity-gated): the script body
 // embeds NO project literal — no subsystem path, no repo-specific command. Zone
@@ -145,9 +147,16 @@ phase('Audit')
 const auditPrompt = (z) =>
   'Audit the source subsystem at ' + z.dir + ' for DRIFT from ITS OWN leaf agent-rules ' +
   'file at ' + z.leaf + '. Read-only — do NOT edit any files; discover via semantic ' +
-  'search / code-graph queries first, falling back to Grep/Glob.\n' +
-  'STEP 1: read ' + z.leaf + ' and extract every imperative, checkable invariant it states ' +
-  '(naming rules, banned constructs, layering/ownership constraints, required patterns).\n' +
+  'search / code-graph queries first, falling back to Grep/Glob. This is a drift audit, ' +
+  'NOT a gate review of the branch diff: do NOT write .review-findings.json and do NOT ' +
+  'record a review ack (review-ack.sh / pre-ship.sh --ack-review) — skip your gate-artifact steps.\n' +
+  'STEP 1: read ONLY the "## Invariants" section of ' + z.leaf + ' (from that heading to the ' +
+  'next level-2 "## " heading, including its "### " subsections) and extract every ' +
+  'imperative, checkable invariant it states (naming rules, banned constructs, ' +
+  'layering/ownership constraints, required patterns). Other sections ' +
+  '("## Before you edit", procedures, file maps) are guidance, not audit criteria. ' +
+  'If the leaf has no "## Invariants" section, return an empty findings list — do not ' +
+  'audit against its other prose.\n' +
   'STEP 2: review the code under ' + z.dir + ' for any place that VIOLATES one of those leaf ' +
   'invariants. Judge ONLY against this leaf\'s rules — do not re-litigate repo-wide rules a ' +
   'central gate already enforces, and do not flag style preferences the leaf does not state.\n' +

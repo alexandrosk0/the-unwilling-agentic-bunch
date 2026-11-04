@@ -57,7 +57,7 @@
 #                         points this at a stub so the rescope tests stay decoupled
 #                         from the watchdog's own (separately-tested) detection.
 #
-# Exit codes (test-author convention):
+# Exit codes (test-script convention, scripts/dev/test-all.sh header):
 #   0  plan emitted (cascade confirmed, --force, or verdict-unconfirmed WARN)
 #   2  usage error (missing slug / missing manifest)
 #   3  refused — the watchdog ran and the verdict was NOT cascade (pass --force

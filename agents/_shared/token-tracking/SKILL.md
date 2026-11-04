@@ -34,8 +34,8 @@ Session <id> (<N> agent calls)
 
 Agent                Model     Calls        In       Out     Cache   Est. USD
 ------------------------------------------------------------------------------
-perf-detective       opus          2     20.0k      3.5k     34.0k  $ 0.6825
-command-system       sonnet        1      4.0k       600      8.0k  $ 0.0234
+architect            opus          2     20.0k      3.5k     34.0k  $ 0.6825
+code-review          sonnet        1      4.0k       600      8.0k  $ 0.0234
 ------------------------------------------------------------------------------
 Total                              3     24.0k      4.1k     42.0k  $ 0.7059
 

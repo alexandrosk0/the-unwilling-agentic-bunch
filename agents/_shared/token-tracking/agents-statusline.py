@@ -15,7 +15,7 @@ Reads:
     $CLAUDE_PROJECT_DIR/.claude/.agent-tokens.jsonl  (tail-only; fast)
 
 Output (single line):
-    [CAVEMAN] ⛏ 12.4k    [AGENTS] 🤖 perf-detective 14k · spike-hunter 8k · total 28k · $0.42
+    [CAVEMAN] ⛏ 12.4k    [AGENTS] 🤖 code-review 14k · architect 8k · total 28k · $0.42
 
 Silent on every error path. Statusline must never fail — Claude Code refreshes
 this on every interaction.

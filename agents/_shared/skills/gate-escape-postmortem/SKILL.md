@@ -1,6 +1,6 @@
 ---
 name: gate-escape-postmortem
-description: Run a blameless postmortem on a gate escape — something that shipped to develop that a gate should have caught (a non-SUCCESS check at merge, an override label, a Revert, an overdue deviation, or a named post-merge bug). Identify the escaped class, do blameless root-cause, name the concrete PREVENTING GATE (mandatory — the entry cannot close without it), author a subagent-eval case when the miss was agent-reviewable, file that gate as a normal self-improvement category entry, and append to docs/self-improvement/postmortems.md. Use when the postmortem-owed SessionStart nudge fires, or the user says "postmortem", "gate escape", "why did this ship", "post-merge bug". Escalate deep C++ root-cause to debug-detective. Read-write — edits the ledger + a category entry.
+description: Run a blameless postmortem on a gate escape — something that shipped to develop that a gate should have caught (a non-SUCCESS check at merge, an override label, a Revert, an overdue deviation, or a named post-merge bug). Identify the escaped class, do blameless root-cause, name the concrete PREVENTING GATE (mandatory — the entry cannot close without it), author a subagent-eval case when the miss was agent-reviewable, file that gate as a normal self-improvement category entry, and append to docs/self-improvement/postmortems.md. Use when the postmortem-owed SessionStart nudge fires, or the user says "postmortem", "gate escape", "why did this ship", "post-merge bug". Run the debug-instrument skill's loop for deep C++ root-cause. Read-write — edits the ledger + a category entry.
 version: 1
 ---
 
@@ -36,8 +36,8 @@ triage) is the **applier**. No second system.
    `origin/develop` before the finding goes in the ledger.
 2. **Blameless root cause.** Why did the gate not catch it? Name the *gate hole*,
    never an agent/person. If the root cause needs deep C++ investigation (a
-   product bug a check should have caught), **escalate to `debug-detective`** and
-   resume with its diagnosis — that is the one branch that exceeds this skill's
+   product bug a check should have caught), **run the `debug-instrument` skill's
+   loop** and resume with its diagnosis — that is the one branch that exceeds this skill's
    bounded rubric.
 3. **Name the PREVENTING GATE (mandatory).** The concrete new gate / rule / test /
    lint that catches the *class*, e.g. "make the doc-validation contexts
@@ -47,7 +47,7 @@ triage) is the **applier**. No second system.
    recorded decision. **An entry cannot close without this field.**
 4. **Author the eval case (when agent-reviewable) — mandatory field.** If the
    escaped class is one a *reviewer agent* could have caught (a code smell, a
-   logic bug, or a policy violation that `code-review` / `coderabbit-triage` /
+   logic bug, or a policy violation that `code-review` / the `coderabbit-triage` skill /
    a review agent scores — as opposed to a pure CI-config, infra, or
    missing-required-context gap), the RCA **is** an eval-case spec: the missed
    defect is the input, "a competent reviewer flags `<X>`" is the reference
@@ -79,4 +79,4 @@ triage) is the **applier**. No second system.
 - A per-PR retrospective (covered by plan § Deviations).
 - A CI-blocking "postmortem required" gate (deliberately advisory — blocking
   would re-introduce the ceremony tax).
-- Deep C++ root-cause (escalate to `debug-detective`).
+- Deep C++ root-cause (the `debug-instrument` skill's loop).

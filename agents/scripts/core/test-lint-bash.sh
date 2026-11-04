@@ -11,7 +11,7 @@
 # Bucket A (CLI) per AGENTS.md § Verification automation. Zero manual steps.
 # Auto-enrolled by scripts/dev/test-all.sh via the test-*.sh glob.
 #
-# Exit codes follow the test-author convention:
+# Exit codes follow the test-script convention (scripts/dev/test-all.sh header):
 #   0 — clean (no findings under the fail-set)
 #   1 — at least one SC2086 / SC2046 / SC2155 finding (FAIL)
 #   2 — shellcheck binary missing (skip; not a fail)

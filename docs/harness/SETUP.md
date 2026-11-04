@@ -2,9 +2,10 @@
 
 The project ships **harness-agnostic** agent definitions:
 
-- [`AGENTS.md`](../../AGENTS.md) at the repo root — project rules, delegation table, capability map.
-- [`agents/*.md`](../../agents/) — one file per delegated agent (per the [agents.md spec](https://agents.md/)).
-- [`agents/_shared/`](../../agents/_shared/) — shared skills + token-tracking scripts any harness can wire.
+- [`AGENTS.md`](../../AGENTS.md) at the repo root — project rules, the on-demand trigger → rule-doc / skill table, delegation, capability map.
+- [`agents/core/*.md`](../../agents/core/) — the three spawnable agents, `architect`, `code-review` and `security-review` (per the [agents.md spec](https://agents.md/)); a host project may add its own under `agents/project/`.
+- [`agents/_shared/skills/`](../../agents/_shared/skills/) — one `SKILL.md` per bounded procedure (debugging, perf, test authoring, PR-bot triage, cleanup, …). Claude Code auto-discovers them; Codex, Cursor and pi reach each one through a path link: its row in the on-demand table in `AGENTS.md` § Project rules, or a link from a doc `AGENTS.md` routes to.
+- [`agents/_shared/`](../../agents/_shared/) — also the token-tracking scripts, templates and workflow scripts any harness can wire.
 
 Per-harness adapter directories (`.claude/`, `.codex/`, `.cursor/`, `.pi/`) are **gitignored** - they're local build output that links into or generates from the canonical `agents/` tree and copies a small number of templates. Codex still reads `AGENTS.md` natively, but setup now also generates Codex-native hooks and custom-agent TOML under `.codex/`. After cloning the repo, run the setup script for the harness you use:
 
@@ -14,7 +15,7 @@ Per-harness adapter directories (`.claude/`, `.codex/`, `.cursor/`, `.pi/`) are 
 | Codex / OpenAI Agents | `bash agents/scripts/core/setup-harness.sh codex` | [codex/setup.md](codex/setup.md) |
 | Cursor | `bash agents/scripts/core/setup-harness.sh cursor` | [cursor/setup.md](cursor/setup.md) |
 | pi (earendil-works) | `bash agents/scripts/core/setup-harness.sh pi` | [pi/README.md](pi/README.md) |
-| Aider / generic | Manual — paste agent files from `agents/` as needed. No adapter dir. | — |
+| Aider / generic | Manual — paste an agent file from `agents/core/` or a skill's `SKILL.md` as needed. No adapter dir. | — |
 
 Windows users run the same command — Git Bash ships with Git for Windows, and the PowerShell twin was deleted (it drifted from the bash original rather than tracking it).
 

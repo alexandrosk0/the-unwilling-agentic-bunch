@@ -8,7 +8,7 @@
 #
 # Plan: docs/plans/shipped/high-integrity-cpp-enforcement.md.
 #
-# Exit codes (test-author convention):
+# Exit codes (test-script convention, scripts/dev/test-all.sh header):
 #   0 — every bats test passed
 #   1 — at least one bats test failed
 #   2 — bats binary missing (BUILD.md § Dev-script CLI tools)
