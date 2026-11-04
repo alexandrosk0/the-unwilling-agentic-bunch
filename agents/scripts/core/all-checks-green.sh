@@ -44,7 +44,14 @@
 #     are read by the poller's OWN jq def, _MG_JQ_DISPOSITION_DEF, sourced from
 #     merge-gates.d/10-gate-filter.sh (marker at line start, outside an HTML
 #     comment, no `<...>` placeholder reason; labels follow the reason rule), so
-#     the aggregate is never laxer than the poller it stands in for. The poller's
+#     the aggregate is never laxer than the poller it stands in for. The
+#     plan-lock waiver also needs the poller's per-slug rule: every lock slug
+#     the red Plan-lock gate run's annotations report must be named by a
+#     disposition, parsed by the poller's own merge-gates.d/20-planlock-slugs.sh
+#     with its annotation cap (planlock_slugs_named). With no lock-table
+#     checkout here, the annotations are the only slug source, so a set they
+#     cannot give (unreadable, ambiguous, possibly truncated) leaves the waiver
+#     unapplied and the aggregate red (fail closed). The poller's
 #     stale-override freshness conjunct is NOT ported: the two label-reactive
 #     checks it guards are themselves required contexts, so GitHub still waits on
 #     their post-label re-run directly, and the settle re-poll below sees a re-run
@@ -97,7 +104,9 @@
 #
 # FIXTURE MODE: --fixture <json> evaluates one snapshot and exits — bats replays
 # the #2286 check list through it. The JSON carries `check_runs` / `statuses`
-# (REST shapes), optional `labels`, `body`, `required_contexts`, `self`.
+# (REST shapes), optional `labels`, `body`, `required_contexts`, `self`, and
+# `planlock_annotations` (the red Plan-lock gate run's failure messages; absent
+# or null reads as unreadable).
 #
 # Env (both modes): ACG_SELF (this check's name), ACG_REQUIRED_CONTEXTS
 # (NEWLINE-separated — check names can contain commas; overrides the fixture's /
@@ -155,13 +164,58 @@ _ACG_GATE_FILTER="$(dirname "${BASH_SOURCE[0]}")/merge-gates.d/10-gate-filter.sh
 # shellcheck source=agents/scripts/core/merge-gates.d/10-gate-filter.sh
 . "$_ACG_GATE_FILTER"
 [ -n "${_MG_JQ_DISPOSITION_DEF:-}" ] || die "$_ACG_GATE_FILTER did not define _MG_JQ_DISPOSITION_DEF"
+# The plan-lock per-slug rule's parser and cap, the poller's own module (pure
+# functions), on the same fail-closed terms: without it the aggregate cannot
+# check a plan-lock waiver, and a waiver it cannot check must not apply.
+_ACG_PLANLOCK_SLUGS="$(dirname "${BASH_SOURCE[0]}")/merge-gates.d/20-planlock-slugs.sh"
+[ -f "$_ACG_PLANLOCK_SLUGS" ] || die "missing $_ACG_PLANLOCK_SLUGS (the shared plan-lock slug parser)"
+# shellcheck source=agents/scripts/core/merge-gates.d/20-planlock-slugs.sh
+. "$_ACG_PLANLOCK_SLUGS"
+for _acg_fn in _mg_planlock_gate_slugs _mg_planlock_slug_report; do
+    command -v "$_acg_fn" >/dev/null 2>&1 || die "$_ACG_PLANLOCK_SLUGS did not define $_acg_fn"
+done
+unset _acg_fn
 
-# The verdict program. Input: {check_runs, statuses, labels, body}; $self: this
-# check's name; $req: required-context names. Output: {verdict, failing, pending,
-# absent, downgraded, exempt, total, fingerprint}.
+# Shared jq defs (input: the poll document {check_runs, statuses, labels, body,
+# planlock_annotations}):
+#   acg_labels — the label names;
+#   acg_runs($self) — the latest run per check name (see RULES), as
+#     {kind, name, id, cancelled, state, detail};
+#   acg_planlock_waiver_id($self) — the id of the red "Plan-lock gate" run that
+#     plan-lock-out-of-band + a plan-lock-disposition would waive (empty when no
+#     waiver is in play). The per-slug rule reads that run's annotations.
 # shellcheck disable=SC2016  # single-quoted jq program — $-refs are jq variables
-ACG_FILTER="$_MG_JQ_DISPOSITION_DEF"'
-([.labels[]? | if type == "object" then (.name // "") else . end]) as $labels
+ACG_DEFS="$_MG_JQ_DISPOSITION_DEF"'
+def acg_labels: [.labels[]? | if type == "object" then (.name // "") else . end];
+def acg_runs($self):
+  [.check_runs[]? | select((.name // "") != $self)]
+  | group_by(.name // "")
+  | map(sort_by([(.check_suite.id // 0), (.id // 0)]) as $g
+        | $g[-1] + {staleTwin: ((($g[-1].conclusion // "") == "cancelled")
+                                and ($g[0:-1] | any((.check_suite.id // 0) != ($g[-1].check_suite.id // 0)
+                                                    and (.conclusion // "") != "cancelled")))})
+  | map({kind: "check", name: (.name // ""), id: (.id // 0), cancelled: ((.conclusion // "") == "cancelled"),
+         state: (if (.status // "") != "completed" then "pending"
+                 elif ((.conclusion // "") | IN("failure", "timed_out", "cancelled", "action_required", "startup_failure")) then "fail"
+                 else "pass" end),
+         detail: (if (.status // "") != "completed" then (.status // "queued")
+                  elif .staleTwin then "cancelled in a newer workflow run, which GitHub evaluates; re-run that run: \(.details_url // "its details page"), see merge-gates.md § The 405 ... is cancelled recovery"
+                  else (.conclusion // "none") end)});
+def acg_planlock_waiver_id($self):
+  acg_labels as $labels
+  | if ($labels | any(. == "plan-lock-out-of-band"))
+       and disposition($labels; .body; "plan-lock-disposition")
+    then (acg_runs($self) | map(select(.name == "Plan-lock gate" and .state == "fail")) | .[0].id // empty)
+    else empty end;
+'
+
+# The verdict program. Input: the poll document; $self: this check's name; $req:
+# required-context names; $plnamed: whether the plan-lock per-slug rule passed
+# (planlock_slugs_named). Output: {verdict, failing, pending, absent,
+# downgraded, exempt, total, fingerprint}.
+# shellcheck disable=SC2016  # single-quoted jq program — $-refs are jq variables
+ACG_FILTER="$ACG_DEFS"'
+acg_labels as $labels
 | ($labels | any(. == "tests-out-of-band")) as $tests
 | ($labels | any(. == "perf-out-of-band")) as $perf
 | ($labels | any(. == "intent-out-of-band")) as $intent
@@ -170,19 +224,7 @@ ACG_FILTER="$_MG_JQ_DISPOSITION_DEF"'
 | disposition($labels; .body; "cr-disposition") as $crdisp
 | disposition($labels; .body; "plan-lock-disposition") as $planlockdisp
 | ([$req[] | select(. != $self)]) as $reqNames
-| ([.check_runs[]? | select((.name // "") != $self)]
-   | group_by(.name // "")
-   | map(sort_by([(.check_suite.id // 0), (.id // 0)]) as $g
-         | $g[-1] + {staleTwin: ((($g[-1].conclusion // "") == "cancelled")
-                                 and ($g[0:-1] | any((.check_suite.id // 0) != ($g[-1].check_suite.id // 0)
-                                                     and (.conclusion // "") != "cancelled")))})
-   | map({kind: "check", name: (.name // ""), id: (.id // 0), cancelled: ((.conclusion // "") == "cancelled"),
-          state: (if (.status // "") != "completed" then "pending"
-                  elif ((.conclusion // "") | IN("failure", "timed_out", "cancelled", "action_required", "startup_failure")) then "fail"
-                  else "pass" end),
-          detail: (if (.status // "") != "completed" then (.status // "queued")
-                   elif .staleTwin then "cancelled in a newer workflow run, which GitHub evaluates; re-run that run: \(.details_url // "its details page"), see merge-gates.md § The 405 ... is cancelled recovery"
-                   else (.conclusion // "none") end)})) as $runs
+| acg_runs($self) as $runs
 | ([.statuses[]? | select((.context // "") != $self)]
    | group_by(.context // "")
    | map(sort_by([(.updated_at // .created_at // ""), (.id // 0)]) | .[-1])
@@ -202,7 +244,7 @@ ACG_FILTER="$_MG_JQ_DISPOSITION_DEF"'
   def downgraded: ($tests and .kind == "check" and .name == "Test-delta gate")
                   or ($perf and .kind == "check" and (.name | startswith("Perf PR-fast")))
                   or ($intent and .kind == "check" and .name == "Intent section")
-                  or ($planlock and $planlockdisp and .kind == "check" and .name == "Plan-lock gate")
+                  or ($planlock and $planlockdisp and $plnamed and .kind == "check" and .name == "Plan-lock gate")
                   or crwaived;
   def show: "\(.name) (\(.detail))";
   ([$all[] | select(.state == "fail" and (exempt | not) and (downgraded | not))]) as $failing
@@ -240,9 +282,42 @@ required_contexts_json() {
     fi
 }
 
+# planlock_slugs_named <doc.json> — the poller's per-slug disposition rule for a
+# plan-lock-out-of-band waiver: print "true" when the waiver may apply, "false"
+# when it must not (the reason goes to stderr as the poller's BLOCK line). The
+# aggregate has no lock-table checkout, so the colliding slugs come from the red
+# Plan-lock gate run's annotations alone (the document's planlock_annotations:
+# the failure-level messages, or null when they could not be read or may be
+# cut off), parsed by the poller's _mg_planlock_gate_slugs with its cap. Each
+# slug must be named by a disposition (_mg_planlock_slug_report). FAIL CLOSED:
+# annotations that are unreadable, ambiguous or possibly truncated leave the
+# set unknown and the waiver does not apply, so the Plan-lock red keeps the
+# aggregate red (which blocks only GitHub's native auto-merge; the poller and
+# safe-admin-merge.sh re-check the live lock table). An infrastructure-only red
+# names no slug, so its disposition stands, as in the poller.
+planlock_slugs_named() {
+    local doc="$1" id msgs ann set reasons
+    id="$(jq -r --arg self "$SELF_NAME" "$ACG_DEFS"' acg_planlock_waiver_id($self)' "$doc")" || return 1
+    if [ -z "$id" ]; then echo true; return 0; fi
+    if msgs="$(jq -er '.planlock_annotations | if type == "array" then map(tostring) | join("\n") else error("unreadable") end' \
+        "$doc" 2>/dev/null)"; then
+        ann="$(printf '%s\n' "$msgs" | _mg_planlock_gate_slugs annotations)"
+        case "$ann" in
+            complete|"complete "*) set="$ann" ;;
+            *) set="unknown (from the red run's annotations: ${ann#unknown })" ;;
+        esac
+    else
+        set="unknown (the red Plan-lock gate run's annotations are unreadable)"
+    fi
+    reasons="$(jq -r "$ACG_DEFS"' planlock_reasons_text(acg_labels; .body)' "$doc")" || return 1
+    if _mg_planlock_slug_report "$set" "$reasons"; then echo false; else echo true; fi
+}
+
 # evaluate <doc.json> <req-json> — print the verdict object.
 evaluate() {
-    jq -c --arg self "$SELF_NAME" --argjson req "$2" "$ACG_FILTER" "$1"
+    local plnamed
+    plnamed="$(planlock_slugs_named "$1")" || return 1
+    jq -c --arg self "$SELF_NAME" --argjson req "$2" --argjson plnamed "$plnamed" "$ACG_FILTER" "$1"
 }
 
 # report <verdict-json> — human-readable breakdown (one line per non-green check).
@@ -319,6 +394,7 @@ WORK="$(mktemp -d)" || die "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/cache" || die "mktemp failed"
 echo '{"head":"","state":"open","labels":[],"body":""}' > "$WORK/pr.json"
+echo '{"id":null,"messages":null}' > "$WORK/planlock_ann.json"
 RL_REMAINING=""   # X-RateLimit-Remaining of the last response ("" = not seen)
 RL_RESET=""       # X-RateLimit-Reset (epoch seconds) of the last response
 
@@ -493,11 +569,49 @@ pr_superseded() {
     fi
 }
 
+# planlock_waiver_id <doc.json> — the red Plan-lock gate run a plan-lock waiver
+# would cover (empty: no waiver in play).
+planlock_waiver_id() {
+    jq -r --arg self "$SELF_NAME" "$ACG_DEFS"' acg_planlock_waiver_id($self)' "$1"
+}
+
+# assemble_doc — the poll's document into $WORK/doc.json. planlock_annotations
+# carries the fetched annotations only when they belong to the run the waiver
+# covers now; otherwise null (unreadable), which the per-slug rule refuses.
+assemble_doc() {
+    local id
+    jq -n --slurpfile r "$WORK/runs.json" --slurpfile s "$WORK/stats.json" --slurpfile p "$WORK/pr.json" \
+        '{check_runs: $r[0], statuses: $s[0], labels: $p[0].labels, body: $p[0].body, planlock_annotations: null}' \
+        > "$WORK/doc.json" || return 1
+    id="$(planlock_waiver_id "$WORK/doc.json")" || return 1
+    [ -n "$id" ] || return 0
+    jq --slurpfile a "$WORK/planlock_ann.json" --arg id "$id" \
+        '.planlock_annotations = (if (($a[0].id // "") | tostring) == $id then $a[0].messages else null end)' \
+        "$WORK/doc.json" > "$WORK/doc.json.new" && mv "$WORK/doc.json.new" "$WORK/doc.json"
+}
+
+# fetch_planlock_annotations — when a plan-lock waiver is in play on the state
+# just fetched, read the red Plan-lock gate run's annotations into
+# $WORK/planlock_ann.json as {id, messages}: the failure-level messages, or
+# null when the page came back full (more may exist, so the list may be cut
+# off). The GET is conditional, so re-reading unchanged annotations every poll
+# costs no rate limit. rc as rest_get (0 ok · 1 error · 3 rate-limited); a
+# failed read is an API failure like any other (retried), never a verdict.
+fetch_planlock_annotations() {
+    local id rc=0
+    assemble_doc || return 1
+    id="$(planlock_waiver_id "$WORK/doc.json")" || return 1
+    [ -n "$id" ] || return 0
+    rest_get "ann.$id" "repos/$REPO/check-runs/$id/annotations?per_page=100" || rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    jq -c --argjson id "$id" '{id: $id, messages: (if (length >= 100) then null
+        else [.[]? | select((.annotation_level // "failure") == "failure") | (.message // "")] end)}' \
+        "$WORK/cache/ann.$id.body" > "$WORK/planlock_ann.json" || return 1
+}
+
 # judge — assemble the poll's document and set $v (verdict object) + $verdict.
 judge() {
-    jq -n --slurpfile r "$WORK/runs.json" --slurpfile s "$WORK/stats.json" --slurpfile p "$WORK/pr.json" \
-        '{check_runs: $r[0], statuses: $s[0], labels: $p[0].labels, body: $p[0].body}' > "$WORK/doc.json" \
-        || die "cannot assemble poll $poll"
+    assemble_doc || die "cannot assemble poll $poll"
     v="$(evaluate "$WORK/doc.json" "$REQ")" || die "cannot evaluate poll $poll"
     verdict="$(jq -r .verdict <<<"$v")"
 }
@@ -516,6 +630,7 @@ while :; do
     fetch_rc=0
     fetch_checks || fetch_rc=$?
     if [ "$fetch_rc" -eq 0 ] && [ "$pr_fresh" -eq 1 ]; then fetch_pr || fetch_rc=$?; fi
+    if [ "$fetch_rc" -eq 0 ]; then fetch_planlock_annotations || fetch_rc=$?; fi
     if [ "$fetch_rc" -eq 3 ]; then
         # Rate-limited: not an API failure — wait for the reset, within budget.
         RL_REMAINING=0
@@ -544,11 +659,11 @@ while :; do
     judge
     # A terminal verdict is always judged on a fresh PR read (head, labels, body).
     if [ "$verdict" != "pending" ] && [ "$pr_fresh" -eq 0 ]; then
-        if ! fetch_pr; then
+        if ! fetch_pr || ! fetch_planlock_annotations; then
             if [ "$(date +%s)" -ge "$DEADLINE" ]; then
                 timeout_red "the PR could not be re-read for a terminal verdict"
             fi
-            echo "all-checks-green: poll $poll — PR read failed, re-polling."
+            echo "all-checks-green: poll $poll — PR (or Plan-lock annotation) read failed, re-polling."
             nap "$POLL"
             continue
         fi

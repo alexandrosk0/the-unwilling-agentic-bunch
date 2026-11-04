@@ -9,9 +9,21 @@
 #
 # Rules:
 #   1. Only relative links are checked (paths starting with `/`, `http://`,
-#      `https://`, `mailto:`, or `#` are skipped).
+#      `https://` or `mailto:` are skipped). A same-file `#section` link is
+#      relative too: rule 3 checks it against the source file's own headings.
 #   2. The href is resolved relative to the source markdown file's directory.
-#   3. Anchor fragments (`#section`) are stripped before existence check.
+#   3. An anchor fragment (`#section`) is split off before the existence check,
+#      then, when the target is a markdown file, resolved against that file's
+#      headings by GitHub's slug rules: lower-case; every character that is not
+#      a letter, mark, decimal or letter number, `_`, space or `-` dropped (so
+#      `§`, `—`, `.`, `+`, `&`, `/`, parentheses, backticks, emoji and other
+#      numbers such as `²` vanish); each space to `-`
+#      with no collapsing (`A — B` is `a--b`); a repeated slug suffixed `-1`,
+#      `-2`, ... in document order. Explicit `<a id=…>` / `name=` anchors and
+#      GitHub's `#L10` line anchors count. The heading set over-approximates the
+#      rendering, so an approximation error can only let a broken fragment
+#      pass, never fail a good one. A non-markdown target (`Foo.h#L10`) or a
+#      directory is not fragment-checked.
 #   4. Image links (`![alt](path)`) are NOT checked — image assets vary by
 #      build state.
 #   5. Targets: docs/**/*.md, agents/**/*.md, and the top-level repo docs
@@ -29,7 +41,14 @@
 #      header is the documented contract, so a target added there must be added
 #      here too.
 #   6. Links inside fenced code blocks (``` / ~~~) are skipped — illustrative
-#      example paths in a template are literal, not navigable links.
+#      example paths in a template are literal, not navigable links. A fence
+#      closes only on its opener's character with a run at least as long, as
+#      CommonMark renders it, so a ``` line inside a ~~~ block stays code.
+#   7. Run from a host, the registered subsystem leaves are targets too: every
+#      Source/**/AGENTS.md that lib/leaf-docs.sh's leaf_agents_files lists under
+#      PROJECT_ROOT (tracked, outside the host's lint exempt zones). Source/ is
+#      outside rule 5's branches, so a broken pointer in a leaf used to ship
+#      silently. A Source/ tree with no leaf library to enumerate it exits 2.
 #
 # Bypass: SMATCHET_SKIP_MARKDOWN_LINK_CHECK=1 (logged when used).
 #
@@ -58,8 +77,9 @@
 #
 # Exit codes:
 #   0 — every relative link in every scanned markdown resolves to an existing file
-#   1 — at least one dangling link
-#   2 — missing binary (python)
+#       (and every checked #fragment to a heading in it)
+#   1 — at least one dangling link or fragment
+#   2 — missing binary (python), or a Source/ tree without lib/leaf-docs.sh
 
 set -euo pipefail
 # The tree whose markdown is checked is PROJECT_ROOT (scripts/dev/project-config.sh):
@@ -127,8 +147,16 @@ if [ "${1:-}" = "--selftest" ]; then
         fail=1
     fi
     rm -f "$bad"
-    # A clean untracked markdown (no relative links) must PASS.
-    printf '# selftest\n\nno relative links here\n' > "$good"
+    # selftest: asserts-failure — a link whose #fragment names no heading in its
+    # target (rule 3) MUST fail even though the target file exists.
+    printf '# selftest\n\nsee [gone](#no-such-heading-xyz)\n' > "$bad"
+    if bash "$_tml_self" >/dev/null 2>&1; then
+        echo "test-markdown-links --selftest: FAIL — a broken #fragment was NOT detected" >&2
+        fail=1
+    fi
+    rm -f "$bad"
+    # A clean untracked markdown (a fragment that resolves) must PASS.
+    printf '# selftest\n\n## Merge gates § Masks\n\nsee [ok](#merge-gates--masks)\n' > "$good"
     if ! bash "$_tml_self" >/dev/null 2>&1; then
         echo "test-markdown-links --selftest: FAIL — clean untracked file wrongly flagged" >&2
         fail=1
@@ -136,7 +164,7 @@ if [ "${1:-}" = "--selftest" ]; then
     cleanup
     trap - EXIT
     if [ "$fail" = "0" ]; then
-        echo "test-markdown-links --selftest: PASS (untracked files are in diff-scope)"
+        echo "test-markdown-links --selftest: PASS (untracked files are in diff-scope; a broken #fragment fails)"
         exit 0
     fi
     echo "test-markdown-links --selftest: FAIL" >&2
@@ -241,16 +269,51 @@ _tml_self_phys="$(cd "$(dirname "$_tml_self")" && pwd -P)/$(basename "$_tml_self
 case "$_tml_self_phys" in "$(pwd -P)"/agent-layer/*) TML_SELF_FROM_PROJECT="${_tml_self_phys#"$(pwd -P)"/}" ;; esac
 export TML_SELF_FROM_PROJECT
 
+# Rule 7: the subsystem leaves (lib/leaf-docs.sh, the leaf set setup-harness.sh and
+# the leaf-doc gates share) are in the target set — a broken pointer in a leaf used
+# to ship silently because Source/ is outside the docs/ + agents/ branches. The
+# leaf set honours the HOST's lint exempt zones, so the zones are read from the
+# project.config.json of the tree being checked (rung 0, PC_CONFIG_FILE), in a
+# subshell so the full load leaks nothing into this script. A failed config load
+# leaves the zones empty, which only widens the set (fail-closed). A tree with a
+# Source/ directory but no leaf library beside this script cannot say which files
+# are leaves, so it exits 2 (fail-closed); a tree without Source/ (the standalone
+# layer, a fixture copy) has no leaves to miss and scans none.
+_tml_leaf_lib="$(dirname "$_tml_self")/lib/leaf-docs.sh"
+_tml_pc="$(dirname "$_tml_self")/../../../scripts/dev/project-config.sh"
+TML_LEAF_DOCS=""
+if [ -f "$_tml_leaf_lib" ]; then
+    TML_LEAF_DOCS="$(
+        if [ -f "$_tml_pc" ] && [ -f "$(pwd)/project.config.json" ]; then
+            PC_CONFIG_FILE="$(pwd)/project.config.json"
+            # shellcheck source=scripts/dev/project-config.sh
+            . "$_tml_pc" >/dev/null 2>&1 || true
+        fi
+        # shellcheck source=agents/scripts/core/lib/leaf-docs.sh
+        . "$_tml_leaf_lib" && leaf_agents_files Source
+    )" || { echo "test-markdown-links: could not load $_tml_leaf_lib" >&2; exit 2; }
+elif [ -d Source ]; then
+    echo "test-markdown-links: $_tml_leaf_lib is missing;" \
+        "the subsystem leaves under Source/ cannot be enumerated" >&2
+    exit 2
+fi
+export TML_LEAF_DOCS
+
 "$PY" - <<'PY'
+import html
 import json
 import os
 import re
-import sys
-
 import subprocess
+import sys
+import unicodedata
+import urllib.parse
 
 REPO_ROOT = os.getcwd()
 SCOPE = os.environ.get("SCOPE", "diff")
+# Rule 7: the registered subsystem leaves, repo-relative (exported by the shell
+# above from lib/leaf-docs.sh; empty in a tree without Source/).
+LEAF_DOCS = {ln.strip() for ln in os.environ.get("TML_LEAF_DOCS", "").splitlines() if ln.strip()}
 # Excluded paths under docs/ (active vs archived): docs/plans/active/applied/ and
 # docs/plans/shipped/ hold shipped/historical plans whose link-paths drifted
 # over time without being maintained — they're documentation-history, not
@@ -366,7 +429,7 @@ if SCOPE == "diff":
         line.strip() for line in out.splitlines() if line.strip()
     ))
     for rel_path in changed:
-        if is_active_md(rel_path) and os.path.exists(rel_path):
+        if (is_active_md(rel_path) or rel_path in LEAF_DOCS) and os.path.exists(rel_path):
             TARGETS.append(os.path.join(REPO_ROOT, rel_path))
 else:
     # Repo-wide scan.
@@ -377,7 +440,7 @@ else:
         for f in files:
             full = os.path.join(root, f)
             rel = os.path.relpath(full, REPO_ROOT)
-            if is_active_md(rel):
+            if is_active_md(rel) or rel.replace(os.sep, "/") in LEAF_DOCS:
                 TARGETS.append(full)
 
 # Match `[label](href)` but NOT image links `![alt](path)`. Negative
@@ -501,20 +564,262 @@ def _added_lines(rel_path):
 _TIERLESS_PLAN_RE = re.compile(r"(?:^|/)docs/plans/([A-Za-z0-9._-]+\.md)$")
 
 
+def plan_tierless_target(target):
+    """The tier file a tier-less plan link `docs/plans/<slug>.md` lands on: the
+    first of active/, shipped/, deferred/ holding <slug>.md, else None."""
+    rel = os.path.relpath(target, REPO_ROOT).replace(os.sep, "/")
+    m = _TIERLESS_PLAN_RE.search("/" + rel)
+    if not m:
+        return None
+    for tier in ("active", "shipped", "deferred"):
+        cand = os.path.join(REPO_ROOT, "docs", "plans", tier, m.group(1))
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
 def plan_tierless_resolves(target):
     """A tier-less plan link `docs/plans/<slug>.md` resolves when <slug>.md
     exists in active/, shipped/, or deferred/ — so a plan can move between tiers
     without breaking the reference (no ref-sweep on archival). Returns True iff
     the target is such a path AND the slug exists in some tier."""
-    rel = os.path.relpath(target, REPO_ROOT).replace(os.sep, "/")
-    m = _TIERLESS_PLAN_RE.search("/" + rel)
+    return plan_tierless_target(target) is not None
+
+
+# ---------- rule 3: #fragment anchors, resolved the way GitHub renders them ----------
+#
+# GitHub gives every heading an id from its RENDERED text (github-slugger): lower-
+# case; drop every character that is not a letter, mark, decimal or letter
+# number, connector punctuation (`_`), space or hyphen — so `§`, `—`, `.`, `+`,
+# `&`, `/`, `(`, `)`, backticks, emoji and other numbers (`²`, `½`) all vanish;
+# each space becomes `-` (runs are not collapsed,
+# so `A — B` is `a--b`); a repeated slug gets `-1`, `-2`, ... in document order.
+# The anchor set is deliberately an OVER-approximation (every plausible rendering
+# of a heading, plus explicit `id=` / `name=` HTML anchors): a heading the
+# approximation renders wrongly can only make a broken fragment pass. Headings
+# inside blockquotes and list items are found too, because each one also takes
+# a slot in the duplicate numbering; a heading GitHub renders that this scan
+# missed would shift every later duplicate's suffix and fail good links.
+_ATX_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
+_SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+# Lines that end a paragraph without being text a setext underline could turn
+# into a heading: a table row, a heading or fence marker, an HTML comment, a
+# blank line. A list-item marker and a thematic break are matched separately,
+# because `*`, `-` and `+` also start ordinary text (`**Status** shipped`).
+_SETEXT_NOT_TEXT_RE = re.compile(r"^\s*(?:\||#|```|~~~|<!--)|^\s*$")
+_LIST_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)")
+_THEMATIC_BREAK_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
+# A blockquote prefix (`>`, `> >`, ...): GitHub renders a heading inside a quote
+# with its own anchor, and that heading takes a slot in the duplicate numbering.
+_QUOTE_PREFIX_RE = re.compile(r"^ {0,3}((?:>[ ]?)+)")
+_HTML_ID_RE = re.compile(r"""<[A-Za-z][^>]*?\b(?:id|name)\s*=\s*["']([^"']+)["']""")
+_HEADING_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
+_GH_LINE_ANCHOR_RE = re.compile(r"^L\d+(?:C\d+)?(?:-L\d+(?:C\d+)?)?$")
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+
+
+class FenceTracker:
+    """CommonMark fenced-code state, fed one line at a time. A fence closes only
+    on a run of the opener's character at least as long as the opener, with
+    nothing after it but blanks, so a ``` line inside a ~~~ block (or a short
+    run inside a longer one) stays code. A backtick run followed by another
+    backtick on the line is an inline code span, not an opener. Indentation is
+    not capped at three spaces: a fence nested in a list item is indented
+    further, and treating it as code is the established reading here."""
+
+    def __init__(self):
+        self.opener = None  # (character, run length) while inside a fence
+
+    def step(self, line):
+        """True when `line` opens, closes or lies inside a fence."""
+        m = _FENCE_RE.match(line.rstrip("\r\n"))
+        if self.opener is None:
+            if m is None or (m.group(1)[0] == "`" and "`" in m.group(2)):
+                return False
+            self.opener = (m.group(1)[0], len(m.group(1)))
+            return True
+        if (m is not None and m.group(1)[0] == self.opener[0]
+                and len(m.group(1)) >= self.opener[1] and not m.group(2).strip()):
+            self.opener = None
+        return True
+
+
+def github_slug(text):
+    """github-slugger's slug of already-rendered heading text (no dedup suffix)."""
+    kept = []
+    for ch in text.strip().lower():
+        cat = unicodedata.category(ch)
+        # \p{No} (`²`, `½`) is dropped: github-slugger keeps letters, marks,
+        # decimal and letter numbers and connector punctuation only.
+        if ch in (" ", "-") or cat[0] in ("L", "M") or cat in ("Nd", "Nl", "Pc"):
+            kept.append(ch)
+    return "".join(kept).replace(" ", "-")
+
+
+def _render_inline(seg, strip_emphasis):
+    """Plain text of a non-code-span stretch of a heading, as GitHub renders it."""
+    escaped = []
+
+    def _protect(m):
+        escaped.append(m.group(1))
+        return "\x00%d\x00" % (len(escaped) - 1)
+
+    seg = re.sub(r"\\([!-/:-@\[-`{-~])", _protect, seg)
+    seg = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", seg)
+    seg = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", seg)
+    seg = re.sub(r"\[([^\]]*)\]\[[^\]]*\]", r"\1", seg)
+    seg = re.sub(r"<((?:https?|mailto):[^>\s]+)>", r"\1", seg)
+    seg = re.sub(r"<[^>]+>", "", seg)
+    if strip_emphasis:
+        # `_` survives the slug (connector punctuation), so emphasis delimiters
+        # must come out first; an intraword `_` (snake_case) is literal text.
+        seg = re.sub(r"(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])", "", seg)
+    seg = html.unescape(seg)
+    return re.sub(r"\x00(\d+)\x00", lambda m: escaped[int(m.group(1))], seg)
+
+
+def heading_renderings(raw):
+    """Every plausible rendered text of heading source `raw` (see the block comment)."""
+    out = []
+    for strip_emphasis in (True, False):
+        parts, pos = [], 0
+        for m in _HEADING_CODE_RE.finditer(raw):
+            parts.append(_render_inline(raw[pos:m.start()], strip_emphasis))
+            code = m.group(2)
+            if len(code) > 2 and code.startswith(" ") and code.endswith(" ") and code.strip():
+                code = code[1:-1]
+            parts.append(code)
+            pos = m.end()
+        parts.append(_render_inline(raw[pos:], strip_emphasis))
+        text = "".join(parts)
+        if text not in out:
+            out.append(text)
+    return out
+
+
+def _quote_split(line):
+    """(blockquote depth, the line with its `>` prefix removed)."""
+    m = _QUOTE_PREFIX_RE.match(line)
     if not m:
-        return False
-    slug = m.group(1)
-    return any(
-        os.path.exists(os.path.join(REPO_ROOT, "docs", "plans", tier, slug))
-        for tier in ("active", "shipped", "deferred")
-    )
+        return 0, line
+    return m.group(1).count(">"), line[m.end():]
+
+
+def heading_sources(lines):
+    """Heading source text, document order: one list of alternative raw texts per
+    ATX or setext heading, outside fences and a leading YAML front-matter block.
+    Headings inside a blockquote (`> ## X`) or opening a list item (`- ## X`)
+    count, as GitHub gives them anchors too; a fence inside a blockquote is
+    tracked at its own quote depth. A setext heading's text is its whole
+    paragraph, folded onto one line as GitHub renders it; the underlined line
+    alone is kept as a second alternative. The underline must sit at the
+    paragraph's quote depth, so a quoted paragraph above a top-level `---`
+    (a thematic break) is not misread as a heading that would shift the
+    duplicate numbering. A list item's continuation paragraph is not tracked
+    for setext underlines."""
+    heads = []
+    fence = FenceTracker()
+    fence_depth = 0
+    start = 0
+    if lines and lines[0].strip() == "---":
+        for i in range(1, len(lines)):
+            if lines[i].strip() in ("---", "..."):
+                start = i + 1
+                break
+    para = []
+    para_depth = 0
+    for line in lines[start:]:
+        depth, content = _quote_split(line.rstrip("\n"))
+        if fence.opener is not None:
+            # Inside a fence: only a line at the opener's quote depth can close it.
+            if depth == fence_depth:
+                fence.step(content)
+            para = []
+            continue
+        if fence.step(content):
+            fence_depth = depth
+            para = []
+            continue
+        lm = _LIST_MARKER_RE.match(content)
+        m = _ATX_HEADING_RE.match(content[lm.end():] if lm else content)
+        if m:
+            heads.append([m.group(2) or ""])
+            para = []
+            continue
+        if para and depth == para_depth and _SETEXT_UNDERLINE_RE.match(content):
+            folded = " ".join(p.strip() for p in para)
+            last = para[-1].strip()
+            heads.append([folded] if folded == last else [folded, last])
+            para = []
+            continue
+        if lm or _THEMATIC_BREAK_RE.match(content) or _SETEXT_NOT_TEXT_RE.match(content):
+            para = []
+            continue
+        if para and depth != para_depth:
+            para = []
+        para.append(content)
+        para_depth = depth
+    return heads
+
+
+_ANCHOR_CACHE = {}
+
+
+def file_anchors(path):
+    """Every fragment `path` answers to: deduplicated heading slugs (per rendering)
+    plus explicit HTML ids / names. None when the file cannot be read."""
+    if path in _ANCHOR_CACHE:
+        return _ANCHOR_CACHE[path]
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except (OSError, UnicodeDecodeError):
+        _ANCHOR_CACHE[path] = None
+        return None
+    anchors = set()
+    renderings = []
+    for alternatives in heading_sources(lines):
+        texts = []
+        for raw in alternatives:
+            texts.extend(t for t in heading_renderings(raw) if t not in texts)
+        renderings.append(texts)
+    for variant in range(max((len(t) for t in renderings), default=1)):
+        seen = {}
+        for texts in renderings:
+            base = github_slug(texts[min(variant, len(texts) - 1)])
+            slug = base
+            if base in seen:
+                # github-slugger: bump the base's counter until the result is unused.
+                while True:
+                    seen[base] += 1
+                    slug = "%s-%d" % (base, seen[base])
+                    if slug not in seen:
+                        break
+            seen[slug] = 0
+            anchors.add(slug)
+    fence = FenceTracker()
+    for line in lines:
+        if not fence.step(line):
+            anchors.update(m.group(1) for m in _HTML_ID_RE.finditer(line))
+    _ANCHOR_CACHE[path] = anchors
+    return anchors
+
+
+def fragment_resolves(target, fragment):
+    """True when `#fragment` names an anchor in markdown file `target`. Anything
+    that is not a readable .md file is not checked (True): a source file's `#L10`
+    and a directory have no heading set to resolve against."""
+    if not target.lower().endswith(".md") or not os.path.isfile(target):
+        return True
+    frag = urllib.parse.unquote(fragment)
+    if not frag or _GH_LINE_ANCHOR_RE.match(frag):
+        return True
+    anchors = file_anchors(target)
+    if anchors is None:
+        return True
+    if frag.startswith("user-content-"):
+        frag = frag[len("user-content-"):]
+    return frag in anchors or frag.lower() in anchors
 
 
 violations = []
@@ -530,21 +835,17 @@ for path in TARGETS:
     in_proposal = False
     try:
         with open(path, encoding="utf-8") as fh:
-            in_fence = False
+            fence = FenceTracker()
             for lineno, line in enumerate(fh, 1):
                 if span_scope:
                     if _PROPOSAL_CLOSE_RE.match(line):
                         in_proposal = False
                     if _PROPOSAL_OPEN_RE.match(line):
                         in_proposal = True
-                stripped = line.lstrip()
                 # Skip fenced code blocks (``` / ~~~): a link inside a fence is
                 # illustrative/literal (e.g. example paths in a doc template),
                 # never a navigable link — checking it produces false positives.
-                if stripped.startswith("```") or stripped.startswith("~~~"):
-                    in_fence = not in_fence
-                    continue
-                if in_fence:
+                if fence.step(line):
                     continue
                 line, code_spans = strip_code_spans(line)
                 # WARN-first: a repo path cited in a backlog code span must
@@ -588,13 +889,17 @@ for path in TARGETS:
                         span_warnings.append((rel_src_path, lineno, cand))
                 for m in LINK_RE.finditer(line):
                     href = m.group(1)
-                    # Skip absolute / external / anchor-only / mailto.
+                    # Skip absolute / external / mailto.
                     if href.startswith(("/", "http://", "https://", "mailto:",
-                                        "#", "ftp://", "file://", "data:")):
+                                        "ftp://", "file://", "data:")):
                         continue
-                    # Strip anchor fragment.
-                    href_path = href.split("#", 1)[0]
+                    # Split off the anchor fragment (rule 3 checks it below).
+                    href_path, _sep, fragment = href.partition("#")
+                    rel_src = os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
                     if not href_path:
+                        # Same-file anchor (`#section`): the source's own headings.
+                        if fragment and not fragment_resolves(path, fragment):
+                            violations.append((rel_src, lineno, href, rel_src + "#" + fragment))
                         continue
                     # Strip `:NNN` line-anchor suffix — `[label](Foo.cpp:123)`
                     # is widely used in plan-docs as a file+line reference.
@@ -605,10 +910,12 @@ for path in TARGETS:
                     # Resolve relative to the file's directory.
                     src_dir = os.path.dirname(path)
                     target = os.path.normpath(os.path.join(src_dir, href_path))
-                    if not os.path.exists(target) and not plan_tierless_resolves(target):
-                        rel_src = os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
-                        rel_tgt = os.path.relpath(target, REPO_ROOT).replace(os.sep, "/")
+                    landed = target if os.path.exists(target) else plan_tierless_target(target)
+                    rel_tgt = os.path.relpath(landed or target, REPO_ROOT).replace(os.sep, "/")
+                    if landed is None:
                         violations.append((rel_src, lineno, href, rel_tgt))
+                    elif fragment and not fragment_resolves(landed, fragment):
+                        violations.append((rel_src, lineno, href, rel_tgt + "#" + fragment))
     except (OSError, UnicodeDecodeError) as exc:
         sys.stderr.write(f"WARN: could not read {path}: {exc}\n")
     checked += 1
@@ -650,8 +957,13 @@ reportable = [v for v in violations if (v[0], v[2]) not in baseline]
 grandfathered = len(violations) - len(reportable)
 
 for src, lineno, href, tgt in reportable:
-    print(f"{src}:{lineno}: BROKEN_LINK: '{href}' does not resolve (looked at {tgt})",
-          file=sys.stderr)
+    if "#" in tgt:
+        _file, _sep, _frag = tgt.partition("#")
+        print(f"{src}:{lineno}: BROKEN_LINK: '{href}' — no heading in {_file} has the "
+              f"GitHub anchor '#{_frag}'", file=sys.stderr)
+    else:
+        print(f"{src}:{lineno}: BROKEN_LINK: '{href}' does not resolve (looked at {tgt})",
+              file=sys.stderr)
 
 if SCOPE == "all":
     stale = sorted(baseline - {(v[0], v[2]) for v in violations})

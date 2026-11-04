@@ -6,7 +6,9 @@
 # Why this lint exists: sed-based path renames routinely update body text but
 # miss `[label](href)` link hrefs when the label happens to match the path.
 # PRs #496 + #497 each shipped with 3-4 CR-caught broken-href findings of
-# exactly this shape; this lint catches them mechanically before push.
+# exactly this shape; this lint catches them mechanically before push. Also
+# covers #fragment anchors resolved by GitHub's slug rules (rule 3) and the
+# subsystem leaves scanned from a host fixture (rule 7).
 # ----------------------------------------------------------------------------
 
 setup() {
@@ -489,4 +491,258 @@ _mk_span_repo() {
     run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
     [ "$status" -eq 0 ]
     [[ "$output" == *"WARN: code-span path 'tests/Core/moved-away-xyz.test.cpp'"* ]]
+}
+
+# ---------- rule 3: #fragment anchors resolve by GitHub's slug rules ----------
+
+_mk_frag_fixture() {
+    mkdir -p "$FIXTURE_DIR/agents/scripts/core" "$FIXTURE_DIR/docs"
+    cp "$LINT" "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"
+    {
+        printf '# Rules\n\n'
+        printf '## Merge gates § Sanctioned step-level masks\n'
+        printf '## `merge-gates.sh` — the (REST) contract + C++ & more\n'
+        printf '## Dup\n## Dup\n'
+        printf '## __init__ and snake_case_name\n'
+        printf '## Café 🚀 notes\n'
+        printf 'Setext heading\n--------------\n'
+        printf '<a id="Custom-ID"></a>\n'
+        printf '```\n## Not a heading inside a fence\n```\n'
+    } > "$FIXTURE_DIR/docs/rules.md"
+}
+
+@test "a good #fragment on a relative link passes (section sign, em dash, punctuation, dup suffix, unicode)" {
+    _mk_frag_fixture
+    {
+        printf '# a\n\n'
+        printf '[1](rules.md#merge-gates--sanctioned-step-level-masks)\n'
+        printf '[2](rules.md#merge-gatessh--the-rest-contract--c--more)\n'
+        printf '[3](rules.md#dup) [4](rules.md#dup-1)\n'
+        printf '[5](rules.md#init-and-snake_case_name)\n'
+        printf '[6](rules.md#café--notes) [7](rules.md#caf%%C3%%A9--notes)\n'
+        printf '[8](rules.md#setext-heading) [9](rules.md#Custom-ID) [10](rules.md#L12)\n'
+        printf '[11](#a) [12](rules.md#user-content-dup)\n'
+    } > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"BROKEN_LINK"* ]]
+}
+
+@test "a broken #fragment on a relative link FAILs though the target file exists" {
+    _mk_frag_fixture
+    printf '# a\n\n[gone](rules.md#tiered-enforcement-zones)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"BROKEN_LINK: 'rules.md#tiered-enforcement-zones' — no heading in docs/rules.md has the GitHub anchor '#tiered-enforcement-zones'"* ]]
+}
+
+@test "slug edge cases FAIL where GitHub would: collapsed dashes, an unused dup suffix, a fenced heading" {
+    _mk_frag_fixture
+    {
+        printf '# a\n\n'
+        printf '[x](rules.md#merge-gates-sanctioned-step-level-masks)\n'
+        printf '[y](rules.md#dup-2)\n'
+        printf '[z](rules.md#not-a-heading-inside-a-fence)\n'
+    } > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'rules.md#merge-gates-sanctioned-step-level-masks'"* ]]
+    [[ "$output" == *"'rules.md#dup-2'"* ]]
+    [[ "$output" == *"'rules.md#not-a-heading-inside-a-fence'"* ]]
+}
+
+@test "a broken same-file #fragment FAILs" {
+    mkdir -p "$FIXTURE_DIR/agents/scripts/core" "$FIXTURE_DIR/docs"
+    cp "$LINT" "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"
+    printf '# Title\n\nSee [up](#title) and [gone](#no-such-section).\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"BROKEN_LINK: '#no-such-section'"* ]]
+    [[ "$output" != *"'#title'"* ]]
+}
+
+_mk_lint_fixture() {
+    mkdir -p "$FIXTURE_DIR/agents/scripts/core" "$FIXTURE_DIR/docs"
+    cp "$LINT" "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"
+}
+
+@test "a fence closes only on its opener's character and run length" {
+    _mk_lint_fixture
+    # A ``` line inside a ~~~ block and a short ``` run inside a ```` block are
+    # code. Toggling on any fence-shaped line ends each block early, reopens it
+    # at the real closer and drops every heading after it.
+    {
+        printf '# Fences\n\n'
+        printf '~~~\n```\n## Tilde body\n[in code](nope.md)\n~~~\n\n'
+        printf '````\n```\n## Long body\n````\n\n'
+        printf '## After mixed fences\n'
+    } > "$FIXTURE_DIR/docs/rules.md"
+    printf '# a\n\n[ok](rules.md#after-mixed-fences)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"nope.md"* ]]
+    printf '# a\n\n[x](rules.md#tilde-body) [y](rules.md#long-body)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'rules.md#tilde-body'"* ]]
+    [[ "$output" == *"'rules.md#long-body'"* ]]
+}
+
+@test "a multi-line setext heading answers to its folded paragraph text" {
+    _mk_lint_fixture
+    printf '# Setext\n\nTwo line\nsetext title\n------------\n' > "$FIXTURE_DIR/docs/rules.md"
+    # GitHub renders the whole paragraph as the heading: 'Two line setext title'.
+    # The underlined line alone stays an accepted alternative.
+    printf '# a\n\n[f](rules.md#two-line-setext-title) [l](rules.md#setext-title)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"BROKEN_LINK"* ]]
+}
+
+@test "a heading's other-number characters (superscripts, fractions) drop out of its slug" {
+    _mk_lint_fixture
+    printf '# Slug\n\n## x\302\262 scaling at \302\275 rate\n' > "$FIXTURE_DIR/docs/rules.md"
+    printf '# a\n\n[ok](rules.md#x-scaling-at--rate)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"BROKEN_LINK"* ]]
+}
+
+@test "headings inside a blockquote or opening a list item have anchors and take duplicate slots" {
+    _mk_lint_fixture
+    {
+        printf '# Quoted\n\n'
+        printf '> ## Remediation status\n\n'
+        printf '> ### What escaped\n\n'
+        printf '### What escaped\n\n### What escaped\n\n'
+        printf -- '- ## In list\n'
+    } > "$FIXTURE_DIR/docs/rules.md"
+    # GitHub: the quoted 'What escaped' is the first of three, so the real ones
+    # are -1 and -2; missing the quoted one would make #what-escaped-2 fail.
+    printf '# a\n\n[r](rules.md#remediation-status) [w](rules.md#what-escaped-2) [l](rules.md#in-list)\n' \
+        > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"BROKEN_LINK"* ]]
+    printf '# a\n\n[w](rules.md#what-escaped-3)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'rules.md#what-escaped-3'"* ]]
+}
+
+@test "a setext paragraph led by emphasis is a heading; a quoted paragraph above a top-level --- is not" {
+    _mk_lint_fixture
+    {
+        printf '# Setext\n\n'
+        printf '**Status** shipped\n---\n\n'
+        printf '> Quoted line\n---\n\n'
+        printf '## Quoted line\n'
+    } > "$FIXTURE_DIR/docs/rules.md"
+    # '> Quoted line' over a top-level '---' is a quote then a thematic break, so
+    # the '## Quoted line' heading is the first of its name: #quoted-line, no -1.
+    printf '# a\n\n[s](rules.md#status-shipped) [q](rules.md#quoted-line)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"BROKEN_LINK"* ]]
+    printf '# a\n\n[q](rules.md#quoted-line-1)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'rules.md#quoted-line-1'"* ]]
+}
+
+@test "a fence opened inside a blockquote hides its heading-shaped lines" {
+    _mk_lint_fixture
+    {
+        printf '# Quoted fence\n\n'
+        printf '> ```sh\n> # not a heading\n> ```\n\n'
+        printf '## Not a heading\n'
+    } > "$FIXTURE_DIR/docs/rules.md"
+    printf '# a\n\n[n](rules.md#not-a-heading)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+    printf '# a\n\n[n](rules.md#not-a-heading-1)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'rules.md#not-a-heading-1'"* ]]
+}
+
+@test "a non-markdown target's fragment is not checked" {
+    mkdir -p "$FIXTURE_DIR/agents/scripts/core" "$FIXTURE_DIR/docs"
+    cp "$LINT" "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"
+    printf 'int x;\n' > "$FIXTURE_DIR/docs/foo.h"
+    printf '# a\n\n[src](foo.h#anything-at-all)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+}
+
+@test "a baselined broken #fragment is grandfathered by --all (keyed by source::href)" {
+    _mk_frag_fixture
+    mkdir -p "$FIXTURE_DIR/docs/high-integrity"
+    printf '# a\n\n[old](rules.md#gone-old)\n[new](rules.md#gone-new)\n' > "$FIXTURE_DIR/docs/a.md"
+    {
+        printf '# Dangling markdown links — grandfathered baseline\n\n## dangling links (1)\n'
+        printf -- '- `docs/a.md` — `rules.md#gone-old` (resolves to `docs/rules.md#gone-old`)\n'
+    } > "$FIXTURE_DIR/docs/high-integrity/markdown-link-baseline.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'rules.md#gone-new'"* ]]
+    [[ "$output" != *"'rules.md#gone-old'"* ]]
+    [[ "$output" == *"1 grandfathered"* ]]
+}
+
+# ---------- rule 7: the subsystem leaves are scanned from a host ----------
+
+# A host fixture: the lint, the leaf library and the config loader at their real
+# depths, a host project.config.json with ThirdParty exempt, and two tracked
+# leaves carrying a dangling link — one registered, one in the exempt zone.
+_mk_host_fixture() {
+    mkdir -p "$FIXTURE_DIR/agents/scripts/core/lib" "$FIXTURE_DIR/scripts/dev" "$FIXTURE_DIR/docs" \
+             "$FIXTURE_DIR/Source/Core/src/Ui" "$FIXTURE_DIR/Source/ThirdParty/vendor"
+    cp "$LINT" "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"
+    cp "$REPO_ROOT/agents/scripts/core/lib/leaf-docs.sh" "$FIXTURE_DIR/agents/scripts/core/lib/leaf-docs.sh"
+    cp "$REPO_ROOT/scripts/dev/project-config.sh" "$FIXTURE_DIR/scripts/dev/project-config.sh"
+    printf '{"project": {"name": "host"}, "lint": {"zones": {"exempt": ["ThirdParty", "build"]}}}\n' \
+        > "$FIXTURE_DIR/project.config.json"
+    printf '# Ui\n\nSee [root](../../../../AGENTS.md#tiered-enforcement-zones).\n' \
+        > "$FIXTURE_DIR/Source/Core/src/Ui/AGENTS.md"
+    printf '# Root\n\n## Project rules\n' > "$FIXTURE_DIR/AGENTS.md"
+    printf '# Vendor\n\n[upstream](./nope-vendor.md)\n' > "$FIXTURE_DIR/Source/ThirdParty/vendor/AGENTS.md"
+    git -C "$FIXTURE_DIR" init -q -b develop
+    git -C "$FIXTURE_DIR" add -A
+}
+
+@test "--all from a host scans a registered leaf and FAILs its broken fragment, skipping exempt zones" {
+    _mk_host_fixture
+    run env -u PROJECT_ROOT -u AGENT_LAYER_ROOT bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Source/Core/src/Ui/AGENTS.md:3: BROKEN_LINK: '../../../../AGENTS.md#tiered-enforcement-zones'"* ]]
+    [[ "$output" != *"nope-vendor.md"* ]]
+}
+
+@test "--all from a host passes once the leaf's pointer is fixed" {
+    _mk_host_fixture
+    printf '# Ui\n\nSee [root](../../../../AGENTS.md#project-rules).\n' > "$FIXTURE_DIR/Source/Core/src/Ui/AGENTS.md"
+    run env -u PROJECT_ROOT -u AGENT_LAYER_ROOT bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"scanned 2 markdown file(s)"* ]]
+}
+
+@test "diff scope from a host checks a CHANGED leaf" {
+    _mk_host_fixture
+    printf '# Ui\n\nNo links yet.\n' > "$FIXTURE_DIR/Source/Core/src/Ui/AGENTS.md"
+    git -C "$FIXTURE_DIR" add -A
+    git -C "$FIXTURE_DIR" -c user.name=t -c user.email=t@t.test commit -q -m base
+    git -C "$FIXTURE_DIR" update-ref refs/remotes/origin/develop HEAD
+    printf '# Ui\n\nSee [gone](./missing-leaf-target.md).\n' > "$FIXTURE_DIR/Source/Core/src/Ui/AGENTS.md"
+    run env -u PROJECT_ROOT -u AGENT_LAYER_ROOT bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Source/Core/src/Ui/AGENTS.md:3: BROKEN_LINK: './missing-leaf-target.md'"* ]]
+}
+
+@test "a Source/ tree without the leaf library is an infra error (exit 2), not a silent skip" {
+    _mk_host_fixture
+    rm -f "$FIXTURE_DIR/agents/scripts/core/lib/leaf-docs.sh"
+    run env -u PROJECT_ROOT -u AGENT_LAYER_ROOT bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"leaf-docs.sh is missing"* ]]
 }

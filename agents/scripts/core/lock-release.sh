@@ -13,9 +13,17 @@
 # Optional environment:
 #   LOCK_REMOTE                       — git remote name (default: origin)
 #   SMATCHET_LOCK_BYPASS_REPO_CHECK   — set to 1 to skip Smatchet repo check
+#   LOCK_RETRY_MAX                    — delete attempts on a transient failure
+#                                       (default 3; a positive integer)
+#   LOCK_EXPECT_SHA                   — release only if the lock is still at this
+#                                       commit (a full hex sha): the delete is
+#                                       pinned with --force-with-lease, so a
+#                                       write that landed after the caller read
+#                                       the lock is never thrown away
 #
 # Exit codes:
 #   0 — ref deleted, or already absent
+#   1 — LOCK_EXPECT_SHA is set and the lock has moved: nothing deleted
 #   2 — argument / environment / repo-state error
 #   3 — transient network/git failure after retries
 
@@ -60,22 +68,45 @@ fi
 
 ref="refs/locks/${slug}"
 
+max_attempts="${LOCK_RETRY_MAX:-3}"
+case "$max_attempts" in
+    ''|*[!0-9]*) echo "lock-release: LOCK_RETRY_MAX must be a positive integer, got '$max_attempts'" >&2; exit 2 ;;
+esac
+max_attempts=$((10#$max_attempts))
+[ "$max_attempts" -ge 1 ] || { echo "lock-release: LOCK_RETRY_MAX must be at least 1" >&2; exit 2; }
+
+expect="${LOCK_EXPECT_SHA:-}"
+lease=()
+if [ -n "$expect" ]; then
+    printf '%s' "$expect" | grep -qE '^[0-9a-f]{40}([0-9a-f]{24})?$' ||
+        { echo "lock-release: LOCK_EXPECT_SHA must be a full hex commit sha, got '$expect'" >&2; exit 2; }
+    lease=("--force-with-lease=${ref}:${expect}")
+fi
+
 # Check whether the ref exists; if not, declare success.
 existing=$(git ls-remote "$remote" "$ref" 2>/dev/null | awk '{print $1}')
 if [ -z "$existing" ]; then
     echo "lock-release: $ref already absent on $remote (no-op)"
     exit 0
 fi
+if [ -n "$expect" ] && [ "$existing" != "$expect" ]; then
+    echo "lock-release: $ref is at $existing, not the expected $expect; it moved, so it is not released" >&2
+    exit 1
+fi
 
 attempt=0
-max_attempts=3
 backoff=1
 while : ; do
     attempt=$((attempt + 1))
-    push_output=$(git push "$remote" ":$ref" 2>&1) && rc=0 || rc=$?
+    push_output=$(git push "${lease[@]+"${lease[@]}"}" "$remote" ":$ref" 2>&1) && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "$ref deleted (was $existing)"
         exit 0
+    fi
+    # A lost lease is final, not transient: the lock moved after the check above.
+    if [ -n "$expect" ] && [[ "$push_output" == *"stale info"* ]]; then
+        echo "lock-release: $ref moved before the delete landed; it is not released" >&2
+        exit 1
     fi
 
     # If the remote says ref already gone, treat as success.

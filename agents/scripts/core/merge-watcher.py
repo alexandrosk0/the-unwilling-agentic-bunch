@@ -1071,12 +1071,14 @@ def maybe_remove_from_registry(pr: int, clone_path: str) -> None:
 _GATE_LOGIC_RELPATHS = (
     "agents/scripts/core/merge-gates.sh",
     # merge-gates.sh fail-closed-sources these; they hold the block allow-list
-    # (00-common.sh) and the GATE_FILTER jq projection (10-gate-filter.sh), so
-    # drift in a module is drift in the gate logic just as much as the entry file.
+    # (00-common.sh), the GATE_FILTER jq projection (10-gate-filter.sh) and the
+    # plan-lock slug parser (20-planlock-slugs.sh), so drift in a module is
+    # drift in the gate logic just as much as the entry file.
     # NOT in _DAEMON_CODE_RELPATHS: merge-gates.sh re-reads them from disk each
     # poll, so an ff-pull suffices — no daemon re-exec needed.
     "agents/scripts/core/merge-gates.d/00-common.sh",
     "agents/scripts/core/merge-gates.d/10-gate-filter.sh",
+    "agents/scripts/core/merge-gates.d/20-planlock-slugs.sh",
     "agents/scripts/core/merge-gates.graphql",
     "agents/scripts/core/merge-watcher.py",
     "agents/scripts/core/merge-watcher-cli.py",
@@ -1632,23 +1634,30 @@ def _select_sanitizer_preset(status_line: str) -> str:
     """Map a sanitizer CI failure status line to the CMake preset that reproduces it.
 
     - TSAN / ThreadSanitizer  → `ninja-tsan-linux` (the only TSAN preset).
-    - UBSAN / UndefinedBehaviorSanitizer → `ninja-clang-asan` — per
-      `.github/workflows/sanitizer-nightly.yml`, the *only* preset delivering
-      ASan AND UBSan (clang-cl); the MSVC preset lacks UBSan.
+    - UBSAN / UndefinedBehaviorSanitizer → `ninja-clang-asan`, the clang-cl
+      preset a Windows Clang sanitizer lane builds. On clang-cl it is
+      ASan-only: the host's sanitizer CMake routes every MSVC-ABI compiler
+      (clang-cl included) through the MSVC branch, which has no UBSan, so this
+      preset reproduces the ASan half of such a lane and cannot reproduce a
+      UBSan finding on Windows. UBSan proper runs only on native Clang, in the
+      project's Linux sanitizer lane; reproduce a UBSan-only finding there.
     - ASAN / everything else → `ninja-msvc-asan` (the "Sanitizer (ASAN via MSVC)"
       PR lane).
 
     Order matters: check TSAN then UBSAN then fall through to ASAN, because a
     combined "ASan+UBSan" line contains both tokens and must map to the clang
-    preset. Before 2026-07 both branches returned an ASAN preset, so a TSAN
-    (data-race) failure was handed an ASAN build that can never reproduce it
-    (`core-scripts-python-02`); the auto-act repro then always failed to
-    reproduce and the debug loop stalled.
+    preset (the lane that named it built that preset, so its ASan half is
+    reproducible there). Before 2026-07 both branches returned an ASAN preset,
+    so a TSAN (data-race) failure was handed an ASAN build that can never
+    reproduce it (`core-scripts-python-02`); the auto-act repro then always
+    failed to reproduce and the debug loop stalled.
     """
     s = status_line.lower()
     if "tsan" in s or "threadsanitizer" in s:
         return "ninja-tsan-linux"
     if "ubsan" in s or "undefinedbehaviorsanitizer" in s:
+        # ASan-only on clang-cl: a UBSan finding does not reproduce under this
+        # preset on Windows; it needs the project's native-Clang Linux lane.
         return "ninja-clang-asan"
     return "ninja-msvc-asan"
 
@@ -2898,7 +2907,8 @@ def maybe_auto_act(state: dict[str, Any], entry: dict[str, Any]) -> dict[str, An
         # merge-gates poller includes the check name; best-effort parse.
         failing_test = _extract_failing_test_from_status(status_line)
         # Select the preset that actually reproduces the failing sanitizer
-        # (TSAN→tsan preset, UBSAN→clang ASan+UBSan, ASAN→msvc); see helper.
+        # (TSAN→tsan preset, UBSAN→the clang-cl preset, ASan-only on Windows,
+        # ASAN→msvc); see the helper.
         sanitizer_preset = _select_sanitizer_preset(status_line)
         prompt = AUTO_ACT_SANITIZER_PROMPT.format(
             pr=pr, owner=owner, repo=repo,

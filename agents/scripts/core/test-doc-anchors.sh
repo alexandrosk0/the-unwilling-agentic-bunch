@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# test-doc-anchors.sh — verify every `AGENTS.md § <section>` reference resolves.
+# test-doc-anchors.sh — verify every `<file>.md § <section>` reference resolves.
 #
 # Bucket A (CLI) per AGENTS.md § Verification automation. Zero manual steps.
 # Auto-enrolled by scripts/dev/test-all.sh via the test-*.sh glob.
 # Implementation in Python next to this shim (bash regex too brittle for the
 # heading-extraction + reference-matching shape). A reference that names a
 # subsystem leaf by path (<dir>/AGENTS.md, then the section sign) resolves
-# against that leaf's own headings.
+# against that leaf's own headings; any other cited markdown file (repo-relative,
+# file-relative, agent-layer/-prefixed, or a bare basename such as
+# process-rules.md, looked up beside the citing file, at the roots, then in the
+# rule-doc directories) resolves against its own headings and bold-prefix
+# paragraphs. A cited path that names no existing file is skipped,
+# not failed — the dangling path is test-markdown-links.sh's finding.
 
 set -uo pipefail
 
@@ -45,7 +50,7 @@ export PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
 # Selftest first (a synthetic tree; asserts a pass and a failure) so a broken
 # resolver can never report a vacuous PASS on the real tree.
 # selftest: asserts-failure — delegated to test_doc_anchors.py --selftest (a wrong
-# leaf section must fail).
+# leaf section and a wrong <path>.md section must fail).
 if [ "${1:-}" != "--selftest" ]; then
     "$PY" "$_tda_self/test_doc_anchors.py" --selftest || exit 1
 fi

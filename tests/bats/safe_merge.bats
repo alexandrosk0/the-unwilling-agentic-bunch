@@ -82,10 +82,10 @@ teardown() {
 
 # ----------------------------------------------------------------------------
 
-@test "--selftest passes (18/18) and dogfoods arm/refuse/obligation/snapshot" {
+@test "--selftest passes (19/19) and dogfoods arm/refuse/obligation/snapshot" {
     run bash "$SCRIPT" --selftest
     [ "$status" -eq 0 ]
-    [[ "$output" == *"PASS — safe-merge --selftest (18/18)"* ]]
+    [[ "$output" == *"PASS — safe-merge --selftest (19/19)"* ]]
 }
 
 @test "a leaked SAFE_MERGE_STUB_GATE=PASS outside test mode / dry-run REFUSES (exit 2, nothing armed)" {
@@ -221,6 +221,73 @@ teardown() {
     [[ "$output" == *"SNAPSHOT PENDING — PR #1503"* ]]
     [[ "$output" == *"SNAPSHOT_MERGED_AT=<mergedAt> bash '"*"merge-snapshot-append.sh' 1503 <mergeCommit> headsha0 GATES_PASSED '' 'perf-out-of-band' orchestrator-automerge"* ]]
     [ ! -s "$MERGE_SNAPSHOT_LEDGER" ]
+}
+
+# ---------- skipped gates (SKIP_MERGE_GATES=true) leave a GATES_SKIPPED trace ----------
+
+@test "skip: SKIP_MERGE_GATES=true runs the real (bypassed) poll and records GATES_SKIPPED, never GATES_PASSED" {
+    # git-janitor's "Skip gates and merge anyway" path: no stubbed gate — the
+    # real poll_merge_gates sees SKIP_MERGE_GATES=true, prints GATES_SKIPPED and
+    # returns 0. The ledger row must say so, or the skip leaves no trace.
+    export SKIP_MERGE_GATES=true
+    export SAFE_MERGE_OWNER=org SAFE_MERGE_REPO=repo
+    export SAFE_MERGE_LABELS="" SAFE_MERGE_DIFF_PATHS=""
+    echo '{"state":"open","merged":false,"merge_commit_sha":null,"merged_at":null,"head":{"sha":"skiphead1"}}' > "$STUB_PR_JSON"
+    echo '{"state":"closed","merged":true,"merge_commit_sha":"skipmerge1","merged_at":"2026-11-01T10:00:00Z","head":{"sha":"skiphead1"}}' > "$STUB_PR_JSON_AFTER_ARM"
+    run bash "$SCRIPT" 1601
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_SKIPPED (SKIP_MERGE_GATES=true)"* ]]
+    [[ "$output" == *"GATES_SKIPPED — PR #1601: arming squash auto-merge"* ]]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    grep -q 'pr merge 1601 --squash --auto --match-head-commit skiphead1' "$MERGE_SENTINEL"
+    [ "$(wc -l < "$MERGE_SNAPSHOT_LEDGER")" -eq 1 ]
+    [ "$(jq -r '.gates' "$MERGE_SNAPSHOT_LEDGER")" = "GATES_SKIPPED" ]
+    [ "$(jq -r '.mergeCommit' "$MERGE_SNAPSHOT_LEDGER")" = "skipmerge1" ]
+}
+
+@test "skip: a poll that printed GATES_SKIPPED records GATES_SKIPPED even when this process lacks the knob" {
+    # The poll output alone is enough: either signal selects GATES_SKIPPED.
+    unset SKIP_MERGE_GATES
+    export SAFE_MERGE_STUB_GATE=PASS
+    export SAFE_MERGE_STUB_GATE_OUT="GATES_SKIPPED (SKIP_MERGE_GATES=true)"
+    export SAFE_MERGE_LABELS=""
+    echo '{"state":"closed","merged":true,"merge_commit_sha":"skipmerge2","merged_at":"2026-11-01T11:00:00Z","head":{"sha":"headsha0"}}' > "$STUB_PR_JSON_AFTER_ARM"
+    run bash "$SCRIPT" 1602
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"verdict GATES_SKIPPED"* ]]
+    [ "$(jq -r '.gates' "$MERGE_SNAPSHOT_LEDGER")" = "GATES_SKIPPED" ]
+}
+
+@test "skip: a skipped merge still queued prints a paste-ready GATES_SKIPPED line, writes no row" {
+    export SKIP_MERGE_GATES=true
+    export SAFE_MERGE_OWNER=org SAFE_MERGE_REPO=repo
+    export SAFE_MERGE_LABELS="" SAFE_MERGE_DIFF_PATHS=""
+    run bash "$SCRIPT" 1603
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SNAPSHOT PENDING — PR #1603"* ]]
+    [[ "$output" == *"merge-snapshot-append.sh' 1603 <mergeCommit> headsha0 GATES_SKIPPED '' '' orchestrator-automerge"* ]]
+    [ ! -s "$MERGE_SNAPSHOT_LEDGER" ]
+}
+
+@test "skip: a skipped merge that landed at a later head names the skipped poll's head and prints a GATES_SKIPPED paste line at the merged head" {
+    unset SKIP_MERGE_GATES
+    export SAFE_MERGE_STUB_GATE=PASS
+    export SAFE_MERGE_STUB_GATE_OUT=$'GATE_HEAD headsha0\nGATES_SKIPPED (SKIP_MERGE_GATES=true)'
+    export SAFE_MERGE_LABELS=""
+    echo '{"state":"closed","merged":true,"merge_commit_sha":"skipmerge4","merged_at":"2026-11-01T12:00:00Z","head":{"sha":"latecommit4"}}' > "$STUB_PR_JSON_AFTER_ARM"
+    run bash "$SCRIPT" 1604
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"merged at head latecommit4, but the skipped poll (SKIP_MERGE_GATES) was bound to headsha0"* ]]
+    [[ "$output" != *"the gates passed on"* ]]
+    [[ "$output" == *"SNAPSHOT_MERGED_AT=2026-11-01T12:00:00Z bash "*"merge-snapshot-append.sh' 1604 skipmerge4 latecommit4 GATES_SKIPPED '' '' orchestrator-automerge"* ]]
+    [ ! -s "$MERGE_SNAPSHOT_LEDGER" ]
+}
+
+@test "--help prints the header through the return-code table" {
+    run bash "$SCRIPT" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"passed through unchanged"* ]]
+    [[ "$output" != *"selftest: asserts-failure"* ]]
 }
 
 @test "snapshot: a PR closed without merging owes no row" {

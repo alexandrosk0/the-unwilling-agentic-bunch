@@ -30,6 +30,9 @@
 # every real lock is owner=orchestrator, so an owner check is a no-op). See
 # docs/plans/plan-lock-enforcement.md § Approach (identity note).
 #
+# Public functions: ltc_sibling_count, ltc_covering_slug, ltc_lock_rows,
+# ltc_lock_table_json, ltc_invalidate_table. `_ltc_*` names are internal.
+#
 # Test/override seams (read-only):
 #   LTC_PROJ           force the repo root (default CLAUDE_PROJECT_DIR | $PWD)
 #   LTC_TABLE_TTL      lock-table cache TTL secs (default 30; 0 = never serve)
@@ -92,6 +95,20 @@ _ltc_norm_path() {
 }
 
 # --- lock table (~30s cache) -------------------------------------------------
+# The lock-table cache file for repo key $1.
+_ltc_table_cache_path() { printf '%s/.smatchet-planlock-table-%s' "$(_ltc_cache_dir)" "$1"; }
+
+# Drop this repo's cached lock table, so the next read runs locks-show afresh
+# (a caller that just claimed, extended or released a lock). Always exit 0: no
+# repo key means there is no cache to drop.
+ltc_invalidate_table() {
+  local key
+  key="$(_ltc_repo_key)" || return 0
+  [ -n "$key" ] || return 0
+  rm -f -- "$(_ltc_table_cache_path "$key")" 2>/dev/null || :
+  return 0
+}
+
 # Prints the lock-table JSON on stdout. exit 0 = available (incl. genuine "[]"),
 # non-zero = UNAVAILABLE (locks-show errored) -> caller fails open.
 ltc_lock_table_json() {
@@ -99,7 +116,7 @@ ltc_lock_table_json() {
   now="$(date -u +%s 2>/dev/null)" || return 1
   key="$(_ltc_repo_key)" || key=""
   if [ -n "$key" ]; then
-    cache="$(_ltc_cache_dir)/.smatchet-planlock-table-$key"
+    cache="$(_ltc_table_cache_path "$key")"
     if cached="$(cat "$cache" 2>/dev/null)" && [ -n "$cached" ]; then
       cts="$(printf '%s\n' "$cached" | head -n1)"
       case "$cts" in
@@ -122,9 +139,10 @@ ltc_lock_table_json() {
   return 0
 }
 
-# Flattened TSV rows (branch<TAB>epoch<TAB>slug<TAB>path). exit 2 if the table is
-# UNAVAILABLE (fail-open signal), 0 otherwise (rows on stdout, possibly empty).
-_ltc_lock_rows() {
+# Flattened TSV rows (branch<TAB>epoch<TAB>slug<TAB>path), one per claimed path,
+# served from the cached table. exit 2 if the table is UNAVAILABLE (fail-open
+# signal), 0 otherwise (rows on stdout, possibly empty).
+ltc_lock_rows() {
   if [ -n "${LTC_ROWS_OVERRIDE:-}" ]; then
     [ -f "$LTC_ROWS_OVERRIDE" ] && cat "$LTC_ROWS_OVERRIDE" 2>/dev/null
     return 0
@@ -147,7 +165,7 @@ _ltc_lock_rows() {
 # exit 0 covered (slug on stdout) | 1 not covered | 2 undetermined (fail-open).
 ltc_covering_slug() {
   local path="$1" mode="$2" mybr="$3" cutoff="${4:-}" rows
-  rows="$(_ltc_lock_rows)" || return 2
+  rows="$(ltc_lock_rows)" || return 2
   path="$(_ltc_norm_path "$path")"
   [ -n "$path" ] || return 1
   local br ep slug lp
@@ -278,6 +296,25 @@ _ltc_selftest() {
   ltc_covering_slug 'Source/Core/src/Sync/A.cpp' same develop >/dev/null; rc=$?
   [ "$rc" -eq 1 ] && _t_ok "empty rows -> not covered (rc 1)" || _t_fail "empty rows got rc=$rc"
   unset LTC_ROWS_OVERRIDE
+
+  # public row reader honours the override seam
+  out="$(LTC_ROWS_OVERRIDE="$td/rows" ltc_lock_rows | grep -c .)"
+  _t_eq "$out" "4" "ltc_lock_rows: serves every flattened row"
+
+  # ltc_invalidate_table drops exactly this repo's lock-table cache file
+  if git init -q "$td/repo" 2>/dev/null; then
+    out="$(LTC_PROJ="$td/repo" TMPDIR="$td" bash -c '
+      . "$1" || exit 9
+      f="$(_ltc_table_cache_path "$(_ltc_repo_key)")"
+      printf "1\n[]" > "$f" && printf x > "$f.keep"
+      ltc_invalidate_table || exit 8
+      [ ! -e "$f" ] && [ -e "$f.keep" ] && printf gone' _ "$_LTC_DIR/lock-table-cache.sh")"
+    _t_eq "$out" "gone" "ltc_invalidate_table: removes the repo's table cache, nothing else"
+  else
+    _t_fail "ltc_invalidate_table: git init failed"
+  fi
+  out="$(LTC_PROJ="$td" ltc_invalidate_table; printf 'rc=%s' "$?")"
+  _t_eq "$out" "rc=0" "ltc_invalidate_table: outside a repo is a no-op, exit 0"
 
   rm -rf "$td" 2>/dev/null || true
   printf '1..%s\n' "$n"

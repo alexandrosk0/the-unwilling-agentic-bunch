@@ -14,11 +14,20 @@
 # original claim.
 #
 # Optional environment: same as lock-claim.sh, plus
-#   LOCK_RETRY_MAX   — max lease-conflict retries (default 3)
+#   LOCK_RETRY_MAX   — attempts on a lease conflict or transient failure
+#                      (default 3; a positive integer, anything else is exit 2)
+#   LOCK_EXPECT_SHA  — the lock-ref commit the caller read the write set from.
+#                      When set, the update applies only on top of that commit:
+#                      it is checked against ls-remote before anything is built
+#                      and is the --force-with-lease value, so a concurrent
+#                      update between the caller's read and this push is never
+#                      overwritten. A mismatch is exit 1 with nothing written,
+#                      and is not retried (the caller re-reads and decides).
 #
 # Exit codes:
 #   0 — update pushed successfully
-#   1 — lock does not exist; use lock-claim.sh first
+#   1 — lock does not exist (use lock-claim.sh first), or, with
+#       LOCK_EXPECT_SHA, the ref is not at that commit; nothing written
 #   2 — argument / environment / repo-state error
 #   3 — lease conflict after retries (someone else keeps updating the ref)
 #   4 — transient network failure after retries
@@ -101,6 +110,16 @@ branch="${LOCK_BRANCH:-$(git symbolic-ref --quiet --short HEAD || echo 'detached
 plan="${LOCK_PLAN:-}"
 notes="${LOCK_NOTES:-}"
 max_retries="${LOCK_RETRY_MAX:-3}"
+case "$max_retries" in
+    ''|*[!0-9]*) echo "lock-claim-update: LOCK_RETRY_MAX must be a positive integer, got '$max_retries'" >&2; exit 2 ;;
+esac
+max_retries=$((10#$max_retries))
+[ "$max_retries" -ge 1 ] || { echo "lock-claim-update: LOCK_RETRY_MAX must be at least 1" >&2; exit 2; }
+expect_sha="${LOCK_EXPECT_SHA:-}"
+if [ -n "$expect_sha" ] && ! printf '%s' "$expect_sha" | grep -qE '^([0-9a-f]{40}|[0-9a-f]{64})$'; then
+    echo "lock-claim-update: LOCK_EXPECT_SHA must be a full lowercase commit sha, got '$expect_sha'" >&2
+    exit 2
+fi
 
 attempt=0
 backoff=1
@@ -111,6 +130,10 @@ while : ; do
     current_sha=$(git ls-remote "$remote" "$ref" 2>/dev/null | awk '{print $1}')
     if [ -z "$current_sha" ]; then
         echo "lock-claim-update: $ref does not exist on $remote — use lock-claim.sh" >&2
+        exit 1
+    fi
+    if [ -n "$expect_sha" ] && [ "$current_sha" != "$expect_sha" ]; then
+        echo "lock-claim-update: $ref is at $current_sha, not the expected $expect_sha — re-read the lock; nothing written" >&2
         exit 1
     fi
 
@@ -142,6 +165,18 @@ while : ; do
     if [ "$rc" -eq 0 ]; then
         echo "$ref updated to $commit_sha (was $current_sha)"
         exit 0
+    fi
+
+    # A pinned lease that went stale: the ref moved after the check above, which
+    # is the same race as a mismatch there. Never retried against a newer commit.
+    if [ -n "$expect_sha" ]; then
+        case "$push_output" in
+            *"stale info"*)
+                echo "lock-claim-update: $ref moved off the expected $expect_sha before the push — re-read the lock; nothing written" >&2
+                printf '%s\n' "$push_output" >&2
+                exit 1
+                ;;
+        esac
     fi
 
     # Lease conflict — refetch and retry.

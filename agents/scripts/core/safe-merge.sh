@@ -54,7 +54,10 @@
 # (exit 0 — the arm succeeded). Without this the default merge path wrote no
 # row at all (tooling/2026-08-19-safe-merge-arms-automerge-and-execs-away-
 # before-writing-a-snapshot-row). The row lands uncommitted in the working
-# copy; commit it with the next develop-bound commit.
+# copy; commit it with the next develop-bound commit. Its verdict is
+# GATES_PASSED for a gated pass and GATES_SKIPPED when SKIP_MERGE_GATES=true
+# bypassed the poll (git-janitor's "Skip gates and merge anyway"), so a skip
+# stays visible in the ledger after the merge.
 #
 # Usage:
 #   agents/scripts/core/safe-merge.sh <pr>
@@ -406,18 +409,37 @@ snapshot_override_csv() {
 
 # ----------------------------------------------------------------------------
 # print_snapshot_paste <pr> <mergeCommit> <headSha> <red> <override> <mergedAt>
-#                      [crState]
+#                      [crState] [verdict]
 # — the ready-to-paste append line for a merge this run could not record
 # itself. Known values are pre-filled (shell-quoted); unknown ones stay as
 # <placeholders> to fill from `gh pr view <pr> --json mergeCommit,mergedAt`.
+# The verdict defaults to GATES_PASSED; a skipped poll passes GATES_SKIPPED.
 # ----------------------------------------------------------------------------
 print_snapshot_paste() {
     local pr="$1" mc="${2:-<mergeCommit>}" head="${3:-<headSha>}"
     local red="$4" override="$5" merged_at="${6:-<mergedAt>}" cr_state="${7:-}" cr_env=""
+    local verdict="${8:-GATES_PASSED}"
     [ -n "$cr_state" ] && cr_env="SNAPSHOT_CR_STATE=$(_paste_quote "$cr_state") "
-    printf '  %sSNAPSHOT_MERGED_AT=%s bash %s %s %s %s GATES_PASSED %s %s orchestrator-automerge\n' \
+    printf '  %sSNAPSHOT_MERGED_AT=%s bash %s %s %s %s %s %s %s orchestrator-automerge\n' \
         "$cr_env" "$merged_at" "$(_paste_quote "$SCRIPT_DIR/merge-snapshot-append.sh")" "$pr" "$mc" "$head" \
-        "$(_paste_quote "$red")" "$(_paste_quote "$override")"
+        "$verdict" "$(_paste_quote "$red")" "$(_paste_quote "$override")"
+}
+
+# ----------------------------------------------------------------------------
+# gate_verdict <gate_out> — the ledger verdict token for an rc-0 gate run:
+# GATES_SKIPPED when the poll was bypassed (SKIP_MERGE_GATES=true in this
+# process, or a `GATES_SKIPPED` line in the poll output — poll_merge_gates
+# prints one and returns 0 under that knob), else GATES_PASSED. Either signal
+# alone selects GATES_SKIPPED: on any doubt the row records the skip, so a
+# bypassed poll can never read as a gated pass in the ledger (fail closed).
+# ----------------------------------------------------------------------------
+gate_verdict() {
+    if [ "${SKIP_MERGE_GATES:-}" = "true" ] \
+        || printf '%s\n' "$1" | grep -q '^GATES_SKIPPED'; then
+        printf 'GATES_SKIPPED'
+    else
+        printf 'GATES_PASSED'
+    fi
 }
 
 # _paste_quote <value> — single-quote a value for a paste-ready shell line; a
@@ -440,10 +462,13 @@ _paste_quote() {
 # git-janitor's 6 h backfill / merge-snapshot-holes.sh / the postmortem-owed
 # live fallback, never blindness.
 # A merge whose head is NOT <gated_sha> (commits landed after the poll) is not
-# recorded as GATES_PASSED: the gates never saw that head.
+# recorded as GATES_PASSED: the gates never saw that head. A skipped poll
+# (gate_verdict) records GATES_SKIPPED, never GATES_PASSED.
 # ----------------------------------------------------------------------------
 await_merge_and_snapshot() {
     local pr="$1" gate_out="$2" labels="$3" gated_sha="${4:-}"
+    local verdict
+    verdict=$(gate_verdict "$gate_out")
     local budget="${SAFE_MERGE_SNAPSHOT_WAIT_SECONDS:-120}"
     local interval="${SAFE_MERGE_SNAPSHOT_POLL_SECONDS:-5}"
     case "$budget" in ''|*[!0-9]*) budget=120 ;; esac
@@ -456,7 +481,7 @@ await_merge_and_snapshot() {
 
     if ! command -v jq >/dev/null 2>&1; then
         echo "safe-merge: WARN — jq not on PATH; cannot read the merge result, ledger row NOT written. Once PR #$pr merges, run:" >&2
-        print_snapshot_paste "$pr" "" "" "$red_csv" "$override_csv" "" "$cr_state" >&2
+        print_snapshot_paste "$pr" "" "" "$red_csv" "$override_csv" "" "$cr_state" "$verdict" >&2
         return 0
     fi
 
@@ -487,24 +512,33 @@ await_merge_and_snapshot() {
 
     if [ "$merged" != "true" ]; then
         echo "SNAPSHOT PENDING — PR #$pr: auto-merge is armed but had not merged after ${budget}s; no ledger row written. Once it merges at the gated head ${gated_sha:-<headSha>}, append it (fill <mergeCommit>/<mergedAt> from 'gh pr view $pr --json mergeCommit,mergedAt'):"
-        print_snapshot_paste "$pr" "" "${gated_sha:-$head_sha}" "$red_csv" "$override_csv" "" "$cr_state"
+        print_snapshot_paste "$pr" "" "${gated_sha:-$head_sha}" "$red_csv" "$override_csv" "" "$cr_state" "$verdict"
         return 0
     fi
     if [ -n "$gated_sha" ] && [ -n "$head_sha" ] && [ "$head_sha" != "$gated_sha" ]; then
+        if [ "$verdict" = "GATES_SKIPPED" ]; then
+            # No gate ran on either head, so there is no pass to withhold: the row
+            # owed is the skip itself, at the head that actually merged. It is not
+            # written automatically because the merged head is not the one the
+            # operator chose to skip; the paste line keeps the trace recordable.
+            echo "safe-merge: WARN — PR #$pr merged at head ${head_sha}, but the skipped poll (SKIP_MERGE_GATES) was bound to ${gated_sha}: commits landed after it and were merged too. No ledger row written. Record the skip at the merged head by hand:" >&2
+            print_snapshot_paste "$pr" "$mc" "$head_sha" "$red_csv" "$override_csv" "$merged_at" "$cr_state" "$verdict" >&2
+            return 0
+        fi
         echo "safe-merge: WARN — PR #$pr merged at head ${head_sha}, but the gates passed on ${gated_sha}: commits landed after the poll and were merged unvetted. NO GATES_PASSED ledger row written — treat this merge as a gate escape (postmortem-owed)." >&2
         return 0
     fi
     if [ -z "$mc" ] || [ -z "$head_sha" ] || [ -z "$merged_at" ] || [ "$override_ok" -ne 1 ]; then
         echo "safe-merge: WARN — PR #$pr merged but mergeCommit/headSha/mergedAt or the override-label projection is unavailable; ledger row NOT written. Fill the gaps and run:" >&2
-        print_snapshot_paste "$pr" "$mc" "$head_sha" "$red_csv" "$override_csv" "$merged_at" "$cr_state" >&2
+        print_snapshot_paste "$pr" "$mc" "$head_sha" "$red_csv" "$override_csv" "$merged_at" "$cr_state" "$verdict" >&2
         return 0
     fi
     if SNAPSHOT_CR_STATE="$cr_state" SNAPSHOT_MERGED_AT="$merged_at" bash "$SCRIPT_DIR/merge-snapshot-append.sh" \
-        "$pr" "$mc" "$head_sha" GATES_PASSED "$red_csv" "$override_csv" orchestrator-automerge; then
-        echo "Merge snapshot appended for PR #$pr (actor orchestrator-automerge; redChecks: ${red_csv:-none}; overrides: ${override_csv:-none}; CR: ${cr_state:-n/a}). Commit it with your next develop-bound commit (chore(ledger) if nothing else is in flight)."
+        "$pr" "$mc" "$head_sha" "$verdict" "$red_csv" "$override_csv" orchestrator-automerge; then
+        echo "Merge snapshot appended for PR #$pr (verdict ${verdict}; actor orchestrator-automerge; redChecks: ${red_csv:-none}; overrides: ${override_csv:-none}; CR: ${cr_state:-n/a}). Commit it with your next develop-bound commit (chore(ledger) if nothing else is in flight)."
     else
         echo "safe-merge: WARN — merge-snapshot-append failed; ledger row NOT written. Retry with:" >&2
-        print_snapshot_paste "$pr" "$mc" "$head_sha" "$red_csv" "$override_csv" "$merged_at" "$cr_state" >&2
+        print_snapshot_paste "$pr" "$mc" "$head_sha" "$red_csv" "$override_csv" "$merged_at" "$cr_state" "$verdict" >&2
     fi
     return 0
 }
@@ -799,8 +833,22 @@ run_selftest() {
         fails=$((fails + 1))
     fi
 
+    # CASE 19 — gate_verdict: a skipped poll (the poll's GATES_SKIPPED line, or
+    # SKIP_MERGE_GATES=true here) is GATES_SKIPPED; a real pass is GATES_PASSED.
+    local v
+    v="$(unset SKIP_MERGE_GATES; gate_verdict 'GATES_SKIPPED (SKIP_MERGE_GATES=true)')"
+    v+="|$(unset SKIP_MERGE_GATES; gate_verdict $'GATE_HEAD a1\nGATES_PASSED')"
+    v+="|$(SKIP_MERGE_GATES=true gate_verdict '')"
+    v+="|$(unset SKIP_MERGE_GATES; gate_verdict 'Poll 1/1 note: GATES_SKIPPED is not a line start')"
+    if [ "$v" = "GATES_SKIPPED|GATES_PASSED|GATES_SKIPPED|GATES_PASSED" ]; then
+        echo "selftest CASE19 PASS — a skipped poll records GATES_SKIPPED, a pass GATES_PASSED"
+    else
+        echo "selftest CASE19 FAIL — wrong gate verdict (got: '$v')" >&2
+        fails=$((fails + 1))
+    fi
+
     if [ "$fails" -eq 0 ]; then
-        echo "PASS — safe-merge --selftest (18/18)"
+        echo "PASS — safe-merge --selftest (19/19)"
         return 0
     fi
     echo "FAIL — safe-merge --selftest ($fails failing case(s))" >&2
@@ -812,7 +860,8 @@ main() {
     case "$arg" in
         --selftest) run_selftest; exit $? ;;
         ""|-h|--help)
-            sed -n '2,121p' "${BASH_SOURCE[0]}"
+            # The header through its return-code table (anchored, so it tracks edits).
+            sed -n '2,/^# selftest: /{/^# selftest: /!p;}' "${BASH_SOURCE[0]}"
             [ -z "$arg" ] && exit 2 || exit 0 ;;
     esac
 
@@ -851,7 +900,7 @@ main() {
     printf '%s\n' "$gate_out"
 
     case "$GATE_RC" in
-        0) : ;;  # GATES_PASSED → arm below
+        0) : ;;  # GATES_PASSED (GATES_SKIPPED under SKIP_MERGE_GATES) → arm below
         1)
             echo "REFUSED — PR #$pr: merge gates did NOT pass; NOT arming auto-merge." >&2
             echo "A bare 'gh pr merge --auto' would skip the CodeRabbit / user-comment / Bugbot gates (none are GitHub-required) and could fire past a RED block-allowlist check. Fix the blocker or apply the named *-out-of-band override label." >&2
@@ -894,7 +943,8 @@ main() {
     # 4. Arm the merge. --squash --auto is the queue-safe non-admin path: merges
     #    now if no queue is set, enqueues if one is. NOT --admin (no branch-
     #    protection bypass).
-    echo "GATES_PASSED — PR #$pr: arming squash auto-merge (non-admin) at head ${gated_sha}."
+    # A skipped poll arms the same way but never announces a pass it did not run.
+    echo "$(gate_verdict "$gate_out") — PR #$pr: arming squash auto-merge (non-admin) at head ${gated_sha}."
     if [ "${SAFE_MERGE_DRY_RUN:-}" = "true" ]; then
         echo "DRY-RUN: would run: gh pr merge $pr --squash --auto --match-head-commit $gated_sha"
         exit 0

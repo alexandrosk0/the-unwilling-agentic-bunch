@@ -15,10 +15,14 @@
 #   LOCK_REMOTE                       — git remote name (default: origin)
 #   SMATCHET_LOCK_BYPASS_REPO_CHECK   — set to 1 to skip Smatchet repo check
 #   LOCKS_SHOW_FORMAT                 — "table" (default) or "json"
+#   LOCKS_SHOW_STRICT_FETCH           — set to 1 to fail (exit 3) when the
+#                                       refs/locks fetch fails, instead of
+#                                       rendering the possibly stale local refs
 #
 # Exit codes:
 #   0 — rendered successfully (zero locks is still success)
 #   2 — argument / environment / repo-state error
+#   3 — LOCKS_SHOW_STRICT_FETCH=1 and the fetch from the remote failed
 
 set -euo pipefail
 
@@ -56,8 +60,15 @@ HELPER="$(dirname "$0")/_lock-json.py"
 
 format="${LOCKS_SHOW_FORMAT:-table}"
 
-# Refresh local refs/locks/* from remote (prune stale).
-git fetch --quiet --prune "$remote" '+refs/locks/*:refs/locks/*' 2>/dev/null || true
+# Refresh local refs/locks/* from remote (prune stale). By default a failed fetch
+# renders the local refs as they are; a caller that must not mistake a stale
+# table for the remote's state sets LOCKS_SHOW_STRICT_FETCH=1.
+if ! git fetch --quiet --prune "$remote" '+refs/locks/*:refs/locks/*' 2>/dev/null; then
+    if [ "${LOCKS_SHOW_STRICT_FETCH:-0}" = "1" ]; then
+        echo "locks-show: fetching refs/locks/* from $remote failed" >&2
+        exit 3
+    fi
+fi
 
 # Enumerate local refs after fetch.
 refs=$(git for-each-ref --format='%(refname)' refs/locks/ 2>/dev/null || true)

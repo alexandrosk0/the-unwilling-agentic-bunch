@@ -543,6 +543,37 @@ JSON
     [[ "$output" == *"red-check: Windows + MSVC"* ]]
 }
 
+@test "snapshot GATES_SKIPPED row with empty redChecks/overrideLabels is flagged gates-skipped" {
+    # A skip-gates merge records GATES_SKIPPED: no gate evaluated the head, so
+    # its empty redChecks is "nothing was checked", never "ledger says clean".
+    prlist <<'JSON'
+[{"number":5011,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"c11"},"labels":[],
+  "statusCheckRollup":[{"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    echo '{"pr":5011,"mergeCommit":"c11","gates":"GATES_SKIPPED","redChecks":[],"overrideLabels":[]}' > "$SNAPSHOT_LEDGER"
+    run_detector
+    [[ "$output" == *"PR #5011"* ]]
+    [[ "$output" == *"gates-skipped: merge-gate poll bypassed (SKIP_MERGE_GATES)"* ]]
+}
+
+@test "snapshot GATES_PASSED or an unknown verdict with empty arrays stays clean (never an error)" {
+    prlist <<'JSON'
+[{"number":5012,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"c12"},"labels":[],
+  "statusCheckRollup":[{"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-10T09:00:00Z"}]},
+ {"number":5013,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"c13"},"labels":[],
+  "statusCheckRollup":[{"__typename":"CheckRun","name":"Windows + MSVC","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    {
+        echo '{"pr":5012,"mergeCommit":"c12","gates":"GATES_PASSED","redChecks":[],"overrideLabels":[]}'
+        echo '{"pr":5013,"mergeCommit":"c13","gates":"GATES_FROM_THE_FUTURE","redChecks":[],"overrideLabels":[]}'
+    } > "$SNAPSHOT_LEDGER"
+    run_detector
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"PR #5012"* ]]
+    [[ "$output" != *"PR #5013"* ]]
+    [[ "$output" != *"gates-skipped"* ]]
+}
+
 @test "snapshot override is NOT moot-filtered even when live rollup is green (HIGH fix)" {
     # The watcher writes redChecks=[] for override merges, so a load-bearing
     # override that healed green post-merge must NOT be re-judged moot against the
@@ -609,6 +640,21 @@ JSON
     # Auditable WARN present (never silently dropped); NOT an owed escape.
     [[ "$output" == *"WARN — PR #6001 — broken-lane"* ]]
     [[ "$output" != *"postmortem owed: PR #6001"* ]]
+}
+
+@test "broken-lane downgrade does NOT apply to a GATES_SKIPPED row whose reds are all broken lanes" {
+    # A skipped poll is a bypass in itself: a paste-line or hand-written row that
+    # records only broken-lane reds must still owe, never become a lane WARN.
+    export POSTMORTEM_BROKEN_LANES="Coverage (windows-2022 + OpenCppCoverage)"
+    prlist <<'JSON'
+[{"number":6005,"mergedAt":"2026-06-10T10:00:00Z","mergeCommit":{"oid":"d5"},"labels":[],
+  "statusCheckRollup":[{"__typename":"CheckRun","name":"Coverage (windows-2022 + OpenCppCoverage)","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-06-10T09:00:00Z"}]}]
+JSON
+    echo '{"pr":6005,"mergeCommit":"d5","gates":"GATES_SKIPPED","redChecks":["Coverage (windows-2022 + OpenCppCoverage)"],"overrideLabels":[]}' > "$SNAPSHOT_LEDGER"
+    run_detector
+    [[ "$output" == *"postmortem owed: PR #6005"* ]]
+    [[ "$output" == *"gates-skipped"* ]]
+    [[ "$output" != *"WARN — PR #6005 — broken-lane"* ]]
 }
 
 @test "broken-lane downgrade does NOT apply when a real red rides alongside the broken lane" {

@@ -21,6 +21,8 @@
 #   LOCK_PLAN        — originating plan path (default: empty)
 #   LOCK_NOTES       — free-form one-line note (default: empty)
 #   LOCK_REMOTE      — git remote name (default: origin)
+#   LOCK_RETRY_MAX   — push attempts on a transient failure (default 3; a
+#                      positive integer, anything else is exit 2)
 #   SMATCHET_LOCK_BYPASS_REPO_CHECK — set to 1 to skip "is this Smatchet?" check
 #                      (test harness uses this against a sandbox bare repo)
 #
@@ -80,6 +82,15 @@ if [ "${SMATCHET_LOCK_BYPASS_REPO_CHECK:-0}" != "1" ]; then
     esac
 fi
 
+# Push attempts: validated before any network step, so a bad value never
+# turns into an unbounded or zero-attempt loop.
+max_attempts="${LOCK_RETRY_MAX:-3}"
+case "$max_attempts" in
+    ''|*[!0-9]*) echo "lock-claim: LOCK_RETRY_MAX must be a positive integer, got '$max_attempts'" >&2; exit 2 ;;
+esac
+max_attempts=$((10#$max_attempts))
+[ "$max_attempts" -ge 1 ] || { echo "lock-claim: LOCK_RETRY_MAX must be at least 1" >&2; exit 2; }
+
 # Collect agent identity + metadata.
 agent_id="${AGENT_ID:-orchestrator}"
 branch="${LOCK_BRANCH:-$(git symbolic-ref --quiet --short HEAD || echo 'detached')}"
@@ -133,7 +144,6 @@ ref="refs/locks/${slug}"
 
 # Push with retries — only retry transient errors. CAS rejection is terminal.
 attempt=0
-max_attempts=3
 backoff=1
 while : ; do
     attempt=$((attempt + 1))

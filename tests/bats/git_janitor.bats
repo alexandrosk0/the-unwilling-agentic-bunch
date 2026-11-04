@@ -185,6 +185,22 @@ janitor() {
     [ "${output// /}" = "1" ]
 }
 
+@test "backfill: a GATES_SKIPPED row is present too -> kept as written, never overwritten as BACKFILLED" {
+    # A skip-gates merge records GATES_SKIPPED; the backfill reads the row's
+    # presence only, so it neither duplicates nor relabels that trace.
+    export MERGE_SNAPSHOT_LEDGER="$STUB_BIN/ledger.jsonl"
+    printf '%s\n' '{"pr":4244,"mergeCommit":"mcsk1","headSha":"headsk1","mergedAt":"2026-08-16T10:00:00Z","gates":"GATES_SKIPPED","redChecks":[],"overrideLabels":[],"mergeActor":"orchestrator-automerge","schema":2}' > "$MERGE_SNAPSHOT_LEDGER"
+    GH_PR_MERGED_JSON="$(jq -cn --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{mergeCommit: {oid: "mcsk1"}, mergedAt: $at, headRefOid: "headsk1", labels: [], statusCheckRollup: []}')"
+    export GH_PR_MERGED_JSON
+    janitor --post-merge 4244
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"already present"* ]]
+    run cat "$MERGE_SNAPSHOT_LEDGER"
+    [[ "$output" == *'"gates":"GATES_SKIPPED"'* ]]
+    [[ "$output" != *'BACKFILLED'* ]]
+}
+
 @test "backfill: merge older than the age cap is LEFT AS A HOLE (stale line worse than hole)" {
     export MERGE_SNAPSHOT_LEDGER="$STUB_BIN/ledger.jsonl"
     export GH_PR_MERGED_JSON='{"mergeCommit":{"oid":"mcbf2"},"mergedAt":"2020-01-01T00:00:00Z","headRefOid":"headbf2","labels":[],"statusCheckRollup":[]}'

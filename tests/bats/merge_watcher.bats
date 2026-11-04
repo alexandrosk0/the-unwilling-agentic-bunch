@@ -174,7 +174,7 @@ sel = m._select_sanitizer_preset
 # where a data-race failure was incorrectly handed an ASAN build).
 assert sel("Sanitizer (TSan) — ThreadSanitizer data race FAILED") == "ninja-tsan-linux"
 assert sel("check 'sanitizer-tsan' failed") == "ninja-tsan-linux"
-# UBSAN → clang preset (the only ASan+UBSan preset per sanitizer-nightly.yml).
+# UBSAN → the clang-cl preset (ASan-only on Windows; routing unchanged).
 assert sel("Sanitizer (UBSan via Clang) blocked") == "ninja-clang-asan"
 assert sel("UndefinedBehaviorSanitizer: signed overflow") == "ninja-clang-asan"
 # Combined ASan+UBSan line contains both tokens → must resolve to clang.

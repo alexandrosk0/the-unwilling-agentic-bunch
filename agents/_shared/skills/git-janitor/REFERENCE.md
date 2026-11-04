@@ -192,7 +192,7 @@ else
 fi
 ```
 
-`safe-merge.sh` re-runs the full gate poll (quick once green), flips a draft ready, arms `gh pr merge --squash --auto --match-head-commit <gated head>` and waits up to `SAFE_MERGE_SNAPSHOT_WAIT_SECONDS` (default 120) for the merge, then appends the merge-snapshot row itself (actor `orchestrator-automerge`). Its exit codes:
+`safe-merge.sh` re-runs the full gate poll (quick once green), flips a draft ready, arms `gh pr merge --squash --auto --match-head-commit <gated head>` and waits up to `SAFE_MERGE_SNAPSHOT_WAIT_SECONDS` (default 120) for the merge, then appends the merge-snapshot row itself (actor `orchestrator-automerge`; verdict `GATES_PASSED`, or `GATES_SKIPPED` when `SKIP_MERGE_GATES=true` bypassed the poll — a skip is recorded as a skip, never as a pass). Its exit codes:
 
 | `mrc` | Meaning | Action |
 |---|---|---|
