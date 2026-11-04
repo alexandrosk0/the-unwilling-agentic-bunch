@@ -16,8 +16,8 @@
 # primitive (lock-table-cache.sh), so a path Layer B blocks, this blocks too.
 #
 # Unbypassable except the `plan-lock-out-of-band` label PLUS a
-# `plan-lock-disposition:<reason>` label or PR-body line naming the lock slug(s)
-# crossed and why (registered in merge-gates.sh's CI-downgrade path; the label
+# `plan-lock-disposition:<reason>` label or PR-body line whose reason opens with
+# the lock slug(s) crossed, then why (registered in merge-gates.sh's CI-downgrade path; the label
 # alone is not honoured). The merge gate refuses that override for a STALE
 # collision red (no live overlap left — re-run instead); an infrastructure red
 # (lock table undetermined, base ref unresolvable) keeps it as the escape. It
@@ -61,7 +61,7 @@ plan_lock_gate_decide() { # $1 = head ref (this PR's branch)
         ;;
     esac
     if [ -n "$slug" ]; then
-      echo "::error file=$f::plan-lock-gate: '$f' overlaps the write set of plan-lock '$slug', held by a different branch. File or extend a lock (agents/scripts/core/lock-claim-update.sh <slug> <write-set-file>) or coordinate. Override: apply the 'plan-lock-out-of-band' label PLUS a 'plan-lock-disposition:<reason>' label or PR-body line naming '$slug' and why crossing it is safe (the label alone is not honoured). If '$slug' is later released or ages past the 14-day cutoff, re-run this gate instead: the merge gate refuses to override a collision red that no longer collides."
+      echo "::error file=$f::plan-lock-gate: '$f' overlaps the write set of plan-lock '$slug', held by a different branch. File or extend a lock (agents/scripts/core/lock-claim-update.sh <slug> <write-set-file>) or coordinate. Override: apply the 'plan-lock-out-of-band' label PLUS a 'plan-lock-disposition:$slug' label or a PR-body line 'plan-lock-disposition: $slug — <why crossing it is safe>' (the slug opens the reason; the label alone is not honoured). If '$slug' is later released or ages past the 14-day cutoff, re-run this gate instead: the merge gate refuses to override a collision red that no longer collides."
       hit=1
     fi
   done

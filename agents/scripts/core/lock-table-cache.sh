@@ -30,6 +30,11 @@
 # every real lock is owner=orchestrator, so an owner check is a no-op). See
 # docs/plans/plan-lock-enforcement.md § Approach (identity note).
 #
+# Public functions: ltc_sibling_count, ltc_covering_slug, ltc_lock_rows,
+# ltc_lock_table_json, ltc_invalidate_table, ltc_unresolved_add,
+# ltc_unresolved_get, ltc_unresolved_repin, ltc_unresolved_drop. `_ltc_*` names
+# are internal.
+#
 # Test/override seams (read-only):
 #   LTC_PROJ           force the repo root (default CLAUDE_PROJECT_DIR | $PWD)
 #   LTC_TABLE_TTL      lock-table cache TTL secs (default 30; 0 = never serve)
@@ -92,6 +97,20 @@ _ltc_norm_path() {
 }
 
 # --- lock table (~30s cache) -------------------------------------------------
+# The lock-table cache file for repo key $1.
+_ltc_table_cache_path() { printf '%s/.smatchet-planlock-table-%s' "$(_ltc_cache_dir)" "$1"; }
+
+# Drop this repo's cached lock table, so the next read runs locks-show afresh
+# (a caller that just claimed, extended or released a lock). Always exit 0: no
+# repo key means there is no cache to drop.
+ltc_invalidate_table() {
+  local key
+  key="$(_ltc_repo_key)" || return 0
+  [ -n "$key" ] || return 0
+  rm -f -- "$(_ltc_table_cache_path "$key")" 2>/dev/null || :
+  return 0
+}
+
 # Prints the lock-table JSON on stdout. exit 0 = available (incl. genuine "[]"),
 # non-zero = UNAVAILABLE (locks-show errored) -> caller fails open.
 ltc_lock_table_json() {
@@ -99,7 +118,7 @@ ltc_lock_table_json() {
   now="$(date -u +%s 2>/dev/null)" || return 1
   key="$(_ltc_repo_key)" || key=""
   if [ -n "$key" ]; then
-    cache="$(_ltc_cache_dir)/.smatchet-planlock-table-$key"
+    cache="$(_ltc_table_cache_path "$key")"
     if cached="$(cat "$cache" 2>/dev/null)" && [ -n "$cached" ]; then
       cts="$(printf '%s\n' "$cached" | head -n1)"
       case "$cts" in
@@ -122,9 +141,101 @@ ltc_lock_table_json() {
   return 0
 }
 
-# Flattened TSV rows (branch<TAB>epoch<TAB>slug<TAB>path). exit 2 if the table is
-# UNAVAILABLE (fail-open signal), 0 otherwise (rows on stdout, possibly empty).
-_ltc_lock_rows() {
+# --- unresolved auto-claim rollbacks -----------------------------------------
+# When the Layer A hook's own claim loses a cross-branch race and rolling it
+# back does not complete, this branch's lock is left overlapping another
+# branch's on that path. The hook records it here (branch<TAB>slug<TAB>path<TAB>
+# commit: the lock commit the hook's own claim wrote) so later edits of the
+# path stay denied until the overlap is resolved. Only the
+# hook's own failed rollbacks are recorded: an overlap a person claimed by hand,
+# or one another branch made later over this branch's earlier claim, is never
+# denied here. A record only denies while its lock is still at the commit the
+# hook wrote (any later write, a person's update, release or re-claim, means
+# someone acted on it; the edit hook's own later writes to that lock, from any
+# session of the branch in this checkout, re-pin the record with
+# ltc_unresolved_repin, so they never count), still covers the path for this branch, and another
+# branch's lock does too (guard-plan-lock.sh): a record outliving any of those
+# is dropped on the next edit of the path. Per machine
+# and per repo, like the table cache; a cleared TMPDIR drops the record and the
+# deny fails open (Layers B and C still check). Values reach awk through
+# ENVIRON, never -v, so a backslash in a path stays literal. Writers serialise
+# on a mkdir lock beside the file (portable where flock is not). A lock dir
+# older than a minute is a killed writer's (the critical section takes
+# milliseconds) and is broken; a drop that still cannot take the lock keeps
+# the file as it is, and an add appends anyway, so no record is ever lost.
+_ltc_unresolved_path() { printf '%s/.smatchet-planlock-unresolved-%s' "$(_ltc_cache_dir)" "$1"; }
+_ltc_unresolved_lock() { # $1 = record file; rc 0 once its lock dir is held (about 1 s of tries)
+  local n=0
+  while ! mkdir "$1.lock" 2>/dev/null; do
+    n=$((n + 1))
+    if [ "$n" -ge 20 ]; then
+      # A stale lock (its writer was killed): break it once, then try again.
+      [ -n "$(find "$1.lock" -prune -mmin +1 2>/dev/null)" ] || return 1
+      rmdir "$1.lock" 2>/dev/null || return 1
+      mkdir "$1.lock" 2>/dev/null
+      return
+    fi
+    sleep 0.05 2>/dev/null || sleep 1
+  done
+  return 0
+}
+_ltc_unresolved_unlock() { rmdir "$1.lock" 2>/dev/null || :; }
+ltc_unresolved_add() { # $1 = branch, $2 = slug, $3 = path, $4 = commit (may be empty); rc 1 when it cannot be recorded
+  local key f rc locked=0
+  key="$(_ltc_repo_key)" || return 1
+  [ -n "$key" ] || return 1
+  f="$(_ltc_unresolved_path "$key")"
+  _ltc_unresolved_lock "$f" && locked=1
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}" >> "$f" 2>/dev/null; rc=$?
+  [ "$locked" -eq 0 ] || _ltc_unresolved_unlock "$f"
+  return "$rc"
+}
+ltc_unresolved_get() { # $1 = branch, $2 = path -> "slug<TAB>commit" of the latest record; rc 0 found, 1 not
+  local key f
+  key="$(_ltc_repo_key)" || return 1
+  [ -n "$key" ] || return 1
+  f="$(_ltc_unresolved_path "$key")"
+  [ -f "$f" ] || return 1
+  LTC_B="$1" LTC_P="$2" awk -F '\t' '$1 == ENVIRON["LTC_B"] && $3 == ENVIRON["LTC_P"] && $2 != "" { s = $2; c = $4 }
+    END { if (s == "") exit 1; printf "%s\t%s\n", s, c }' "$f" 2>/dev/null
+}
+ltc_unresolved_repin() { # $1 = branch, $2 = slug, $3 = old commit, $4 = new commit; always rc 0
+  local key f
+  [ -n "${3:-}" ] && [ -n "${4:-}" ] || return 0
+  key="$(_ltc_repo_key)" || return 0
+  [ -n "$key" ] || return 0
+  f="$(_ltc_unresolved_path "$key")"
+  [ -f "$f" ] || return 0
+  LTC_B="$1" LTC_S="$2" LTC_O="$3" awk -F '\t' '$1 == ENVIRON["LTC_B"] && $2 == ENVIRON["LTC_S"] && $4 == ENVIRON["LTC_O"] { found = 1; exit }
+    END { exit !found }' "$f" 2>/dev/null || return 0
+  _ltc_unresolved_lock "$f" || return 0
+  LTC_B="$1" LTC_S="$2" LTC_O="$3" LTC_N="$4" awk -F '\t' -v OFS='\t' '
+    $1 == ENVIRON["LTC_B"] && $2 == ENVIRON["LTC_S"] && $4 == ENVIRON["LTC_O"] { $4 = ENVIRON["LTC_N"] }
+    { print }' "$f" > "$f.tmp.$$" 2>/dev/null \
+    && mv -f "$f.tmp.$$" "$f" 2>/dev/null || rm -f "$f.tmp.$$" 2>/dev/null
+  _ltc_unresolved_unlock "$f"
+  return 0
+}
+ltc_unresolved_drop() { # $1 = branch, $2 = path; always rc 0
+  local key f
+  key="$(_ltc_repo_key)" || return 0
+  [ -n "$key" ] || return 0
+  f="$(_ltc_unresolved_path "$key")"
+  [ -f "$f" ] || return 0
+  # Nothing to drop is the common case: never rewrite the file for it.
+  LTC_B="$1" LTC_P="$2" awk -F '\t' '$1 == ENVIRON["LTC_B"] && $3 == ENVIRON["LTC_P"] { found = 1; exit }
+    END { exit !found }' "$f" 2>/dev/null || return 0
+  _ltc_unresolved_lock "$f" || return 0
+  LTC_B="$1" LTC_P="$2" awk -F '\t' '!($1 == ENVIRON["LTC_B"] && $3 == ENVIRON["LTC_P"])' "$f" > "$f.tmp.$$" 2>/dev/null \
+    && mv -f "$f.tmp.$$" "$f" 2>/dev/null || rm -f "$f.tmp.$$" 2>/dev/null
+  _ltc_unresolved_unlock "$f"
+  return 0
+}
+
+# Flattened TSV rows (branch<TAB>epoch<TAB>slug<TAB>path), one per claimed path,
+# served from the cached table. exit 2 if the table is UNAVAILABLE (fail-open
+# signal), 0 otherwise (rows on stdout, possibly empty).
+ltc_lock_rows() {
   if [ -n "${LTC_ROWS_OVERRIDE:-}" ]; then
     [ -f "$LTC_ROWS_OVERRIDE" ] && cat "$LTC_ROWS_OVERRIDE" 2>/dev/null
     return 0
@@ -136,18 +247,20 @@ _ltc_lock_rows() {
 }
 
 # Coverage primitive — the shared exact-path-or-dir-prefix match.
-#   $1 repo-relative path          $2 mode: same|other
+#   $1 repo-relative path          $2 mode: same|same-slug|other
 #   $3 my branch                   $4 (optional) stale-cutoff epoch
-# mode=same  : a lock whose branch == mine (Layer A: my own seed -> allow).
-# mode=other : a lock whose branch is non-empty and != mine (Layer B/C: block).
+#   $5 the slug, for mode=same-slug
+# mode=same      : a lock whose branch == mine (Layer A: my own seed -> allow).
+# mode=same-slug : that one lock ($5), and only while its branch == mine.
+# mode=other     : a lock whose branch is non-empty and != mine (Layer B/C: block).
 # An empty/detached lock branch is UNATTRIBUTABLE -> never matches "other"
 # (bias-to-allow; the stale sweep ages it out). A stale-cutoff (B/C) skips locks
 # older than it; Layer A passes none so its own seed always covers (no
 # self-denial of long-running work — the F3 nuance).
 # exit 0 covered (slug on stdout) | 1 not covered | 2 undetermined (fail-open).
 ltc_covering_slug() {
-  local path="$1" mode="$2" mybr="$3" cutoff="${4:-}" rows
-  rows="$(_ltc_lock_rows)" || return 2
+  local path="$1" mode="$2" mybr="$3" cutoff="${4:-}" want="${5:-}" rows
+  rows="$(ltc_lock_rows)" || return 2
   path="$(_ltc_norm_path "$path")"
   [ -n "$path" ] || return 1
   local br ep slug lp
@@ -155,6 +268,7 @@ ltc_covering_slug() {
     [ -n "$lp" ] || continue
     case "$mode" in
       same)  [ "$br" = "$mybr" ] || continue ;;
+      same-slug) { [ "$br" = "$mybr" ] && [ -n "$want" ] && [ "$slug" = "$want" ]; } || continue ;;
       other) { [ -n "$br" ] && [ "$br" != "$mybr" ]; } || continue ;;
       *) continue ;;
     esac
@@ -278,6 +392,25 @@ _ltc_selftest() {
   ltc_covering_slug 'Source/Core/src/Sync/A.cpp' same develop >/dev/null; rc=$?
   [ "$rc" -eq 1 ] && _t_ok "empty rows -> not covered (rc 1)" || _t_fail "empty rows got rc=$rc"
   unset LTC_ROWS_OVERRIDE
+
+  # public row reader honours the override seam
+  out="$(LTC_ROWS_OVERRIDE="$td/rows" ltc_lock_rows | grep -c .)"
+  _t_eq "$out" "4" "ltc_lock_rows: serves every flattened row"
+
+  # ltc_invalidate_table drops exactly this repo's lock-table cache file
+  if git init -q "$td/repo" 2>/dev/null; then
+    out="$(LTC_PROJ="$td/repo" TMPDIR="$td" bash -c '
+      . "$1" || exit 9
+      f="$(_ltc_table_cache_path "$(_ltc_repo_key)")"
+      printf "1\n[]" > "$f" && printf x > "$f.keep"
+      ltc_invalidate_table || exit 8
+      [ ! -e "$f" ] && [ -e "$f.keep" ] && printf gone' _ "$_LTC_DIR/lock-table-cache.sh")"
+    _t_eq "$out" "gone" "ltc_invalidate_table: removes the repo's table cache, nothing else"
+  else
+    _t_fail "ltc_invalidate_table: git init failed"
+  fi
+  out="$(LTC_PROJ="$td" ltc_invalidate_table; printf 'rc=%s' "$?")"
+  _t_eq "$out" "rc=0" "ltc_invalidate_table: outside a repo is a no-op, exit 0"
 
   rm -rf "$td" 2>/dev/null || true
   printf '1..%s\n' "$n"

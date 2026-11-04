@@ -2,7 +2,8 @@
 # tests/bats/lock_claim.bats
 # ----------------------------------------------------------------------------
 # Bats tests for agents/scripts/core/lock-claim.sh — argument validation + happy path
-# + lock-held rejection. Complementary to agents/scripts/core/test-lock-primitives.sh
+# + lock-held rejection + the LOCK_RETRY_MAX attempt cap — and for
+# lock-claim-update.sh's LOCK_RETRY_MAX validation and LOCK_EXPECT_SHA pinned lease. Complementary to agents/scripts/core/test-lock-primitives.sh
 # (the existing end-to-end multi-clone integration test); this file isolates
 # each case in its own bats setup so a single failing argument-validation case
 # doesn't poison the whole run.
@@ -183,6 +184,140 @@ teardown() {
     [[ "$claim_body" == *"\"inspect-slug\""* ]]
     [[ "$claim_body" == *"\"owner\""* ]]
     [[ "$claim_body" == *"\"bats-test\""* ]]
+}
+
+# ---------- LOCK_RETRY_MAX ----------
+
+@test "lock-claim: LOCK_RETRY_MAX that is not a positive integer is an env error (2), before any push" {
+    for v in 0 00 -1 abc 1.5 ''; do
+        run bash -c "cd '$CLONE' && LOCK_RETRY_MAX='$v' bash '$SCRIPTS_DIR/lock-claim.sh' retry-slug '$WS_FILE'"
+        if [ -z "$v" ]; then
+            # Empty means unset: the default applies and the claim lands.
+            [ "$status" -eq 0 ]
+            git -C "$BARE" update-ref -d refs/locks/retry-slug
+            continue
+        fi
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"LOCK_RETRY_MAX must be"* ]]
+    done
+    [ -z "$(git -C "$BARE" for-each-ref refs/locks/)" ]
+}
+
+@test "lock-claim: LOCK_RETRY_MAX caps the push attempts on a transient failure" {
+    git -C "$CLONE" remote set-url origin "$SANDBOX/missing.git"
+    run bash -c "cd '$CLONE' && LOCK_RETRY_MAX=1 bash '$SCRIPTS_DIR/lock-claim.sh' retry-slug '$WS_FILE'"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"failed after 1 attempts"* ]]
+    run bash -c "cd '$CLONE' && LOCK_RETRY_MAX=02 bash '$SCRIPTS_DIR/lock-claim.sh' retry-slug '$WS_FILE'"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"failed after 2 attempts"* ]]
+}
+
+# ---------- lock-claim-update.sh ----------
+
+update_ws() { printf '%s\n' "$@" > "$SANDBOX/upd-ws.txt"; }
+remote_ws() { # $1 = slug -> the write set on the remote, one path per line
+    git -C "$BARE" cat-file blob "refs/locks/$1:claim.json" | jq -r '.write_set[]'
+}
+
+@test "lock-claim-update: LOCK_RETRY_MAX or LOCK_EXPECT_SHA malformed is an env error (2)" {
+    bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-claim.sh' upd-slug '$WS_FILE'" >/dev/null 2>&1
+    update_ws Source/New.cpp
+    run bash -c "cd '$CLONE' && LOCK_RETRY_MAX=0 bash '$SCRIPTS_DIR/lock-claim-update.sh' upd-slug '$SANDBOX/upd-ws.txt'"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"LOCK_RETRY_MAX must be"* ]]
+    for v in deadbeef ABCDEF0123456789ABCDEF0123456789ABCDEF01 'refs/locks/upd-slug'; do
+        run bash -c "cd '$CLONE' && LOCK_EXPECT_SHA='$v' bash '$SCRIPTS_DIR/lock-claim-update.sh' upd-slug '$SANDBOX/upd-ws.txt'"
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"LOCK_EXPECT_SHA must be"* ]]
+    done
+    [ "$(remote_ws upd-slug)" = "$(printf 'Source/Core/include/Foo.h\nSource/Core/src/Foo.cpp')" ]
+}
+
+@test "lock-claim-update: LOCK_EXPECT_SHA at the ref's commit updates it" {
+    bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-claim.sh' upd-slug '$WS_FILE'" >/dev/null 2>&1
+    read_sha="$(git -C "$BARE" rev-parse refs/locks/upd-slug)"
+    update_ws Source/A.cpp Source/B.cpp
+    run bash -c "cd '$CLONE' && LOCK_EXPECT_SHA='$read_sha' bash '$SCRIPTS_DIR/lock-claim-update.sh' upd-slug '$SANDBOX/upd-ws.txt'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"(was $read_sha)"* ]]
+    [ "$(remote_ws upd-slug)" = "$(printf 'Source/A.cpp\nSource/B.cpp')" ]
+}
+
+@test "lock-claim-update: a concurrent update after the caller's read is never overwritten under LOCK_EXPECT_SHA" {
+    bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-claim.sh' upd-slug '$WS_FILE'" >/dev/null 2>&1
+    # The caller reads the lock here ...
+    read_sha="$(git -C "$BARE" rev-parse refs/locks/upd-slug)"
+    # ... then another actor grows it before the caller pushes.
+    update_ws Source/Core/include/Foo.h Source/Core/src/Foo.cpp Source/Theirs.cpp
+    bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-claim-update.sh' upd-slug '$SANDBOX/upd-ws.txt'" >/dev/null 2>&1
+    theirs_sha="$(git -C "$BARE" rev-parse refs/locks/upd-slug)"
+    [ "$theirs_sha" != "$read_sha" ]
+    update_ws Source/Core/include/Foo.h Source/Core/src/Foo.cpp Source/Mine.cpp
+    run bash -c "cd '$CLONE' && LOCK_EXPECT_SHA='$read_sha' bash '$SCRIPTS_DIR/lock-claim-update.sh' upd-slug '$SANDBOX/upd-ws.txt'"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not the expected $read_sha"* ]]
+    [[ "$output" == *"nothing written"* ]]
+    [ "$(git -C "$BARE" rev-parse refs/locks/upd-slug)" = "$theirs_sha" ]
+    remote_ws upd-slug | grep -qxF Source/Theirs.cpp
+}
+
+@test "lock-claim-update: LOCK_EXPECT_SHA on a released lock is exit 1, nothing written" {
+    bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-claim.sh' upd-slug '$WS_FILE'" >/dev/null 2>&1
+    read_sha="$(git -C "$BARE" rev-parse refs/locks/upd-slug)"
+    git -C "$BARE" update-ref -d refs/locks/upd-slug
+    update_ws Source/Mine.cpp
+    run bash -c "cd '$CLONE' && LOCK_EXPECT_SHA='$read_sha' bash '$SCRIPTS_DIR/lock-claim-update.sh' upd-slug '$SANDBOX/upd-ws.txt'"
+    [ "$status" -eq 1 ]
+    [ -z "$(git -C "$BARE" for-each-ref refs/locks/)" ]
+}
+
+# ---------- lock-release.sh ----------
+
+@test "lock-release: deletes a held lock, and an absent one is a no-op" {
+    bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-claim.sh' rel-slug '$WS_FILE'" >/dev/null 2>&1
+    run bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-release.sh' rel-slug"
+    [ "$status" -eq 0 ]
+    [ -z "$(git -C "$BARE" for-each-ref refs/locks/)" ]
+    run bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-release.sh' rel-slug"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"already absent"* ]]
+}
+
+@test "lock-release: LOCK_RETRY_MAX or LOCK_EXPECT_SHA malformed is an env error (2), nothing deleted" {
+    bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-claim.sh' rel-slug '$WS_FILE'" >/dev/null 2>&1
+    run bash -c "cd '$CLONE' && LOCK_RETRY_MAX=0 bash '$SCRIPTS_DIR/lock-release.sh' rel-slug"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"LOCK_RETRY_MAX must be"* ]]
+    for v in deadbeef ABCDEF0123456789ABCDEF0123456789ABCDEF01 'refs/locks/rel-slug'; do
+        run bash -c "cd '$CLONE' && LOCK_EXPECT_SHA='$v' bash '$SCRIPTS_DIR/lock-release.sh' rel-slug"
+        [ "$status" -eq 2 ]
+        [[ "$output" == *"LOCK_EXPECT_SHA must be"* ]]
+    done
+    [ -n "$(git -C "$BARE" for-each-ref refs/locks/rel-slug)" ]
+}
+
+@test "lock-release: LOCK_EXPECT_SHA at the lock's commit deletes it" {
+    bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-claim.sh' rel-slug '$WS_FILE'" >/dev/null 2>&1
+    read_sha="$(git -C "$BARE" rev-parse refs/locks/rel-slug)"
+    run bash -c "cd '$CLONE' && LOCK_EXPECT_SHA='$read_sha' bash '$SCRIPTS_DIR/lock-release.sh' rel-slug"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"deleted (was $read_sha)"* ]]
+    [ -z "$(git -C "$BARE" for-each-ref refs/locks/)" ]
+}
+
+@test "lock-release: a lock that moved after the caller's read is never released under LOCK_EXPECT_SHA" {
+    bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-claim.sh' rel-slug '$WS_FILE'" >/dev/null 2>&1
+    read_sha="$(git -C "$BARE" rev-parse refs/locks/rel-slug)"
+    # Another actor grows the lock after the caller read it.
+    update_ws Source/Core/include/Foo.h Source/Core/src/Foo.cpp Source/Theirs.cpp
+    bash -c "cd '$CLONE' && bash '$SCRIPTS_DIR/lock-claim-update.sh' rel-slug '$SANDBOX/upd-ws.txt'" >/dev/null 2>&1
+    theirs_sha="$(git -C "$BARE" rev-parse refs/locks/rel-slug)"
+    [ "$theirs_sha" != "$read_sha" ]
+    run bash -c "cd '$CLONE' && LOCK_EXPECT_SHA='$read_sha' bash '$SCRIPTS_DIR/lock-release.sh' rel-slug"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not the expected $read_sha"* ]]
+    [ "$(git -C "$BARE" rev-parse refs/locks/rel-slug)" = "$theirs_sha" ]
 }
 
 # ---------- Write-set parsing ----------

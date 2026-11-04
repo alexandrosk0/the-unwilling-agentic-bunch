@@ -20,6 +20,8 @@ So every skill ships with both:
 1. A `description:` that names the user-visible symptoms and requests that should load it ("crash", "wrong output", "doesn't work", "address the CodeRabbit comments") — not only the procedure's name.
 2. A route on every harness: an on-demand row when the trigger is a top-level task class (debugging, perf, tests, PR-bot feedback, cleanup); otherwise a path link from a doc that AGENTS.md routes to, at the step where the procedure runs or in a heuristic bullet (`delegation.md` links the self-check and session-recall skills that way). AGENTS.md has a hard line cap, so a narrow trigger takes a link, not a row. A skill named only in prose, without its path, reaches Claude Code alone.
 
+Rule 2 is gated: `test-skill-reachability.sh` fails any skill whose `SKILL.md` path is not a markdown link in AGENTS.md or in a doc AGENTS.md links to (one hop; prose, code spans and fenced examples do not count).
+
 ## Shaping a skill
 
 - **SKILL.md holds the judgement**: when to load, scope and boundaries, hard rules, the loop, the report shape. **REFERENCE.md** beside it holds the verbatim recipes (long shell blocks, command sets, cleanup commands) once SKILL.md nears the ~400-line soft cap — the reasoning stays readable and the recipes load only when run.

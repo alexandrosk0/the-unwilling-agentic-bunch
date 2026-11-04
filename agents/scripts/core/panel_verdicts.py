@@ -11,7 +11,7 @@
 # It deliberately does NOT go through verifier-produce.py: that is the
 # model-calling half, and these verdicts already exist.
 #
-# The pipeline it feeds (see docs/agent-rules/review-panels.md § Verdicts):
+# The pipeline it feeds (see docs/agent-rules/review-panels.md § Verdict trailer → verifier gate):
 #
 #   python agents/scripts/core/panel_verdicts.py --subject NN --round N \
 #     | python scripts/dev/verifier-sidecar.py aggregate - > verdict.json
@@ -188,7 +188,8 @@ def harness_of(name: str, round_no: int) -> Optional[str]:
 
     None means the name does not match the launcher's grammar, so the leg's
     provenance is unknown — callers must treat that as NOT independent rather
-    than guess (review-panels.md § Reviewer identity owns the grammar).
+    than guess (the grammar lives in review-panels.md § Reviewer identity: the
+    launcher names the file).
     """
     m = re.match(
         r"^" + re.escape(PREFIX) + r"review-" + str(round_no) + r"-([a-z0-9]+)-(.+)\.md$",

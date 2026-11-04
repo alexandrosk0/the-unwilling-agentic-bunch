@@ -310,8 +310,9 @@ is_broken_lane() {
         *"red-check: "*) red_part="${trig#*red-check: }"; red_part="${red_part%%;*}" ;;
         *) return 1 ;;   # no red-check part → nothing to downgrade
     esac
-    # An override part alongside means a real bypass — never a pure broken-lane WARN.
-    case "$trig" in *"override: "*) return 1 ;; esac
+    # An override or a skipped poll alongside means a real bypass — never a pure
+    # broken-lane WARN.
+    case "$trig" in *"override: "*|*"gates-skipped: "*) return 1 ;; esac
     # Every comma-separated red name must be a known broken lane.
     local IFS=','
     for name in $red_part; do
@@ -553,15 +554,24 @@ SNAPSHOT_LEDGER="${SNAPSHOT_LEDGER:-docs/self-improvement/merge-snapshots.jsonl}
 
 # snapshot_trigger <pr> <mergeCommit> — print the trigger derived from the most
 # recent ledger line matching BOTH pr and mergeCommit (redChecks / overrideLabels
-# non-empty), or nothing if no such line exists. Requires jq; degrades to "no
-# entry" (empty output) when jq is absent so the live fallback still runs.
+# non-empty, or the gates verdict GATES_SKIPPED), or nothing if no such line
+# exists. A GATES_SKIPPED row is a trigger on its own: SKIP_MERGE_GATES bypassed
+# the poll, so its empty redChecks means "nothing was evaluated", not "clean",
+# and the row would otherwise also suppress the live fallback. Every other
+# verdict — GATES_PASSED, another canonical token (merge-snapshot-append.sh
+# header) or an unknown one — adds nothing and is never an error: the
+# redChecks / overrideLabels parts still decide (fail open on the verdict, as
+# the ledger writer is). Requires jq; degrades to "no entry" (empty output)
+# when jq is absent so the live fallback still runs.
 snapshot_trigger() {
     local pr="$1" mc="$2"
     [ -f "$SNAPSHOT_LEDGER" ] || return 0
     command -v jq >/dev/null 2>&1 || return 0
     jq -rj --argjson pr "$pr" --arg mc "$mc" '
         select(.pr == $pr and .mergeCommit == $mc)
-        | [ (if (.redChecks | length) > 0 then "red-check: " + (.redChecks | join(", ")) else empty end),
+        | [ (if (.gates // "") == "GATES_SKIPPED"
+             then "gates-skipped: merge-gate poll bypassed (SKIP_MERGE_GATES)" else empty end),
+            (if (.redChecks | length) > 0 then "red-check: " + (.redChecks | join(", ")) else empty end),
             (.overrideLabels[]? | "override: " + .) ]
         | join("; ")
     ' "$SNAPSHOT_LEDGER" 2>/dev/null | tail -1 || true

@@ -23,7 +23,8 @@
 # stay schema 2. Additive: readers key on field presence, not the number.
 #
 # mergeActor tokens — the canonical list (docs/agent-rules/ship-loops.md
-# § merge-time snapshot mirrors it; free text is accepted, but use these):
+# § Append a merge-time gate-verdict snapshot mirrors it; free text is
+# accepted, but use these):
 #   merge-watcher           the merge-watcher daemon merged (handle_pass)
 #   orchestrator            an in-session orchestrator merged (REST PUT)
 #   orchestrator-automerge  a session ARMED GitHub auto-merge and recorded the
@@ -35,6 +36,21 @@
 #                           HUMAN performed the merge (GitHub UI / by hand); the
 #                           orchestrator writes the row with the verdict it last
 #                           observed (GATES_PASSED when it polled green)
+#
+# gatesVerdict tokens — the canonical list (MSA_VERDICTS below; readers must
+# tolerate any token, so a new one never breaks a reader):
+#   GATES_PASSED      the full merge-gates poll passed on the merged head
+#   GATES_SKIPPED     SKIP_MERGE_GATES=true bypassed the poll (git-janitor's
+#                     "Skip gates and merge anyway"): no gate evaluated the
+#                     head, so the row is an escape candidate, never a pass
+#   BACKFILLED        git-janitor composed the row after a merge no actor
+#                     recorded
+#   GATES_INCOMPLETE  a merge recorded with checks still non-terminal or red
+#   GATES_ABSENT      a merge recorded with no check runs on the head
+# Validation: an empty or malformed token (anything but UPPER_SNAKE) is refused
+# (exit 2, no line). A well-formed token outside the list is written with a
+# WARN — fail-open on purpose: a row with an unfamiliar verdict still records
+# the merge, while a refused write leaves a ledger hole.
 #
 # Idempotency: a re-append for the same `pr`+`mergeCommit` is a no-op (grep-guard)
 # so merge-path retries never double-write.
@@ -73,6 +89,26 @@ else
     unset PROJECT_ROOT AGENT_LAYER_ROOT  # no config beside this script (a fixture copy): its own tree, never an inherited root
 fi
 : "${MERGE_SNAPSHOT_LEDGER:=${PROJECT_ROOT:-$_msa_root}/docs/self-improvement/merge-snapshots.jsonl}"
+
+# MSA_VERDICTS — the canonical gatesVerdict tokens (header § gatesVerdict).
+MSA_VERDICTS="GATES_PASSED GATES_SKIPPED BACKFILLED GATES_INCOMPLETE GATES_ABSENT"
+
+# msa_check_verdict <token> — rc 0 for a canonical token, rc 1 (with a WARN)
+# for a well-formed UPPER_SNAKE token outside the list, rc 2 for an empty or
+# malformed one. The explicit letter list keeps the class locale-independent.
+msa_check_verdict() {
+    local v="$1" known
+    case "$v" in
+        ''|_*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZ_]*)
+            echo "append_merge_snapshot: gatesVerdict must be an UPPER_SNAKE token such as GATES_PASSED (got '$v')" >&2
+            return 2 ;;
+    esac
+    for known in $MSA_VERDICTS; do
+        [ "$v" = "$known" ] && return 0
+    done
+    echo "append_merge_snapshot: WARN — gatesVerdict '$v' is not a canonical token ($MSA_VERDICTS); recording it anyway, since a refused row would leave a ledger hole" >&2
+    return 1
+}
 
 # csv_to_json_array <csv> — turn "a,b , c" into a JSON array ["a","b","c"],
 # trimming surrounding whitespace per element and dropping empties. Empty/blank
@@ -113,6 +149,9 @@ append_merge_snapshot() {
     if [ -z "$gates" ]; then
         echo "append_merge_snapshot: gatesVerdict must be non-empty" >&2; return 2
     fi
+    local vrc=0
+    msa_check_verdict "$gates" || vrc=$?
+    [ "$vrc" -eq 2 ] && return 2
     if [ -z "$actor" ]; then
         echo "append_merge_snapshot: mergeActor must be non-empty" >&2; return 2
     fi
@@ -251,9 +290,23 @@ run_selftest() {
     if [ "$rc" -eq 0 ]; then echo "selftest FAIL: non-numeric pr should fail" >&2; fails=$((fails+1)); fi
     rc=0; append_merge_snapshot 7 "" h GATES_PASSED "" "" orchestrator >/dev/null 2>&1 || rc=$?
     if [ "$rc" -eq 0 ]; then echo "selftest FAIL: empty mergeCommit should fail" >&2; fails=$((fails+1)); fi
+    rc=0; append_merge_snapshot 7 m7 h GATES-PASSED "" "" orchestrator >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 2 ]; then echo "selftest FAIL: malformed verdict should fail with 2 (got $rc)" >&2; fails=$((fails+1)); fi
+    rc=0; append_merge_snapshot 7 m7 h gates_passed "" "" orchestrator >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 2 ]; then echo "selftest FAIL: lower-case verdict should fail with 2 (got $rc)" >&2; fails=$((fails+1)); fi
     # The failing calls must NOT have grown the ledger.
     n="$(wc -l < "$tmp")"
     if [ "$n" -ne 2 ]; then echo "selftest FAIL: malformed args wrote a line (ledger now $n)" >&2; fails=$((fails+1)); fi
+
+    # 5. GATES_SKIPPED is canonical (no WARN); an unknown well-formed token is
+    #    written with a WARN rather than refused (a row beats a hole).
+    local err
+    err="$(append_merge_snapshot 50 skip50 h50 GATES_SKIPPED "" "" orchestrator-automerge 2>&1 >/dev/null)" || rc=$?
+    if [ -n "$err" ] || [ "$(jq -rs '.[-1].gates' "$tmp")" != "GATES_SKIPPED" ]; then
+        echo "selftest FAIL: GATES_SKIPPED should append silently (stderr: '$err')" >&2; fails=$((fails+1)); fi
+    err="$(append_merge_snapshot 51 new51 h51 GATES_FUTURE "" "" orchestrator 2>&1 >/dev/null)"
+    if [[ "$err" != *"not a canonical token"* ]] || [ "$(jq -rs '.[-1].gates' "$tmp")" != "GATES_FUTURE" ]; then
+        echo "selftest FAIL: an unknown well-formed verdict should append with a WARN (stderr: '$err')" >&2; fails=$((fails+1)); fi
 
     rm -f "$tmp"
     if [ "$fails" -eq 0 ]; then

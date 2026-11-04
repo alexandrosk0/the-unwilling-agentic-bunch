@@ -150,10 +150,34 @@ case "$1" in
                 #   MERGE_GATES_STUB_PLANLOCK_RUN_ID — id to emit (default 4242)
                 echo "${MERGE_GATES_STUB_PLANLOCK_RUN_ID:-4242}"; exit 0
                 ;;
-            */check-runs/*/annotations)
+            */check-runs/*/annotations*)
                 # Step 2: that run's annotation messages, one per line.
                 #   MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS — the messages; unset
                 #   → error (the red's cause is unreadable)
+                #   MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS_JSON — a raw API page
+                #   instead, run through the caller's real --jq filter
+                #   MERGE_GATES_STUB_ANN_URL_FILE — record the requested path
+                #   MERGE_GATES_STUB_ANN_FAIL_FIRST — fail this many reads first
+                #   (counted in $MERGE_GATES_STUB_ANN_FAIL_FIRST_FILE)
+                if [ -n "${MERGE_GATES_STUB_ANN_URL_FILE:-}" ]; then
+                    printf '%s\n' "$2" >> "$MERGE_GATES_STUB_ANN_URL_FILE"
+                fi
+                if [ -n "${MERGE_GATES_STUB_ANN_FAIL_FIRST:-}" ]; then
+                    _n=$(( $(cat "$MERGE_GATES_STUB_ANN_FAIL_FIRST_FILE" 2>/dev/null || echo 0) + 1 ))
+                    printf '%s' "$_n" > "$MERGE_GATES_STUB_ANN_FAIL_FIRST_FILE"
+                    if [ "$_n" -le "$MERGE_GATES_STUB_ANN_FAIL_FIRST" ]; then
+                        echo "gh: stub annotations transient error" >&2; exit 1
+                    fi
+                fi
+                if [ -n "${MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS_JSON:-}" ]; then
+                    _filter=""; _prev=""
+                    for _a in "$@"; do
+                        if [ "$_prev" = "--jq" ]; then _filter="$_a"; break; fi
+                        _prev="$_a"
+                    done
+                    printf '%s' "$MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS_JSON" \
+                        | "${MERGE_GATES_STUB_JQ:-jq}" -r "${_filter:-.}"; exit $?
+                fi
                 if [ -n "${MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS+x}" ]; then
                     printf '%s\n' "$MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS"; exit 0
                 fi
@@ -1818,13 +1842,16 @@ plan_lock_red_fixture() {
     [[ "$output" == *"1 fail"* ]]
     [[ "$output" == *"0 warn-downgraded"* ]]
     [[ "$output" == *"plan-lock-out-of-band present but NOT honoured"* ]]
-    [[ "$output" == *"plan-lock-disposition:<reason>"* ]]
+    [[ "$output" == *"plan-lock-disposition:<slug>"* ]]
     rm -f "$f"
 }
 
-@test "plan-lock-out-of-band + plan-lock-disposition label downgrades Plan-lock gate FAILURE -> WARN, gates pass" {
-    local f
-    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:docs-index-coordinated"}]')"
+@test "plan-lock-out-of-band + plan-lock-disposition label naming the colliding slug downgrades Plan-lock gate FAILURE -> WARN, gates pass" {
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/other-branch\t%s\tdocs-index\tdocs/plans/INDEX.md\n' "$(date -u +%s)" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:docs-index:coordinated"}]')"
     set_fixture "$f"
     run poll_merge_gates org repo 1
     [ "$status" -eq 0 ]
@@ -1836,7 +1863,10 @@ plan_lock_red_fixture() {
 }
 
 @test "plan-lock-out-of-band + plan-lock-disposition PR-body marker downgrades too (same shape as cr-disposition)" {
-    local f
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/other-branch\t%s\tgate-selftest-msys-execbit\tdocs/plans/INDEX.md\n' "$(date -u +%s)" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
     f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"}]' \
         $'## Intent\nx\n\nplan-lock-disposition: crossed gate-selftest-msys-execbit (lock orphaned by its merged PR)\n')"
     set_fixture "$f"
@@ -1918,8 +1948,13 @@ plan_lock_red_fixture() {
 
 PLANLOCK_COLLISION_ANN="plan-lock-gate: 'docs/plans/INDEX.md' overlaps the write set of plan-lock 'gate-selftest-msys-execbit', held by a different branch."
 
+# planlock_waived_fixture [<disposition label suffix>] [<PR body>] — the red
+# Plan-lock fixture with plan-lock-out-of-band plus a plan-lock-disposition
+# label (default suffix "coordinated", which names no lock slug).
 planlock_waived_fixture() {
-    plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:coordinated"}]'
+    plan_lock_red_fixture \
+        "$(jq -cn --arg d "plan-lock-disposition:${1:-coordinated}" '[{name:"plan-lock-out-of-band"},{name:$d}]')" \
+        "${2:-}"
 }
 
 @test "stale Plan-lock red (colliding lock now past the 14-day cutoff) -> override REFUSED, 'stale red -  re-run'" {
@@ -1943,13 +1978,13 @@ planlock_waived_fixture() {
     rm -f "$f"
 }
 
-@test "live Plan-lock collision on re-check -> override + disposition still honoured" {
+@test "live Plan-lock collision on re-check -> override + disposition naming its slug still honoured" {
     local f rows="$BATS_TEST_TMPDIR/lock-rows"
     printf 'claude/other-branch\t%s\tsanitizer-nightly-run-tests\tdocs/plans/INDEX.md\n' \
         "$(date -u +%s)" > "$rows"
     export LTC_ROWS_OVERRIDE="$rows"
     export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
-    f="$(planlock_waived_fixture)"
+    f="$(planlock_waived_fixture sanitizer-nightly-run-tests)"
     set_fixture "$f"
     run poll_merge_gates org repo 1
     [ "$status" -eq 0 ]
@@ -1975,17 +2010,19 @@ planlock_waived_fixture() {
     rm -f "$f"
 }
 
-@test "Plan-lock re-check inputs unavailable (PR diff fails) -> WARN, override + disposition stands" {
-    # Never refuse on unverified evidence: only a positively clean re-check
-    # turns the override down.
+@test "Plan-lock re-check inputs unavailable (PR diff fails) -> WARN, slugs from the run's annotations, named override stands" {
+    # The stale-red rule never refuses on unverified evidence; the slug rule
+    # falls back to the red run's annotations for the colliding slugs.
     local f
     export MERGE_GATES_STUB_PR_DIFF="fail"
-    f="$(planlock_waived_fixture)"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="$PLANLOCK_COLLISION_ANN"
+    f="$(planlock_waived_fixture gate-selftest-msys-execbit)"
     set_fixture "$f"
     run poll_merge_gates org repo 1
     [ "$status" -eq 0 ]
     [[ "$output" == *"GATES_PASSED"* ]]
     [[ "$output" == *"could not re-evaluate the Plan-lock gate red"* ]]
+    [[ "$output" == *"downgraded=Plan-lock gate"* ]]
     rm -f "$f"
 }
 
@@ -2093,7 +2130,7 @@ planlock_fork_sandbox() {
     clone="$(planlock_fork_sandbox)"
     export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
     export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="$PLANLOCK_COLLISION_ANN"
-    f="$(planlock_waived_fixture)"
+    f="$(planlock_waived_fixture live-lock)"
     set_fixture "$f"
     PC_PROJECT_ROOT="$clone" run poll_merge_gates org Smatchet 1
     [ "$status" -eq 0 ]
@@ -2106,18 +2143,329 @@ planlock_fork_sandbox() {
     rm -f "$f"
 }
 
-@test "Plan-lock re-check with no remote for the base repo -> WARN, override stands (lock state undetermined)" {
+@test "Plan-lock re-check with no remote for the base repo -> WARN, annotation-named override stands (lock state undetermined)" {
     local f clone
     clone="$(planlock_fork_sandbox)"
     export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
     export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="$PLANLOCK_COLLISION_ANN"
-    f="$(planlock_waived_fixture)"
+    f="$(planlock_waived_fixture gate-selftest-msys-execbit)"
     set_fixture "$f"
     PC_PROJECT_ROOT="$clone" run poll_merge_gates elsewhere Smatchet 1
     [ "$status" -eq 0 ]
     [[ "$output" == *"GATES_PASSED"* ]]
     [[ "$output" == *"no git remote of this checkout points at elsewhere/Smatchet"* ]]
     rm -f "$f"
+}
+
+# Per-slug disposition rule: a plan-lock-out-of-band waiver stands only when
+# every lock slug the Plan-lock gate currently reports as colliding is named by
+# its own plan-lock-disposition (label or PR-body line). The slug set comes
+# from the re-check (plan_lock_gate_decide on the current lock table), with the
+# red run's annotations as the fallback; an unlearnable set refuses (fail closed).
+
+planlock_two_lock_rows() {
+    local rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/a\t%s\tdocs-index\tdocs/plans/INDEX.md\nclaude/b\t%s\tagents-core\tagents/core/\n' \
+        "$(date -u +%s)" "$(date -u +%s)" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF=$'docs/plans/INDEX.md\nagents/core/architect.md'
+}
+
+@test "plan-lock slugs: two colliding locks, a disposition naming only one -> waiver REFUSED, the unnamed slug named" {
+    local f
+    planlock_two_lock_rows
+    f="$(planlock_waived_fixture docs-index)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"no plan-lock-disposition names the colliding lock slug(s): agents-core."* ]]
+    [[ "$output" == *"colliding now: agents-core docs-index"* ]]
+    [[ "$output" == *"1 fail"* ]]
+    [[ "$output" == *"0 warn-downgraded"* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: every colliding slug named (a label + a body line) -> waiver honoured" {
+    local f
+    planlock_two_lock_rows
+    f="$(planlock_waived_fixture docs-index \
+        $'## Intent\nx\n\n- plan-lock-disposition: agents-core (the lock covers a different file in that dir)\n')"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"downgraded=Plan-lock gate"* ]]
+    [[ "$output" != *"no plan-lock-disposition names"* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: a slug is named only as a whole word (docs-index-v2 does not name docs-index)" {
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/a\t%s\tdocs-index\tdocs/plans/INDEX.md\n' "$(date -u +%s)" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    f="$(planlock_waived_fixture docs-index-v2)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"names the colliding lock slug(s): docs-index."* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: no collision means no waiver is needed (green Plan-lock gate, no labels -> pass)" {
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/a\t%s\tdocs-index\tdocs/plans/INDEX.md\n' "$(date -u +%s)" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="README.md"
+    f="$(fixture_override "$FIXTURES_DIR/merge_gates_pass.json" \
+        "data.repository.pullRequest.commits.nodes.0.commit.statusCheckRollup.contexts.nodes" \
+        '[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","isRequired":true},{"__typename":"CheckRun","name":"Plan-lock gate","status":"COMPLETED","conclusion":"SUCCESS","isRequired":false}]')"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"0 warn-downgraded"* ]]
+    [[ "$output" != *"plan-lock"* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: an unlearnable slug set (no re-check, unreadable annotations) refuses the waiver (fail closed)" {
+    local f
+    export MERGE_GATES_STUB_PR_DIFF="fail"
+    f="$(planlock_waived_fixture gate-selftest-msys-execbit)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"could not be determined"* ]]
+    [[ "$output" == *"annotations are unreadable"* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: annotations at GitHub's per-step cap may be truncated -> waiver refused" {
+    local f i ann=""
+    export MERGE_GATES_STUB_PR_DIFF="fail"
+    for i in 0 1 2 3 4 5 6 7 8 9; do
+        ann+="plan-lock-gate: 'docs/f$i.md' overlaps the write set of plan-lock 'gate-selftest-msys-execbit', held by a different branch."$'\n'
+    done
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="${ann%$'\n'}"
+    f="$(planlock_waived_fixture gate-selftest-msys-execbit)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"may be truncated"* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: annotations are read 100 per page, and a full page may be truncated -> waiver refused" {
+    local f page
+    export MERGE_GATES_STUB_PR_DIFF="fail"
+    export MERGE_GATES_STUB_ANN_URL_FILE="$BATS_TEST_TMPDIR/ann-urls"
+    # A full page of 100: one named collision line plus 99 runner warnings.
+    page="$(jq -cn '[{annotation_level: "failure",
+        message: "plan-lock-gate: '"'"'docs/a.md'"'"' overlaps the write set of plan-lock '"'"'gate-selftest-msys-execbit'"'"', held by a different branch."}]
+        + [range(99) | {annotation_level: "warning", message: "runner warning"}]')"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS_JSON="$page"
+    f="$(planlock_waived_fixture gate-selftest-msys-execbit)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"fill a whole page, so the list may be truncated"* ]]
+    grep -q 'annotations?per_page=100$' "$MERGE_GATES_STUB_ANN_URL_FILE"
+    # One item short of a full page is read in full: the named slug's waiver stands.
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS_JSON="$(jq -c '.[:99]' <<<"$page")"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: an unreadable annotation read is not cached; the next poll reads them again" {
+    local f
+    export MERGE_GATES_STUB_PR_DIFF="fail"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="$PLANLOCK_COLLISION_ANN"
+    export MERGE_GATES_STUB_ANN_FAIL_FIRST_FILE="$BATS_TEST_TMPDIR/ann-reads"
+    export MERGE_GATES_STUB_ANN_URL_FILE="$BATS_TEST_TMPDIR/ann-urls"
+    f="$(planlock_waived_fixture gate-selftest-msys-execbit)"
+    set_fixture "$f"
+    # Count the annotation reads one poll makes, then fail exactly that many:
+    # the first poll's reads all fail, the second poll's succeed.
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    export MERGE_GATES_STUB_ANN_FAIL_FIRST="$(grep -c . "$MERGE_GATES_STUB_ANN_URL_FILE")"
+    export MERGE_GATES_MAX_POLLS=2
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"annotations are unreadable"* ]]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    unset MERGE_GATES_MAX_POLLS
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: a path whose %0A became a newline in the annotation still yields its slug" {
+    local f page
+    export MERGE_GATES_STUB_PR_DIFF="fail"
+    # The runner unescapes %0A in a workflow-command message, so the stored
+    # annotation carries a real newline inside the quoted path.
+    page="$(jq -cn '[{annotation_level: "failure",
+        message: "plan-lock-gate: '"'"'Source/Sync/a\nb.cpp'"'"' overlaps the write set of plan-lock '"'"'sync-rework'"'"', held by a different branch."}]')"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS_JSON="$page"
+    f="$(planlock_waived_fixture coordinated)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no plan-lock-disposition names the colliding lock slug(s): sync-rework."* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: only a disposition's subject names a slug, never a word in its why-part" {
+    local f
+    export MERGE_GATES_STUB_PR_DIFF="fail"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="plan-lock-gate: 'a' overlaps the write set of plan-lock 'tracker-refactor', held by a different branch.
+plan-lock-gate: 'b' overlaps the write set of plan-lock 'docs', held by a different branch."
+    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"}]' \
+        "plan-lock-disposition: tracker-refactor — only touches docs/plans/INDEX.md")"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no plan-lock-disposition names the colliding lock slug(s): docs."* ]]
+    rm -f "$f"
+    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"}]' \
+        "plan-lock-disposition: tracker-refactor, docs — only touches docs/plans/INDEX.md")"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    rm -f "$f"
+}
+
+@test "planlock_disposition_subjects uses only engine-neutral regex classes (jq and gh's gojq must cut alike)" {
+    # Oniguruma jq reads [[:space:]] and [[:cntrl:]] Unicode-wide; gh's RE2-based
+    # gojq reads them ASCII-only. The poller can run on either engine, the
+    # aggregate and the admin path on jq, so the def must spell its classes out.
+    local def
+    def="$(printf '%s\n' "$_MG_JQ_DISPOSITION_DEF" | sed -n '/^def planlock_disposition_subjects/,/;$/p')"
+    [ -n "$def" ]
+    [[ "$def" != *"[[:space:]]"* ]]
+    [[ "$def" != *"[[:blank:]]"* ]]
+    # [[:cntrl:]] appears only with the C1 range spelled out beside it.
+    [[ "$def" != *'[[:cntrl:]]'* ]]
+    [[ "$def" == *'[[:cntrl:]\u0080-\u009f]'* ]]
+}
+
+@test "planlock_disposition_subjects cuts alike under jq and gojq" {
+    local gojq b j g
+    gojq="${MERGE_GATES_TEST_GOJQ:-$(command -v gojq || true)}"
+    [ -n "$gojq" ] || [ ! -x "$HOME/go/bin/gojq" ] || gojq="$HOME/go/bin/gojq"
+    [ -n "$gojq" ] || skip "no gojq (gh's jq engine) on PATH; set MERGE_GATES_TEST_GOJQ to run it"
+    for b in \
+        "$(printf 'plan-lock-disposition: tracker-refactor\302\240\342\200\224 only touches docs/plans/INDEX.md')" \
+        "$(printf 'plan-lock-disposition: tracker-refactor\302\205\342\200\224 only touches docs')" \
+        "$(printf 'plan-lock-disposition: a, b \342\200\223 why docs')" \
+        'plan-lock-disposition: p -- q docs' 'plan-lock-disposition: m (n docs)' 'plan-lock-disposition: k - l docs'; do
+        j="$(jq -rn --arg b "$b" "$_MG_JQ_DISPOSITION_DEF"' planlock_disposition_subjects(["plan-lock-disposition:x:docs"]; $b)')"
+        g="$("$gojq" -rn --arg b "$b" "$_MG_JQ_DISPOSITION_DEF"' planlock_disposition_subjects(["plan-lock-disposition:x:docs"]; $b)')"
+        [ "$j" = "$g" ]
+        [[ "$j" != *docs* ]]
+    done
+}
+
+@test "planlock_disposition_subjects cuts each reason at its first spaced dash, colon or parenthesis" {
+    local out
+    out="$(jq -rn "$_MG_JQ_DISPOSITION_DEF"' planlock_disposition_subjects(
+        ["plan-lock-disposition:docs-index:coordinated", "plan-lock-disposition:a-b"];
+        "plan-lock-disposition: x-y — why docs\nplan-lock-disposition: p -- q\nplan-lock-disposition: m (n)\nplan-lock-disposition: k - l")')"
+    [ "$out" = "docs-index a-b  x-y  p  m   k" ]
+    # A no-break space before the dash (macOS Option-Space, rich-text paste)
+    # is folded to ASCII first, so jq and gh's gojq cut the same way.
+    out="$(jq -rn --arg b "$(printf 'plan-lock-disposition: tracker-refactor\302\240\342\200\224 only touches docs/plans/INDEX.md')" \
+        "$_MG_JQ_DISPOSITION_DEF"' planlock_disposition_subjects([]; $b)')"
+    [ "$out" = " tracker-refactor" ]
+}
+
+@test "plan-lock slugs: a path spelling out the collision phrase cannot substitute its own slug" {
+    # The slug is read from the LAST phrase in the line: the gate template never
+    # repeats it after the slug, so a crafted path's decoy slug is ignored.
+    local f
+    export MERGE_GATES_STUB_PR_DIFF="fail"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="plan-lock-gate: 'x' overlaps the write set of plan-lock 'decoy', held by a different branch.y' overlaps the write set of plan-lock 'real-lock', held by a different branch. File or extend a lock."
+    f="$(planlock_waived_fixture decoy)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"names the colliding lock slug(s): real-lock."* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: an infrastructure-only red names no slug, so a disposition saying why stands" {
+    # The documented escape for an infra red (lock table unreadable in CI):
+    # with no collision line there is no slug to name.
+    local f
+    export MERGE_GATES_STUB_PR_DIFF="fail"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="plan-lock-gate: origin/develop does not resolve (shallow checkout or a missing 'git fetch origin develop')."
+    f="$(planlock_waived_fixture refs-locks-fetch-broken-in-ci)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"downgraded=Plan-lock gate"* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: an ambiguous re-check is never resolved from infrastructure-only annotations (waiver refused)" {
+    # The re-check RAN and found a live collision whose gate line names a lock
+    # slug outside the grammar (a legacy lock). That is a finding about the
+    # current table, not a missing input: the red run's infra-only annotations
+    # (which name no slug) must not stand in for it, or any disposition passes.
+    local f rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/other-branch\t%s\tLegacy_Lock\tdocs/plans/INDEX.md\n' "$(date -u +%s)" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows"
+    export MERGE_GATES_STUB_PR_DIFF="docs/plans/INDEX.md"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="plan-lock-gate: origin/develop does not resolve (shallow checkout or a missing 'git fetch origin develop')."
+    f="$(planlock_waived_fixture legacy_lock-coordinated)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"could not be determined"* ]]
+    [[ "$output" == *"ambiguous"* ]]
+    [[ "$output" == *"0 warn-downgraded"* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: _mg_planlock_colliding_slugs passes an ambiguous re-check through as unknown, never reading annotations" {
+    # A gh stub that would serve infra-only annotations is on PATH; the helper
+    # must not consult it for an ambiguous re-check.
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="plan-lock-gate: origin/develop does not resolve."
+    run _mg_planlock_colliding_slugs org repo abc123 "ambiguous (a bad line)"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "unknown (the re-check judged a current Plan-lock gate line ambiguous (a bad line)"* ]]
+    run _mg_planlock_colliding_slugs org repo abc123 "unknown"
+    [ "$output" = "complete" ]
+}
+
+@test "plan-lock slug helpers: gate-line parsing and whole-word naming" {
+    local out
+    out="$(printf '%s\n' \
+        "::error file=a::plan-lock-gate: 'a' overlaps the write set of plan-lock 'zeta', held by a different branch. Override ..." \
+        "::error file=b::plan-lock-gate: 'b' overlaps the write set of plan-lock 'alpha', held by a different branch." \
+        "::error file=c::plan-lock-gate: 'c' overlaps the write set of plan-lock 'alpha', held by a different branch." \
+        | _mg_planlock_gate_slugs recheck)"
+    [ "$out" = "complete alpha zeta" ]
+    out="$(printf '%s\n' \
+        "::error file=a::plan-lock-gate: 'a' overlaps the write set of plan-lock 'zeta', held by a different branch." \
+        "::error file=b::plan-lock-gate: lock table unavailable/undetermined (rc=2) while evaluating 'b'; the fail-closed gate refuses to pass on an unverifiable lock state." \
+        | _mg_planlock_gate_slugs recheck)"
+    [ "$out" = "partial zeta" ]
+    out="$(printf '%s\n' "plan-lock-gate: 'a' overlaps the write set of plan-lock 'Bad_Slug', held by a different branch." \
+        | _mg_planlock_gate_slugs annotations)"
+    [[ "$out" == "ambiguous "* ]]
+    out="$(printf 'runner warning\n' | _mg_planlock_gate_slugs annotations)"
+    [[ "$out" == "unknown "* ]]
+    [ "$(_mg_planlock_unnamed_slugs 'Docs-Index: ok; (agents-core)' docs-index agents-core)" = "" ]
+    [ "$(_mg_planlock_unnamed_slugs 'docs-index-v2 / xdocs-index' docs-index)" = "docs-index" ]
+    [ "$(_mg_planlock_unnamed_slugs '' a-lock)" = "a-lock" ]
 }
 
 @test "a cr-disposition does NOT satisfy the plan-lock disposition trail (trails are per-override)" {
@@ -3971,8 +4319,8 @@ blocked_with_bot_threads() {
 }
 
 @test "Bugbot (9) field-count guard fires on a mis-sized tuple (fail-closed canary)" {
-    # An embedded newline in a tuple field inflates the field count past 43; the
-    # -ne 43 fail-closed assertion must catch it (the tuple-order regression guard
+    # An embedded newline in a tuple field inflates the field count past 44; the
+    # -ne 44 fail-closed assertion must catch it (the tuple-order regression guard
     # that the appended Bugbot + selfImpOnly + pureDocs/crRateLimited/crDisposition
     # + thread-count + stale-override + dup-masked fields rely on).
     local f
@@ -3982,7 +4330,7 @@ blocked_with_bot_threads() {
     set_fixture "$f"
     run poll_merge_gates org repo 1
     [ "$status" -ne 0 ]
-    [[ "$output" == *"expected 43"* ]]
+    [[ "$output" == *"expected 44"* ]]
     [[ "$output" != *"GATES_PASSED"* ]]
     rm -f "$f"
 }

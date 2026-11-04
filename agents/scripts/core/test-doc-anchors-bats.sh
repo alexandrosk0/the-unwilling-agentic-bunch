@@ -8,8 +8,11 @@
 # --selftest passes and never touches the caller's repository when a git hook
 # has exported GIT_DIR; a path-qualified leaf reference resolves against that
 # leaf (and a wrong section fails); a file-relative reference resolves against
-# the sibling leaf. Emits the canonical `Passed: N  Failed: M` line test-all.sh
-# greps.
+# the sibling leaf; a citation of any other markdown file resolves against that
+# file's own headings, and a wrong one fails; a bare rule-doc basename resolves
+# in the layer's docs/agent-rules/ or docs/guides/ (or the host's docs/guides/),
+# against every candidate when several answer. Emits the canonical
+# `Passed: N  Failed: M` line test-all.sh greps.
 #
 # Exit codes follow the test-script convention (see the test-all.sh header):
 #   0 — every bats test passed

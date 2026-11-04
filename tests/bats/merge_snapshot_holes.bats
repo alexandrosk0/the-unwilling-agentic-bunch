@@ -11,6 +11,9 @@
 # (the appender's own seam), and "now" is pinned with
 # MERGE_SNAPSHOT_HOLES_NOW_EPOCH = 2026-10-04T12:00:00Z.
 #
+# The tail of the file pins merge-snapshot-append.sh's gatesVerdict token
+# check, the ledger's writer-side contract.
+#
 # Requires: bash, jq (on PATH), bats.
 # ----------------------------------------------------------------------------
 
@@ -218,4 +221,54 @@ JSON
 @test "the SessionStart template wires --nudge" {
     # The template launches SessionStart scripts through layer-run.sh: `layer-run.sh" agents/scripts/core/<script> --nudge`.
     grep -q 'agents/scripts/core/merge-snapshot-holes.sh --nudge' "$REPO_ROOT/docs/harness/claude-code/settings.json.tmpl"
+}
+
+@test "a GATES_SKIPPED or unfamiliar-verdict row is a row, not a hole (the detector never reads the verdict)" {
+    page 1 <<'JSON'
+[{"number":2251,"merged_at":"2026-10-04T11:00:00Z","updated_at":"2026-10-04T11:00:05Z"},
+ {"number":2250,"merged_at":"2026-10-04T10:00:00Z","updated_at":"2026-10-04T10:00:05Z"}]
+JSON
+    printf '%s\n' '{"pr":2251,"mergeCommit":"m1","gates":"GATES_SKIPPED"}' \
+        '{"pr":2250,"mergeCommit":"m0","gates":"GATES_FUTURE_TOKEN"}' > "$MERGE_SNAPSHOT_LEDGER"
+    run bash "$SCRIPT" --list
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"merge-snapshot hole"* ]]
+    [[ "$output" == *"no ledger holes"* ]]
+}
+
+# ---------- merge-snapshot-append.sh: the gatesVerdict token check ----------
+# The appender shares this file's ledger seam (MERGE_SNAPSHOT_LEDGER), so its
+# verdict-token validation is pinned here beside the ledger's other reader.
+
+append_row() {
+    SNAPSHOT_REQUIRED_CONTEXTS="" bash "$REPO_ROOT/agents/scripts/core/merge-snapshot-append.sh" "$@"
+}
+
+@test "append: GATES_SKIPPED is a canonical verdict (written, no WARN)" {
+    run append_row 2401 m2401 h2401 GATES_SKIPPED "" "" orchestrator-automerge
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(jq -r '.gates' "$MERGE_SNAPSHOT_LEDGER")" = "GATES_SKIPPED" ]
+}
+
+@test "append: a malformed verdict is refused (exit 2, no row)" {
+    run append_row 2402 m2402 h2402 gates_passed "" "" orchestrator
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"UPPER_SNAKE token"* ]]
+    run append_row 2402 m2402 h2402 "GATES PASSED" "" "" orchestrator
+    [ "$status" -eq 2 ]
+    [ ! -s "$MERGE_SNAPSHOT_LEDGER" ]
+}
+
+@test "append: a well-formed unknown verdict is written with a WARN (fail open: a row beats a hole)" {
+    run append_row 2403 m2403 h2403 GATES_SOMETHING_NEW "" "" orchestrator
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"not a canonical token"* ]]
+    [ "$(jq -r '.gates' "$MERGE_SNAPSHOT_LEDGER")" = "GATES_SOMETHING_NEW" ]
+}
+
+@test "append: --selftest passes (covers the verdict check)" {
+    run bash "$REPO_ROOT/agents/scripts/core/merge-snapshot-append.sh" --selftest
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"merge-snapshot-append --selftest: PASS"* ]]
 }

@@ -28,20 +28,41 @@
 # A label's reason must start right after the colon, neither blank nor `<`.
 # The body is split into lines before the match, so a blank marker never
 # borrows the next line as its reason. The host's CR finding gate applies the
-# same rule. (NB: no apostrophes in these single-quoted jq strings.)
+# same rule. disposition_reasons() returns the accepted reasons themselves
+# (label suffixes first, then body-marker remainders), so a caller can check
+# WHAT a trail names (the plan-lock slug check); disposition() is "any reason
+# accepted" over the same reader, and planlock_disposition_subjects() is the
+# SUBJECT of each plan-lock reason (the slug list it opens with, cut at the
+# first spaced dash, `:` or `(`), control-free and space-joined: the input
+# every merge actor hands to _mg_planlock_slug_report. Control characters
+# (C0 and C1, spelled out: RE2's [[:cntrl:]] is ASCII-only) and Unicode spaces
+# such as a no-break space are folded to ASCII before the cut, and the cut's
+# separator class is ASCII, so Oniguruma jq and gh's RE2-based gojq cut a
+# reason the same way. Only the subject names
+# a slug, so a path or word in the why-part of one slug's line (`... touches
+# docs/plans/INDEX.md`) never names a lock called `docs`. (NB: no apostrophes
+# in these single-quoted jq strings.)
 # shellcheck disable=SC2016  # single-quoted jq literal — $-refs are jq vars, not bash
 _MG_JQ_DISPOSITION_DEF='
-def disposition($labels; $body; $prefix):
+def disposition_reasons($labels; $body; $prefix):
   def _reason_filled:
     gsub("^[[:space:]]+|[[:space:]]+$"; "") as $r
     | ($r | length) > 0 and ($r | startswith("<") | not);
   ("^[[:blank:]]*([-*][[:blank:]]+)?" + $prefix + ":") as $lead
-  | ($labels | any(startswith($prefix + ":")
-                   and (.[(($prefix | length) + 1):] | test("^[^[:space:]<]"))))
-    or (($body // "")
-        | gsub("<!--[\\s\\S]*?-->"; "") | gsub("<!--[\\s\\S]*$"; "")
-        | [splits("\r?\n")]
-        | any(test($lead; "i") and (sub($lead; ""; "i") | _reason_filled)));
+  | [ ($labels[] | select(startswith($prefix + ":"))
+       | .[(($prefix | length) + 1):] | select(test("^[^[:space:]<]"))),
+      (($body // "")
+       | gsub("<!--[\\s\\S]*?-->"; "") | gsub("<!--[\\s\\S]*$"; "")
+       | splits("\r?\n")
+       | select(test($lead; "i")) | sub($lead; ""; "i") | select(_reason_filled)) ];
+def disposition($labels; $body; $prefix):
+  disposition_reasons($labels; $body; $prefix) | length > 0;
+def planlock_disposition_subjects($labels; $body):
+  disposition_reasons($labels; $body; "plan-lock-disposition")
+  | map(gsub("[[:cntrl:]\u0080-\u009f]"; " ")
+        | gsub("[\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"; " ")
+        | sub("([ \t]+(\u2014|\u2013|--?)[ \t]|[:(]).*$"; ""))
+  | join(" ");
 '
 
 # shellcheck disable=SC2016  # single-quoted jq literal — $-refs are jq vars, not bash
@@ -519,6 +540,11 @@ _MG_GATE_FILTER_TEMPLATE="$_MG_JQ_DISPOSITION_DEF"'
     # crManualOnly — head CodeRabbit status is the OSS manual-trigger skip
     ($crmanualonly | tostring),
     # crRunClean — the newest coderabbitai CodeRabbit check run on the head is SUCCESS
-    ($crrunclean | tostring)
+    ($crrunclean | tostring),
+    # planLockReasons — every accepted plan-lock-disposition reason, control
+    # characters blanked and space-joined, behind an "r:" sentinel so the last
+    # field is never empty. Read by the plan-lock slug check (a waiver needs a
+    # reason naming each colliding lock slug).
+    ("r:" + planlock_disposition_subjects($labels; $pr.body))
   )
 '

@@ -20,6 +20,23 @@ Strategy:
      file's headings only. The root contract (this tree's AGENTS.md, the host's,
      the agent-layer/ mount's) and a path naming no existing file keep step 1's
      shared anchor set.
+  6. Any other markdown citation — `<path>.md § <heading>`, with or without the
+     backticks, or a `[label](<path>.md) § <heading>` link — resolves against
+     THAT file's headings + bold-prefix paragraphs, with step 3's matching. The
+     path is tried relative to the scan root and to the citing file (the citing
+     file first for `./`, `../`, a link href and a bare basename); an
+     `agent-layer/` prefix names
+     the layer tree this checker reads its anchors from (then the scan root's
+     own agent-layer/ mount); an unprefixed path missing from the scan root is
+     also tried in the layer tree (a host doc citing docs/agent-rules/<x>.md).
+     A bare basename (no `/`, not a link href) that names no sibling and no root
+     file is looked up in the rule-doc directories: the layer's docs/agent-rules/
+     and docs/guides/, and, from a host, the host's docs/guides/. When several
+     files answer to the name (a sibling and a root README.md, or the same
+     basename in two rule-doc directories) the citation resolves against all of
+     them: an ambiguous path never fails a section any candidate has.
+     A path that names no existing file is skipped and counted, never failed:
+     a dangling path is test-markdown-links.sh's finding, not this one.
 
 Bucket A (CLI). Zero manual steps. Invoked from agents/scripts/core/test-doc-anchors.sh,
 which runs --selftest (synthetic tree, asserts a pass and a failure) first.
@@ -68,11 +85,21 @@ EXCLUDE_GLOBS = (
     # Rotated monthly partitions of applied.md (rotate-applied-md.sh): the same
     # archive, so the same stale-section-reference expectation applies.
     ":(exclude)docs/self-improvement/categories/applied-*.md",
+    # Shipped plans are frozen history (test-markdown-links.sh excludes them for
+    # the same reason): a section their prose cited has since been renamed, and
+    # nobody acts on a shipped plan's pointers.
+    ":(exclude)docs/plans/shipped/**",
+    ":(exclude)docs/plans/active/applied/**",
 )
 
-# The optional group captures a path prefix ("Source/Core/src/Ui/"), so a
-# reference can name the AGENTS.md it means; see step 5 of the module doc.
-REFERENCE_RE = re.compile(r"((?:[\w.\-]+/)*)AGENTS\.md\s*§\s*(.+)")
+# A markdown path immediately followed (after an optional closing backtick and/or
+# link paren) by the section sign. Group 1 is the path; group 2 is the closing
+# punctuation, so a link href (`)`) can be told apart from a bare or backticked
+# path. AGENTS.md citations keep steps 1-5; any other .md is step 6. The section
+# name is the text after the match, cut at TERMINATOR_CHARS. One line may carry
+# several citations, so this is iterated, not searched once.
+REFERENCE_RE = re.compile(r"(?<![\w./\-])((?:[\w.\-]+/)*[\w.\-]+\.md)(`?\)?|\)?`?)\s*§\s*(?=[A-Za-z])")
+AGENT_LAYER_PREFIX = "agent-layer/"
 
 # Terminators that end a section-name reference: opening + closing punctuation,
 # quotes, brackets, markdown-table pipes. Section names never contain these.
@@ -99,6 +126,25 @@ def shared_anchor_files(repo_root: Path) -> list[Path]:
     return [repo_root / "AGENTS.md"] + sorted((repo_root / "docs" / "agent-rules").glob("*.md"))
 
 
+def name_variants(name: str) -> list[str]:
+    """The names a heading or bold label is cited by: the full text, plus the text
+    without parenthetical asides ("Remote-container (cloud sandbox) bootstrap" is
+    cited as "Remote-container bootstrap"), without a leading list number ("7.
+    Gate-check vs baseline"), and the head before an em-dash subtitle ("PR batching
+    — logical-feature granularity" is cited as "PR batching"), and the text without
+    code-span backticks (a backtick ends a cited name, so "The `405 ... is
+    cancelled` recovery" can only be cited as "The 405 ..."). Each variant only
+    adds a way to RESOLVE, so the set can only become more lenient, never stricter.
+    """
+    out = [name]
+    bare = re.sub(r"\s+", " ", re.sub(r"\s*\([^()]*\)", "", name)).strip().rstrip(".:").strip()
+    bare = re.sub(r"^\d+[.)]\s+", "", bare)
+    for cand in (bare, bare.split(" — ", 1)[0].strip(), name.replace("`", "").strip()):
+        if cand and cand not in out:
+            out.append(cand)
+    return out
+
+
 def collect_anchors(files: list[Path]) -> list[str]:
     """Return the union of headings + bold-prefix paragraph names in `files`."""
     anchors: set[str] = set()
@@ -106,8 +152,16 @@ def collect_anchors(files: list[Path]) -> list[str]:
     # Bold-prefix paragraphs — match `**Name**` at the start of a line / bullet /
     # numbered item. Tolerates trailing ` (...)` / ` —` / `:` because AGENTS.md
     # uses `**Available libs** (FetchContent, linked):` style.
+    # A `> ` blockquote marker is allowed in front: a callout's bold label is a
+    # paragraph name like any other.
     bold_prefix_re = re.compile(
-        r"^\s*(?:[-*]|\d+\.)?\s*\*\*([A-Z][^*]+?)\*\*", re.MULTILINE
+        r"^\s*(?:>\s*)?(?:[-*]|\d+\.)?\s*\*\*([A-Z][^*]+?)\*\*", re.MULTILINE
+    )
+    # A bold label that opens with a code span — **`[pre-first-push gate]` (…)** —
+    # may start lower-case: the backticks make it a deliberate, distinctive name,
+    # not an emphasised word. The name is the code span's text.
+    code_label_re = re.compile(
+        r"^\s*(?:>\s*)?(?:[-*]|\d+\.)?\s*\*\*`\[?([^`\]]{3,}?)\]?`", re.MULTILINE
     )
     for f in files:
         try:
@@ -119,22 +173,35 @@ def collect_anchors(files: list[Path]) -> list[str]:
             # Strip trailing comment tokens like `<!-- tier: portable -->`.
             heading = re.sub(r"\s*<!--.*?-->\s*$", "", heading).strip()
             if heading:
-                anchors.add(heading)
-        for m in bold_prefix_re.finditer(text):
-            name = m.group(1).strip()
-            if name:
-                anchors.add(name)
+                anchors.update(name_variants(heading))
+        for regex in (bold_prefix_re, code_label_re):
+            for m in regex.finditer(text):
+                name = m.group(1).strip()
+                if name:
+                    anchors.update(name_variants(name))
     return sorted(anchors, key=len, reverse=True)  # Longest first for greedy match.
 
 
-def collect_references(scan_root: Path, env: dict[str, str] | None = None) -> list[tuple[str, str, int, str]]:
-    """Return [(extracted_name, file_path, line_number, path_prefix), ...]."""
+def section_name(raw: str) -> str:
+    """The section name at the start of `raw` (the text after the section sign)."""
+    # Stop at the first terminator character.
+    term = TERMINATOR_CHARS.search(raw)
+    if term:
+        raw = raw[: term.start()]
+    # Trim connective tail words like "gains a", "encoded as", etc.
+    return CONNECTIVE_TAIL_RE.sub("", raw).strip()
+
+
+def collect_references(scan_root: Path, env: dict[str, str] | None = None) -> list[tuple[str, str, int, str, bool]]:
+    """Return [(extracted_name, file_path, line_number, cited_md_path, is_link_href), ...]."""
     cmd = [
         "git",
+        "-c",
+        "core.quotePath=false",
         "grep",
         "-n",
         "-E",
-        r"AGENTS\.md\s*§\s*[A-Za-z]",
+        r"\.md`?\)?`?[[:space:]]*§[[:space:]]*[A-Za-z]",
         "--",
         *SCAN_GLOBS,
         *EXCLUDE_GLOBS,
@@ -145,7 +212,7 @@ def collect_references(scan_root: Path, env: dict[str, str] | None = None) -> li
         if exc.returncode == 1:
             return []  # No matches.
         raise
-    refs: list[tuple[str, str, int, str]] = []
+    refs: list[tuple[str, str, int, str, bool]] = []
     for line in out.splitlines():
         # Format: <file>:<line>:<content>
         try:
@@ -153,20 +220,10 @@ def collect_references(scan_root: Path, env: dict[str, str] | None = None) -> li
             line_no = int(line_no_str)
         except ValueError:
             continue
-        match = REFERENCE_RE.search(content)
-        if not match:
-            continue
-        prefix, raw = match.group(1), match.group(2)
-        # Stop at the first terminator character.
-        term = TERMINATOR_CHARS.search(raw)
-        if term:
-            raw = raw[: term.start()]
-        # Trim connective tail words like "gains a", "encoded as", etc.
-        raw = CONNECTIVE_TAIL_RE.sub("", raw)
-        # Final trim.
-        name = raw.strip()
-        if name:
-            refs.append((name, file_path, line_no, prefix))
+        for match in REFERENCE_RE.finditer(content):
+            name = section_name(content[match.end():])
+            if name:
+                refs.append((name, file_path, line_no, match.group(1), ")" in match.group(2)))
     return refs
 
 
@@ -191,6 +248,53 @@ def leaf_target(prefix: str, ref_file: str, scan_root: Path, root_contracts: set
         if candidate.is_file():
             return None if candidate in root_contracts else candidate
     return None
+
+
+def _inside(candidate: Path, roots: tuple[Path, ...]) -> bool:
+    return any(candidate == r or r in candidate.parents for r in roots)
+
+
+def cited_files(path: str, ref_file: str, is_href: bool, repo_root: Path, scan_root: Path) -> tuple[Path, ...]:
+    """The markdown file(s) a step-6 citation names; empty when no candidate exists.
+
+    Candidates must lie inside the scan root or the layer tree, so a `../` chain
+    can never resolve against an arbitrary file on the machine. A path with a
+    directory part names the first existing candidate. A bare basename names
+    every existing sibling / root candidate, else every existing rule-doc
+    directory candidate (module doc step 6); the caller resolves the section
+    against their union, so ambiguity can only make a citation pass.
+    """
+    scan = scan_root.resolve()
+    layer = repo_root.resolve()
+    file_dir = (scan / ref_file).parent
+
+    def existing(cands: list[Path]) -> list[Path]:
+        out: list[Path] = []
+        for cand in cands:
+            cand = cand.resolve()
+            if _inside(cand, (scan, layer)) and cand.is_file() and cand not in out:
+                out.append(cand)
+        return out
+
+    if path.startswith(AGENT_LAYER_PREFIX):
+        rest = path[len(AGENT_LAYER_PREFIX):]
+        return tuple(existing([layer / rest, scan / "agent-layer" / rest])[:1])
+    if path.startswith(("./", "../")) or ("/" in path and is_href):
+        return tuple(existing([file_dir / path, scan / path, layer / path])[:1])
+    if "/" in path:
+        return tuple(existing([scan / path, file_dir / path, layer / path])[:1])
+    # A bare basename: a script citing the README.md beside it means the sibling,
+    # a root contract the root file; one that names neither is a rule-doc
+    # shorthand (`process-rules.md`, `perf-workflow.md`). A link href is
+    # file-relative by markdown's rules, so it gets no rule-doc fallback.
+    found = existing([file_dir / path, scan / path, layer / path])
+    if not found and not is_href:
+        found = existing([
+            layer / "docs" / "agent-rules" / path,
+            layer / "docs" / "guides" / path,
+            scan / "docs" / "guides" / path,
+        ])
+    return tuple(found)
 
 
 def resolves(name: str, anchors: list[str]) -> str | None:
@@ -227,59 +331,74 @@ def run(repo_root: Path, scan_root: Path, env: dict[str, str] | None = None) -> 
     }
     refs = collect_references(scan_root, env)
 
-    # Dedup the references by (target leaf, extracted name) to keep the output
-    # compact while preserving one example file:line per broken name.
+    # Dedup the references by (target file, extracted name) to keep the output
+    # compact while preserving one example file:line per broken name. An empty
+    # target key is the shared AGENTS.md + docs/agent-rules/ anchor set.
     by_key: dict[tuple[str, str], tuple[str, int]] = {}
     leaves: dict[str, Path] = {}
-    for name, file_path, line_no, prefix in refs:
-        leaf = leaf_target(prefix, file_path, scan_root, root_contracts)
-        leaf_key = ""
-        if leaf is not None:
-            leaf_key = display_path(leaf, scan_root)
-            leaves[leaf_key] = leaf
-        by_key.setdefault((leaf_key, name), (file_path, line_no))
+    cited: dict[str, Path] = {}
+    unresolved_paths = 0
+    for name, file_path, line_no, path, is_href in refs:
+        target_key = ""
+        if path.rsplit("/", 1)[-1] == "AGENTS.md":
+            prefix = path[: -len("AGENTS.md")]
+            leaf = leaf_target(prefix, file_path, scan_root, root_contracts)
+            if leaf is not None:
+                target_key = display_path(leaf, scan_root)
+                leaves[target_key] = leaf
+        else:
+            found = cited_files(path, file_path, is_href, repo_root, scan_root)
+            if not found:
+                unresolved_paths += 1
+                continue
+            target_key = " or ".join(display_path(t, scan_root) for t in found)
+            cited[target_key] = list(found)
+        by_key.setdefault((target_key, name), (file_path, line_no))
+    targets: dict[str, list[Path]] = {**cited, **{k: [v] for k, v in leaves.items()}}
 
-    leaf_anchors: dict[str, list[str]] = {}
+    target_anchors: dict[str, list[str]] = {}
     failed: list[tuple[str, str, str, int]] = []
     resolved_count = 0
-    for (leaf_key, name), (file_path, line_no) in sorted(by_key.items()):
-        if leaf_key:
-            if leaf_key not in leaf_anchors:
-                leaf_anchors[leaf_key] = collect_anchors([leaves[leaf_key]])
-            candidates = leaf_anchors[leaf_key]
+    for (target_key, name), (file_path, line_no) in sorted(by_key.items()):
+        if target_key:
+            if target_key not in target_anchors:
+                target_anchors[target_key] = collect_anchors(targets[target_key])
+            candidates = target_anchors[target_key]
         else:
             candidates = anchors
         if resolves(name, candidates):
             resolved_count += 1
         else:
-            failed.append((leaf_key, name, file_path, line_no))
+            failed.append((target_key, name, file_path, line_no))
 
     total = len(by_key)
-    print("test-doc-anchors — cross-link audit for AGENTS.md sections")
+    print("test-doc-anchors — cross-link audit for <file>.md § <section> citations")
     print(f"  Anchor source: AGENTS.md + {len(anchor_files) - 1} file(s) under docs/agent-rules/"
-          f" + {len(leaves)} path-qualified subsystem leaf file(s)")
+          f" + {len(leaves)} path-qualified subsystem leaf file(s)"
+          f" + {len({f for fs in cited.values() for f in fs})} other cited markdown file(s)")
     print(f"  Distinct anchors:       {len(anchors)}")
     print(f"  Distinct references:    {total}")
     print(f"  Resolved:               {resolved_count}")
     print(f"  Broken:                 {len(failed)}")
+    print(f"  Skipped (path names no existing file): {unresolved_paths}")
 
     if failed:
         print()
         print(f"FAILED — {len(failed)} reference(s) name a section that doesn't")
         print("match any anchor in AGENTS.md or docs/agent-rules/*.md (or, for a")
-        print("path-qualified reference, in the subsystem leaf it names):")
-        for leaf_key, name, file_path, line_no in failed:
-            print(f"  - {name!r}" + (f" in {leaf_key}" if leaf_key else ""))
+        print("path-qualified reference, in the file it names):")
+        for target_key, name, file_path, line_no in failed:
+            print(f"  - {name!r}" + (f" in {target_key}" if target_key else ""))
             print(f"      first occurrence: {file_path}:{line_no}")
         print()
         print("Fix options:")
-        print("  1. Add the section to AGENTS.md or docs/agent-rules/<X>.md.")
+        print("  1. Add the section (a heading or a **Bold**: paragraph) to the cited file.")
         print("  2. Rename the reference to match an existing section name.")
-        print("  3. Update AGENTS.md redirect stub to mention the moved name.")
+        print("  3. Point the reference at the file the section moved to.")
         return 1
 
     print()
-    print("PASS — every AGENTS.md § <section> reference resolves.")
+    print("PASS — every <file>.md § <section> reference resolves.")
     return 0
 
 
@@ -294,7 +413,8 @@ def selftest() -> int:
         (root / "docs" / "agent-rules").mkdir(parents=True)
         (root / "Source" / "Core" / "src" / "Ui").mkdir(parents=True)
         (root / "AGENTS.md").write_text("# Root\n\n## Root rules\n", encoding="utf-8")
-        (root / "docs" / "agent-rules" / "shared.md").write_text("## Shared section\n", encoding="utf-8")
+        (root / "docs" / "agent-rules" / "shared.md").write_text(
+            "## Shared section\n\n## Rule doc only\n", encoding="utf-8")
         (root / "Source" / "Core" / "src" / "Ui" / "AGENTS.md").write_text(
             "# Ui\n\n## Grid\n\n**Docking**: rules.\n", encoding="utf-8")
         # The section sign is spliced in so this source file's own scan (it is a
@@ -304,7 +424,9 @@ def selftest() -> int:
             f"See AGENTS.md {sec} Root rules.\n"
             f"See Source/Core/src/Ui/AGENTS.md {sec} Grid.\n"
             f"See Source/Core/src/Ui/AGENTS.md {sec} Docking.\n"
-            f"See agent-layer/AGENTS.md {sec} Shared section.\n",
+            f"See agent-layer/AGENTS.md {sec} Shared section.\n"
+            f"See `docs/agent-rules/shared.md` {sec} Rule doc only.\n"
+            f"See [shared](agent-rules/shared.md) {sec} Shared section.\n",
             encoding="utf-8")
         # A file-relative reference resolves against the sibling leaf.
         (root / "Source" / "Core" / "src" / "Ui" / "README.md").write_text(
@@ -321,13 +443,25 @@ def selftest() -> int:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             broken = run(root, root, env)
+        # selftest: asserts-failure — a step-6 citation of a heading its file lacks
+        # must fail, though the shared anchor set has that heading (AGENTS.md).
+        (root / "docs" / "bad.md").write_text(
+            f"See `docs/agent-rules/shared.md` {sec} Root rules.\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, env=env)
+        buf6 = io.StringIO()
+        with contextlib.redirect_stdout(buf6):
+            broken6 = run(root, root, env)
     if clean != 0:
         print("test-doc-anchors --selftest: FAIL — a consistent tree reported broken references")
         return 1
     if broken != 1 or "in Source/Core/src/Ui/AGENTS.md" not in buf.getvalue():
         print("test-doc-anchors --selftest: FAIL — a leaf reference to a root-only section was not caught")
         return 1
-    print("test-doc-anchors --selftest: PASS — root, leaf and mount references resolve; a wrong leaf section fails.")
+    if broken6 != 1 or "'Root rules' in docs/agent-rules/shared.md" not in buf6.getvalue():
+        print("test-doc-anchors --selftest: FAIL — a <path>.md citation of a missing heading was not caught")
+        return 1
+    print("test-doc-anchors --selftest: PASS — root, leaf, mount and <path>.md references resolve;"
+          " a wrong leaf section and a wrong <path>.md section fail.")
     return 0
 
 

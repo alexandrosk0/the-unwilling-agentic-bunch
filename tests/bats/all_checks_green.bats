@@ -225,12 +225,17 @@ GREEN_EDIT='setrun("Bucket-E UI tests (Mesa headless GL)"; "success") | setstatu
     [ "$status" -eq 1 ]
 }
 
+# The red Plan-lock gate run's annotations: a collision on lock 'sibling-merged',
+# and an infrastructure-only red (no slug).
+PL_ANN_SIBLING='.planlock_annotations = ["plan-lock-gate: '"'"'docs/plans/INDEX.md'"'"' overlaps the write set of plan-lock '"'"'sibling-merged'"'"', held by a different branch."]'
+PL_ANN_INFRA='.planlock_annotations = ["plan-lock-gate: origin/develop does not resolve (shallow checkout or a missing '"'"'git fetch origin develop'"'"')."]'
+
 @test "plan-lock-out-of-band + a plan-lock-disposition (label or body) downgrades only the Plan-lock gate" {
-    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\", \"plan-lock-disposition:sibling-merged\"]"
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\", \"plan-lock-disposition:sibling-merged\"] | $PL_ANN_SIBLING"
     run bash "$ACG" --fixture "$SNAP"
     [ "$status" -eq 0 ]
     [[ "$output" == *"DOWNGRADED  Plan-lock gate (failure)"* ]]
-    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [{name: \"plan-lock-out-of-band\"}] | .body = \"- plan-lock-disposition: overlap is docs-only\""
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [{name: \"plan-lock-out-of-band\"}] | .body = \"- plan-lock-disposition: overlap is docs-only\" | $PL_ANN_INFRA"
     run bash "$ACG" --fixture "$SNAP"
     [ "$status" -eq 0 ]
     # An empty body marker is not a disposition.
@@ -240,6 +245,67 @@ GREEN_EDIT='setrun("Bucket-E UI tests (Mesa headless GL)"; "success") | setstatu
     replay final "$GREEN_EDIT | setrun(\"Pillar 2 scanner\"; \"failure\") | .labels = [\"plan-lock-out-of-band\", \"plan-lock-disposition:x\"]"
     run bash "$ACG" --fixture "$SNAP"
     [ "$status" -eq 1 ]
+}
+
+@test "plan-lock per-slug rule: a disposition that names no colliding slug leaves the Plan-lock red (poller parity)" {
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\", \"plan-lock-disposition:coordinated\"] | $PL_ANN_SIBLING"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"RED         Plan-lock gate (failure)"* ]]
+    [[ "$output" == *"no plan-lock-disposition names the colliding lock slug(s): sibling-merged."* ]]
+    # Two colliding slugs, one named: still red; both named: downgraded.
+    local two='.planlock_annotations = ["plan-lock-gate: '"'"'a'"'"' overlaps the write set of plan-lock '"'"'docs-index'"'"', held by a different branch.", "plan-lock-gate: '"'"'b'"'"' overlaps the write set of plan-lock '"'"'agents-core'"'"', held by a different branch."]'
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\", \"plan-lock-disposition:docs-index\"] | $two"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"slug(s): agents-core."* ]]
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\", \"plan-lock-disposition:docs-index\"] | .body = \"plan-lock-disposition: agents-core (other file)\" | $two"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DOWNGRADED  Plan-lock gate (failure)"* ]]
+}
+
+@test "plan-lock per-slug rule: an annotation split by a %0A path still yields its slug (poller parity)" {
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\", \"plan-lock-disposition:coordinated\"] | .planlock_annotations = [\"plan-lock-gate: 'Source/Sync/a\nb.cpp' overlaps the write set of plan-lock 'sync-rework', held by a different branch.\"]"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no plan-lock-disposition names the colliding lock slug(s): sync-rework."* ]]
+}
+
+@test "plan-lock per-slug rule: a slug in a disposition's why-part is not named (poller parity)" {
+    local two='.planlock_annotations = ["plan-lock-gate: '"'"'a'"'"' overlaps the write set of plan-lock '"'"'tracker-refactor'"'"', held by a different branch.", "plan-lock-gate: '"'"'b'"'"' overlaps the write set of plan-lock '"'"'docs'"'"', held by a different branch."]'
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\"] | .body = \"plan-lock-disposition: tracker-refactor — only touches docs/plans/INDEX.md\" | $two"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no plan-lock-disposition names the colliding lock slug(s): docs."* ]]
+}
+
+@test "plan-lock per-slug rule: an unlearnable slug set leaves the Plan-lock red (fail closed)" {
+    # No annotations at all (unreadable), an ambiguous line, and as many gate
+    # lines as GitHub keeps per step (possibly truncated): none gives a set.
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\", \"plan-lock-disposition:sibling-merged\"]"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"annotations are unreadable"* ]]
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\", \"plan-lock-disposition:bad_slug\"] | .planlock_annotations = [\"plan-lock-gate: 'a' overlaps the write set of plan-lock 'Bad_Slug', held by a different branch.\"]"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ambiguous"* ]]
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\", \"plan-lock-disposition:sibling-merged\"] | .planlock_annotations = [range(10) | \"plan-lock-gate: 'f\\(.)' overlaps the write set of plan-lock 'sibling-merged', held by a different branch.\"]"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"may be truncated"* ]]
+}
+
+@test "a missing shared plan-lock slug parser fails closed (exit 2)" {
+    local d="$BATS_TEST_TMPDIR/core"
+    mkdir -p "$d/merge-gates.d"
+    cp "$ACG" "$d/all-checks-green.sh"
+    cp "$REPO_ROOT/agents/scripts/core/merge-gates.d/10-gate-filter.sh" "$d/merge-gates.d/"
+    replay final "$GREEN_EDIT"
+    run bash "$d/all-checks-green.sh" --fixture "$SNAP"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"shared plan-lock slug parser"* ]]
 }
 
 @test "tests- / perf- / intent-out-of-band downgrade their named checks" {
@@ -298,15 +364,15 @@ GREEN_EDIT='setrun("Bucket-E UI tests (Mesa headless GL)"; "success") | setstatu
     run bash "$ACG" --fixture "$SNAP"
     [ "$status" -eq 3 ]
     # The Plan-lock trail is read by the same reader.
-    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\"] | .body = \"<!-- plan-lock-disposition: overlap is docs-only -->\""
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\"] | .body = \"<!-- plan-lock-disposition: overlap is docs-only -->\" | $PL_ANN_INFRA"
     run bash "$ACG" --fixture "$SNAP"
     [ "$status" -eq 1 ]
     [[ "$output" == *"RED         Plan-lock gate (failure)"* ]]
-    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\"] | .body = \"plan-lock-disposition:<reason>\""
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\"] | .body = \"plan-lock-disposition:<reason>\" | $PL_ANN_INFRA"
     run bash "$ACG" --fixture "$SNAP"
     [ "$status" -eq 1 ]
     # Control: the same marker on its own line outside the comment still counts.
-    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\"] | .body = \"<!-- template -->\n* plan-lock-disposition: overlap is docs-only\""
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\"] | .body = \"<!-- template -->\n* plan-lock-disposition: overlap is docs-only\" | $PL_ANN_INFRA"
     run bash "$ACG" --fixture "$SNAP"
     [ "$status" -eq 0 ]
     [[ "$output" == *"DOWNGRADED  Plan-lock gate (failure)"* ]]
@@ -316,7 +382,8 @@ GREEN_EDIT='setrun("Bucket-E UI tests (Mesa headless GL)"; "success") | setstatu
     # One reader: all-checks-green.sh sources merge-gates.d/10-gate-filter.sh and
     # splices _MG_JQ_DISPOSITION_DEF; it never defines its own disposition().
     grep -qF 'merge-gates.d/10-gate-filter.sh' "$ACG"
-    grep -qF 'ACG_FILTER="$_MG_JQ_DISPOSITION_DEF"' "$ACG"
+    grep -qF 'ACG_DEFS="$_MG_JQ_DISPOSITION_DEF"' "$ACG"
+    grep -qF 'ACG_FILTER="$ACG_DEFS"' "$ACG"
     run grep -nE '^[[:space:]]*def disposition' "$ACG"
     [ "$status" -eq 1 ]
 }
@@ -372,7 +439,8 @@ GREEN_EDIT='setrun("Bucket-E UI tests (Mesa headless GL)"; "success") | setstatu
 
 # stub_gh — a `gh` on PATH that serves canned REST responses the way
 # `gh api -i` prints them (status line, headers, blank line, body): per kind
-# (runs | status | pr) the Nth call reads $STUB/<kind>.<N>.json, falling back to
+# (runs | status | pr | assoc | ann — a check run's annotations) the Nth call
+# reads $STUB/<kind>.<N>.json, falling back to
 # $STUB/<kind>.json, sliced by the endpoint's page / per_page. Every 200 carries
 # an ETag (a checksum of the body); a request whose If-None-Match equals it gets
 # a 304 with no body and exit 1, like real gh, and is tallied in $STUB/<kind>.304.
@@ -397,6 +465,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 case "$endpoint" in
+    */check-runs/*/annotations*) kind=ann; field="" ;;
     */check-runs*) kind=runs; field=check_runs ;;
     */status*) kind=status; field=statuses ;;
     */commits/*/pulls*) kind=assoc; field="" ;;
@@ -502,12 +571,13 @@ run_live() {
 }
 
 # layer_tree <dir> — a minimal agent layer at <dir>: all-checks-green.sh, the gate
-# filter it sources, project-config.sh, and the LAYER's own project.config.json
+# modules it sources, project-config.sh, and the LAYER's own project.config.json
 # (required context "Layer-only lane"), committed as its own repo.
 layer_tree() {
     mkdir -p "$1/agents/scripts/core/merge-gates.d" "$1/scripts/dev"
     cp "$ACG" "$1/agents/scripts/core/"
-    cp "$REPO_ROOT/agents/scripts/core/merge-gates.d/10-gate-filter.sh" "$1/agents/scripts/core/merge-gates.d/"
+    cp "$REPO_ROOT/agents/scripts/core/merge-gates.d/10-gate-filter.sh" \
+       "$REPO_ROOT/agents/scripts/core/merge-gates.d/20-planlock-slugs.sh" "$1/agents/scripts/core/merge-gates.d/"
     cp "$REPO_ROOT/scripts/dev/project-config.sh" "$1/scripts/dev/"
     jq -n '{branch_protection: {required_contexts: ["Layer-only lane"]}}' > "$1/project.config.json"
     git -C "$1" init -q -b develop
@@ -621,6 +691,39 @@ run_from_host() {
     [ "$status" -eq 0 ]
     [ "$(cat "$STUB/runs.count")" -eq 2 ]
     [[ "$output" == *"PASS — every other check is terminal and green"* ]]
+}
+
+# serve_planlock_waiver <disposition label> <annotation messages jq array> — a
+# red Plan-lock gate on the head, plan-lock-out-of-band + the disposition on
+# the PR, and the red run's annotations at its check-run id.
+serve_planlock_waiver() {
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\")"
+    serve runs; serve status
+    jq -n --arg h "$HEAD_SHA" --arg d "$1" \
+        '{head: {sha: $h}, state: "open", labels: [{name: "plan-lock-out-of-band"}, {name: $d}], body: ""}' > "$STUB/pr.json"
+    jq -n "$2 | map({annotation_level: \"failure\", message: .})" > "$STUB/ann.json"
+}
+
+@test "live: a plan-lock waiver naming the colliding slug read from the red run's annotations downgrades it" {
+    stub_gh
+    serve_planlock_waiver plan-lock-disposition:sibling-merged \
+        '["plan-lock-gate: '"'"'docs/plans/INDEX.md'"'"' overlaps the write set of plan-lock '"'"'sibling-merged'"'"', held by a different branch."]'
+    run_live
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DOWNGRADED  Plan-lock gate (failure)"* ]]
+    [ "$(cat "$STUB/ann.count")" -ge 1 ]
+}
+
+@test "live: a plan-lock waiver that names another slug stays red, and an annotation read error is retried" {
+    stub_gh
+    serve_planlock_waiver plan-lock-disposition:coordinated \
+        '["plan-lock-gate: '"'"'docs/plans/INDEX.md'"'"' overlaps the write set of plan-lock '"'"'sibling-merged'"'"', held by a different branch."]'
+    touch "$STUB/ann.1.fail"
+    run_live
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"GitHub API error (1/"* ]]
+    [[ "$output" == *"RED         Plan-lock gate (failure)"* ]]
+    [[ "$output" == *"names the colliding lock slug(s): sibling-merged."* ]]
 }
 
 @test "live: a check appearing during the settle window is waited for" {

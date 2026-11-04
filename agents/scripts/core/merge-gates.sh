@@ -47,7 +47,10 @@
 #   plan-lock-out-of-band → downgrades `Plan-lock gate` FAIL → WARN. REQUIRES
 #                       a paired `plan-lock-disposition:<reason>` attestation
 #                       (label OR PR-body marker, the same shape as
-#                       cr-disposition) — the label ALONE is NOT honoured.
+#                       cr-disposition) — the label ALONE is NOT honoured —
+#                       and every lock slug the gate reports as colliding must
+#                       be named by one (_mg_planlock_slug_report; an unlearnable
+#                       slug set refuses the waiver).
 #   cr-out-of-band    → downgrades a CodeRabbit block → WARN (CR gate only;
 #                       CI + user-comment gates still bind). REQUIRES a paired
 #                       `cr-disposition:<reason>` attestation (label OR PR-body
@@ -232,9 +235,12 @@ MERGE_GATES_CONFIG_FILE="${MERGE_GATES_CONFIG_FILE:-${PC_CONFIG_FILE:-$SCRIPT_DI
 # (NOT a glob) — mirrors agents/scripts/project/lint-rules.d/. The modules carry:
 #   00-common.sh      — the meant-to-block allow-list constant, the prompt-shim
 #                        lazy-source, and gh_pr_ready_idempotent (top-level).
-#   10-gate-filter.sh — the one giant GATE_FILTER jq program (the 43-field
+#   10-gate-filter.sh — the one giant GATE_FILTER jq program (the 44-field
 #                        projection) as a template emitter; run by standalone
 #                        `jq -f`, or by `gh api graphql --jq` when jq is absent.
+#   20-planlock-slugs.sh — the plan-lock per-slug disposition rule's pure
+#                        helpers (gate-line slug parser, annotation cap, slug
+#                        naming check), shared with all-checks-green.sh.
 # The four gate-condition verdicts (CI / CodeRabbit / Bugbot / user-comments)
 # stay INLINE in poll_merge_gates: they share one tightly-coupled per-poll local
 # state (cr_pass, cr_open_blocks, streak counters, the nudge_coderabbit closure)
@@ -247,7 +253,8 @@ MERGE_GATES_CONFIG_FILE="${MERGE_GATES_CONFIG_FILE:-${PC_CONFIG_FILE:-$SCRIPT_DI
 # not degrade to "fresh".
 MERGE_GATES_D="$SCRIPT_DIR/merge-gates.d"
 for _mg_mod in "$SCRIPT_DIR"/lib/script-freshness.sh \
-               "$MERGE_GATES_D"/00-common.sh "$MERGE_GATES_D"/10-gate-filter.sh; do
+               "$MERGE_GATES_D"/00-common.sh "$MERGE_GATES_D"/10-gate-filter.sh \
+               "$MERGE_GATES_D"/20-planlock-slugs.sh; do
     if [ ! -f "$_mg_mod" ]; then
         echo "merge-gates: ERROR: missing module $_mg_mod" >&2
         # sourced (bats) → return; executed → exit. Fail-closed either way.
@@ -317,6 +324,37 @@ _mg_lock_remote() {
     return 1
 }
 
+# _mg_planlock_annotations <owner> <repo> <head sha> — the failure-level
+# annotation messages of the head's latest "Plan-lock gate" run, one per line.
+# rc 1 when the run or its annotations cannot be read (no sha, no run, API
+# error); rc 2 when the page came back full. GitHub pages annotations, so the
+# read asks for the 100-item maximum and treats a full page as possibly cut
+# off, the rule all-checks-green.sh applies to the same data. Each message is
+# one line: its control characters become spaces, since a quoted path in a
+# gate line can carry a newline (`%0A` in a file name, which the Actions runner
+# unescapes) that would otherwise split the slug off the line. Callers treat any
+# non-zero rc as "unknown", never as "no collision". The full-page marker is
+# not a gate line (those start `plan-lock-gate:`): a message crafted to equal it
+# only makes the set unknown, which fails closed.
+_MG_PLANLOCK_ANN_FULL='__mg_planlock_annotations_page_full__'
+_MG_PLANLOCK_ANN_JQ='if (type != "array") then error("not an annotation list")
+    elif (length >= 100) then "'"$_MG_PLANLOCK_ANN_FULL"'"
+    else (.[] | select((.annotation_level // "failure") == "failure")
+          | (.message // "") | gsub("[[:cntrl:]\u0080-\u009f]"; " ")) end'
+_mg_planlock_annotations() {
+    local owner="$1" repo="$2" sha="$3" id out
+    [ -n "$sha" ] || return 1
+    id="$(gh api "repos/${owner}/${repo}/commits/${sha}/check-runs?check_name=Plan-lock%20gate" \
+        --jq '.check_runs | sort_by(.started_at // "") | last | .id // empty' 2>/dev/null)" || return 1
+    [ -n "$id" ] || return 1
+    out="$(gh api "repos/${owner}/${repo}/check-runs/${id}/annotations?per_page=100" \
+        --jq "$_MG_PLANLOCK_ANN_JQ" 2>/dev/null)" || return 1
+    case $'\n'"$out"$'\n' in
+        *$'\n'"$_MG_PLANLOCK_ANN_FULL"$'\n'*) return 2 ;;
+    esac
+    [ -z "$out" ] || printf '%s\n' "$out"
+}
+
 # _mg_planlock_red_cause <owner> <repo> <head sha> — why the head's latest
 # "Plan-lock gate" run went red, read from its annotations (each ::error the
 # gate prints becomes one): `collision` when it reported only write-set
@@ -329,17 +367,10 @@ _mg_lock_remote() {
 # checkout warning, or a path / slug in a collision line that happens to
 # contain "failed" or "missing", must not turn a collision into infra.
 _mg_planlock_red_cause() {
-    local owner="$1" repo="$2" sha="$3" id msgs
-    if [ -z "$sha" ]; then echo unknown; return 0; fi
-    id="$(gh api "repos/${owner}/${repo}/commits/${sha}/check-runs?check_name=Plan-lock%20gate" \
-        --jq '.check_runs | sort_by(.started_at // "") | last | .id // empty' 2>/dev/null)" \
-        || { echo unknown; return 0; }
-    if [ -z "$id" ]; then echo unknown; return 0; fi
-    msgs="$(gh api "repos/${owner}/${repo}/check-runs/${id}/annotations" \
-        --jq '.[] | select((.annotation_level // "failure") == "failure") | .message' 2>/dev/null)" \
-        || { echo unknown; return 0; }
+    local msgs
+    msgs="$(_mg_planlock_annotations "$1" "$2" "$3")" || { echo unknown; return 0; }
     # The vocabulary is plan-lock-gate.sh's own (PLAN_LOCK_GATE_INFRA_RE,
-    # sourced by _mg_planlock_recheck before it calls here).
+    # sourced by _mg_planlock_recheck_detail before it calls here).
     local infra_re="${PLAN_LOCK_GATE_INFRA_RE:-undetermined|unavailable|does not resolve|failed|missing}"
     local line cause=unknown
     while IFS= read -r line; do
@@ -354,13 +385,14 @@ _mg_planlock_red_cause() {
     echo "$cause"
 }
 
-# _mg_planlock_recheck <owner> <repo> <pr> <head ref> <head sha> — re-run the
-# Plan-lock gate's own decision (plan_lock_gate_decide, sourced from
+# _mg_planlock_recheck_detail <owner> <repo> <pr> <head ref> <head sha> — re-run
+# the Plan-lock gate's own decision (plan_lock_gate_decide, sourced from
 # plan-lock-gate.sh) against the CURRENT refs/locks table of the PR's base
 # repository and the PR's changed files. A "Plan-lock gate" verdict is frozen
 # at push time while the lock table it judged keeps moving (locks are released,
 # or age past the 14-day cutoff), so a collision red can go stale (tooling
-# 2026-10-04 stale-plan-lock-red-overridden-instead-of-rerun). Prints one token:
+# 2026-10-04 stale-plan-lock-red-overridden-instead-of-rerun). Prints two lines.
+# Line 1, the stale-red verdict (_mg_planlock_verdict_report reads it):
 #   clean     — no changed file overlaps another branch's live lock any more AND
 #               the red was a collision: it is stale (refuse the override)
 #   collides  — still overlaps, or the lock table is undetermined (the gate's
@@ -371,37 +403,48 @@ _mg_planlock_red_cause() {
 #   unknown … — the inputs or the lock state could not be gathered (no head
 #               ref, no diff, no remote for the base repo, refs/locks fetch
 #               failed, gate script missing)
+# Line 2, what the re-run decision says about the lock slugs this PR currently
+# collides with (the gate's own ::error lines, parsed by
+# _mg_planlock_gate_slugs recheck; _mg_planlock_colliding_slugs reads it):
+#   complete [<slug> …] — every changed file was judged; these slugs collide
+#                         (none: nothing collides now)
+#   partial [<slug> …]  — some files could not be judged (lock table
+#                         undetermined), so the list may be short
+#   ambiguous (<why>)   — the decision ran, but a gate line is ambiguous
+#   unknown             — the decision could not run (inputs unavailable)
 # Runs in a subshell: the gate script and the lock substrate set shell options
 # and define helpers that must not leak into a sourcing caller.
-_mg_planlock_recheck() {
+_mg_planlock_recheck_detail() {
     local owner="$1" repo="$2" pr="$3" head_ref="$4" head_sha="${5:-}"
     (
-        if [ -z "$owner" ] || [ -z "$repo" ] || [ -z "$head_ref" ]; then echo "unknown (no PR head ref)"; exit 0; fi
+        if [ -z "$owner" ] || [ -z "$repo" ] || [ -z "$head_ref" ]; then printf 'unknown (no PR head ref)\nunknown\n'; exit 0; fi
         changed="$(gh pr diff "$pr" --repo "$owner/$repo" --name-only 2>/dev/null)" \
-            || { echo "unknown (PR diff unavailable)"; exit 0; }
-        [ -n "$changed" ] || { echo "unknown (PR diff empty)"; exit 0; }
+            || { printf 'unknown (PR diff unavailable)\nunknown\n'; exit 0; }
+        [ -n "$changed" ] || { printf 'unknown (PR diff empty)\nunknown\n'; exit 0; }
         # The lock table is read through the HOST checkout (locks-show.sh
         # fetches refs/locks/* into the checkout it runs in), resolved the way
         # plan-lock-gate.sh's own entry point resolves it — but from the remote
         # that IS the PR's base repository, never an assumed `origin`, and
         # fresh (no lock-table cache), so the answer is that repo's live table.
         root="${PC_PROJECT_ROOT:-${PROJECT_ROOT:-$SCRIPT_DIR/../../..}}"
-        cd "$root" 2>/dev/null || { echo "unknown (no host checkout)"; exit 0; }
+        cd "$root" 2>/dev/null || { printf 'unknown (no host checkout)\nunknown\n'; exit 0; }
         export LTC_PROJ="$PWD"
         if [ -z "${LTC_ROWS_OVERRIDE:-}" ]; then
             remote="$(_mg_lock_remote "$owner" "$repo")" \
-                || { echo "unknown (no git remote of this checkout points at ${owner}/${repo})"; exit 0; }
+                || { printf 'unknown (no git remote of this checkout points at %s/%s)\nunknown\n' "$owner" "$repo"; exit 0; }
             git fetch --quiet --prune "$remote" '+refs/locks/*:refs/locks/*' 2>/dev/null \
-                || { echo "unknown (refs/locks fetch from ${remote} failed)"; exit 0; }
+                || { printf 'unknown (refs/locks fetch from %s failed)\nunknown\n' "$remote"; exit 0; }
             export LOCK_REMOTE="$remote" LTC_TABLE_TTL=0
         fi
         # shellcheck source=agents/scripts/core/lock-table-cache.sh
-        . "$SCRIPT_DIR/lock-table-cache.sh" 2>/dev/null || { echo "unknown (lock-table-cache.sh unreadable)"; exit 0; }
+        . "$SCRIPT_DIR/lock-table-cache.sh" 2>/dev/null || { printf 'unknown (lock-table-cache.sh unreadable)\nunknown\n'; exit 0; }
         # shellcheck source=agents/scripts/core/plan-lock-gate.sh
-        . "$SCRIPT_DIR/plan-lock-gate.sh" 2>/dev/null || { echo "unknown (plan-lock-gate.sh unreadable)"; exit 0; }
-        command -v plan_lock_gate_decide >/dev/null 2>&1 || { echo "unknown (plan_lock_gate_decide missing)"; exit 0; }
-        if ! printf '%s\n' "$changed" | plan_lock_gate_decide "$head_ref" >/dev/null 2>&1; then
+        . "$SCRIPT_DIR/plan-lock-gate.sh" 2>/dev/null || { printf 'unknown (plan-lock-gate.sh unreadable)\nunknown\n'; exit 0; }
+        command -v plan_lock_gate_decide >/dev/null 2>&1 || { printf 'unknown (plan_lock_gate_decide missing)\nunknown\n'; exit 0; }
+        decided="$(printf '%s\n' "$changed" | plan_lock_gate_decide "$head_ref" 2>/dev/null)" && decide_rc=0 || decide_rc=$?
+        if [ "$decide_rc" -ne 0 ]; then
             echo collides
+            printf '%s\n' "$decided" | _mg_planlock_gate_slugs recheck
             exit 0
         fi
         case "$(_mg_planlock_red_cause "$owner" "$repo" "$head_sha")" in
@@ -409,13 +452,65 @@ _mg_planlock_recheck() {
             infra)     echo "infra (the red is an infrastructure failure, not a collision)" ;;
             *)         echo "infra (the red's cause could not be read from the run's annotations)" ;;
         esac
+        echo complete
     )
 }
 
+# _mg_planlock_colliding_slugs <owner> <repo> <head sha> <recheck slug line> —
+# the lock slugs a plan-lock-out-of-band waiver must name, as
+# "complete [<slug> …]" or "unknown <why>". The re-run decision is the source
+# (its slug line is the second line of _mg_planlock_recheck_detail): it judges
+# every changed file against the CURRENT lock table, through the same
+# plan_lock_gate_decide the gate runs, with no annotation cap, and fails
+# loudly rather than silently when it cannot run. When it could not judge
+# every file (partial, or unknown: the decision could not run), the red run's
+# annotations fill in: their collision slugs join the partial list, while their
+# infrastructure lines name no slug (the documented escape for an
+# infrastructure red stays a disposition saying why). A re-check that RAN and
+# judged a gate line ambiguous is a finding about the current lock table, not a
+# missing input, so it is never resolved from the annotations: the set stays
+# unknown. Annotations that are unreadable, ambiguous or possibly truncated
+# leave the set unknown too. Every unknown refuses the waiver: fail closed.
+_MG_PLANLOCK_ANN_UNREADABLE="the re-check could not judge every changed file and the red run's annotations are unreadable"
+_mg_planlock_colliding_slugs() {
+    local owner="$1" repo="$2" sha="$3" recheck="${4:-unknown}" msgs ann
+    case "$recheck" in
+        complete|"complete "*) printf '%s\n' "$recheck"; return 0 ;;
+        ambiguous*)
+            printf 'unknown (the re-check judged a current Plan-lock gate line ambiguous %s; an ambiguous line is never resolved from the annotations)\n' "${recheck#ambiguous }"
+            return 0 ;;
+    esac
+    local arc=0
+    msgs="$(_mg_planlock_annotations "$owner" "$repo" "$sha")" || arc=$?
+    if [ "$arc" -eq 2 ]; then
+        printf 'unknown (the re-check could not judge every changed file and the red run'"'"'s annotations fill a whole page, so the list may be truncated)\n'
+        return 0
+    elif [ "$arc" -ne 0 ]; then
+        printf 'unknown (%s)\n' "$_MG_PLANLOCK_ANN_UNREADABLE"
+        return 0
+    fi
+    ann="$(printf '%s\n' "$msgs" | _mg_planlock_gate_slugs annotations)"
+    case "$ann" in
+        complete|"complete "*) ;;
+        *) printf 'unknown (the re-check could not judge every changed file; annotations: %s)\n' "${ann#unknown }"; return 0 ;;
+    esac
+    # Only a "partial" re-check contributes slugs; "unknown" judged nothing.
+    local merged="" s
+    case "$recheck" in "partial "*) merged="${recheck#partial }" ;; esac
+    merged="$merged ${ann#complete}"
+    local -a all=()
+    for s in $merged; do all+=("$s"); done
+    if [ "${#all[@]}" -eq 0 ]; then
+        printf 'complete\n'
+    else
+        printf 'complete %s\n' "$(printf '%s\n' "${all[@]}" | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')"
+    fi
+}
+
 # _mg_planlock_verdict_report <verdict> <owner> <repo> <head sha> — print the
-# operator line for a _mg_planlock_recheck verdict on stderr and return 0 when
-# the plan-lock-out-of-band downgrade must be REFUSED (a positively clean
-# re-check: the red is stale), 1 when it stands. Shared by poll_merge_gates and
+# operator line for a re-check verdict (line 1 of _mg_planlock_recheck_detail)
+# on stderr and return 0 when the plan-lock-out-of-band downgrade must be
+# REFUSED (a positively clean re-check: the red is stale), 1 when it stands. Shared by poll_merge_gates and
 # safe-admin-merge.sh so the two merge paths refuse the same stale reds with
 # the same words.
 _mg_planlock_verdict_report() {
@@ -525,6 +620,7 @@ poll_merge_gates() {
             "agents/scripts/core/merge-gates.sh"
             "agents/scripts/core/merge-gates.d/00-common.sh"
             "agents/scripts/core/merge-gates.d/10-gate-filter.sh"
+            "agents/scripts/core/merge-gates.d/20-planlock-slugs.sh"
             "agents/scripts/core/lib/script-freshness.sh"
         )
         # Detection is delegated to lib/script-freshness.sh (the bounded fetch, the
@@ -804,7 +900,7 @@ poll_merge_gates() {
     start=$(date +%s)
 
     # One filter computes every gate field and emits them as a fixed-order,
-    # one-per-line stream (43 lines) that the poll loop reads with `mapfile`.
+    # one-per-line stream (44 lines) that the poll loop reads with `mapfile`.
     # It runs under standalone `jq -r -f <file>` when jq is on PATH, else under
     # gh's bundled engine (`gh api --jq`) — see gate_jq_engine below. The exact
     # jq sub-expressions are the same ones the per-field `jq` calls used
@@ -848,7 +944,7 @@ poll_merge_gates() {
     # may be empty) · 34 staleOverrideCount (their count).
     # The trailing fields must all be non-empty so the `data=$(gh …)` command
     # substitution (trailing-newline collapse) never strips one and deflates the
-    # 43-field count (tripping the fail-closed assertion). reqAbsentCount (22),
+    # 44-field count (tripping the fail-closed assertion). reqAbsentCount (22),
     # crReviewSkipped (23), bbState (24, ABSENT-default), bbOpen (25, numeric),
     # bbOob (26), selfImpOnly (27), pureDocs (28), crRateLimited (29),
     # crDisposition (30), the two numeric thread counts (31/32) and
@@ -877,8 +973,12 @@ poll_merge_gates() {
     # state is NOT a review; non-empty) · 42 crRunClean (bool: CodeRabbit's own
     # newest "CodeRabbit" check run on the head, app slug coderabbitai, is
     # COMPLETED + SUCCESS at least 60 s ago — CR finished a clean review of this
-    # head and posts no review object for it; non-empty, safe at the tail).
-    # GATE_FILTER — the 43-field jq projection (see field-order map above).
+    # head and posts no review object for it; non-empty, safe at the tail) ·
+    # 43 planLockReasons ("r:" + every accepted plan-lock-disposition reason,
+    # control characters blanked, space-joined — the per-slug disposition rule
+    # checks each colliding lock slug against it; the sentinel keeps it
+    # non-empty, so it is safe as the last field).
+    # GATE_FILTER — the 44-field jq projection (see field-order map above).
     # Copied byte-for-byte from the _MG_GATE_FILTER_TEMPLATE global that
     # merge-gates.d/10-gate-filter.sh defines (single-quoted literal → no
     # command-substitution newline trim); placeholders spliced below as before.
@@ -918,8 +1018,10 @@ poll_merge_gates() {
     fi
 
     # Stale-red Plan-lock re-check cache: re-evaluated once per head, not every
-    # poll (it costs a PR-diff call and a refs/locks fetch).
-    local planlock_recheck_head="" planlock_recheck_verdict=""
+    # poll (it costs a PR-diff call and a refs/locks fetch). The colliding-slug
+    # set rides the same cache (an annotation read at most once per head).
+    local planlock_recheck_head="" planlock_recheck_verdict="" planlock_recheck_slugs=""
+    local planlock_slug_set="" planlock_detail=""
 
     local p
     for ((p=0; p<MAX_POLLS; p++)); do
@@ -1008,7 +1110,7 @@ poll_merge_gates() {
         fi
         gh_fails=0
 
-        # Parse the filter's field stream — 43 fixed-order lines (see GATE_FILTER
+        # Parse the filter's field stream — 44 fixed-order lines (see GATE_FILTER
         # field map above). Filter errors (either engine) already routed through
         # the gh-fail path above; this guards a truncated/partial body → fail
         # closed (retry).
@@ -1018,11 +1120,11 @@ poll_merge_gates() {
         # "OPEN\r" != "OPEN" → spurious return-4).
         data="${data//$'\r'/}"
         mapfile -t fields <<<"$data"
-        if [ "${#fields[@]}" -ne 43 ]; then
-            # Exactly 43 expected. Any other count (a field value with an embedded
+        if [ "${#fields[@]}" -ne 44 ]; then
+            # Exactly 44 expected. Any other count (a field value with an embedded
             # newline would inflate it, misaligning fields[n]) → fail closed (CR #511).
             gh_fails=$((gh_fails+1))
-            echo "Poll $((p+1)): gate filter returned ${#fields[@]} fields (expected 43); transient ($gh_fails/3)"
+            echo "Poll $((p+1)): gate filter returned ${#fields[@]} fields (expected 44); transient ($gh_fails/3)"
             if [ "$gh_fails" -ge 3 ]; then echo "GH_API_DOWN"; return 3; fi
             local elapsed_short=$(( $(date +%s) - start ))
             if [ "$elapsed_short" -ge "$TIMEOUT_SECONDS" ]; then echo "GATES_TIMEOUT"; return 2; fi
@@ -1047,10 +1149,10 @@ poll_merge_gates() {
             return 5
         fi
 
-        # Labels (tests-out-of-band / perf-out-of-band) — the downgrade was
-        # already applied inside the filter's ci_fail / ci_warn_downgraded; these
-        # are surfaced only for the WARN line below.
-        local has_tests_oob="${fields[3]}" has_perf_oob="${fields[4]}"
+        # Labels (tests-out-of-band / perf-out-of-band, fields 3/4) — the
+        # downgrade was already applied inside the filter's ci_fail /
+        # ci_warn_downgraded, and the WARN below names the downgraded checks, so
+        # the poll loop does not re-read those two fields.
 
         # cr-out-of-band label — when present, a CR block (CHANGES_REQUESTED,
         # COMMENTED+actionable>0, DISMISSED, STALE_WITH_FINDINGS, STALE_UNKNOWN,
@@ -1099,9 +1201,35 @@ poll_merge_gates() {
         if [ "$ci_warn_downgraded" -gt 0 ] && _mg_csv_has "$dg_names" "Plan-lock gate"; then
             if [ "$planlock_recheck_head" != "$head_sha" ]; then
                 planlock_recheck_head="$head_sha"
-                planlock_recheck_verdict="$(_mg_planlock_recheck "$owner" "$repo" "$prNumber" "${fields[38]}" "$head_sha")"
+                planlock_detail="$(_mg_planlock_recheck_detail "$owner" "$repo" "$prNumber" "${fields[38]}" "$head_sha")"
+                planlock_recheck_verdict="${planlock_detail%%$'\n'*}"
+                planlock_recheck_slugs="${planlock_detail#*$'\n'}"
+                [ "$planlock_recheck_slugs" != "$planlock_detail" ] || planlock_recheck_slugs=unknown
+                planlock_slug_set=""
             fi
             if _mg_planlock_verdict_report "$planlock_recheck_verdict" "$owner" "$repo" "$head_sha"; then
+                ci_fail=$((ci_fail + 1))
+                ci_warn_downgraded=$((ci_warn_downgraded - 1))
+                dg_names="$(_mg_csv_drop "$dg_names" "Plan-lock gate")"
+            fi
+        fi
+
+        # Per-slug disposition rule: the waiver stands only when every lock slug
+        # the Plan-lock gate currently reports as colliding is named by its own
+        # plan-lock-disposition (a label or a PR-body line, field 43). The slug
+        # set comes from the re-check above, with the red run's annotations as
+        # the fallback (_mg_planlock_colliding_slugs); a set that cannot be
+        # learned refuses the waiver — fail closed. Re-read every poll against
+        # the cached set, so adding the missing disposition clears it.
+        if [ "$ci_warn_downgraded" -gt 0 ] && _mg_csv_has "$dg_names" "Plan-lock gate"; then
+            local slug_set="$planlock_slug_set"
+            if [ -z "$slug_set" ]; then
+                slug_set="$(_mg_planlock_colliding_slugs "$owner" "$repo" "$head_sha" "$planlock_recheck_slugs")"
+                # An unreadable annotation read is transient: refuse this poll,
+                # but never cache it, so the next poll reads them again.
+                [ "$slug_set" = "unknown ($_MG_PLANLOCK_ANN_UNREADABLE)" ] || planlock_slug_set="$slug_set"
+            fi
+            if _mg_planlock_slug_report "$slug_set" "${fields[43]#r:}"; then
                 ci_fail=$((ci_fail + 1))
                 ci_warn_downgraded=$((ci_warn_downgraded - 1))
                 dg_names="$(_mg_csv_drop "$dg_names" "Plan-lock gate")"
@@ -1132,7 +1260,7 @@ poll_merge_gates() {
         # was crossed or why (GitHub strips the label post-merge, so the reason
         # is otherwise unrecoverable — #2160). Field 39; the red stays in ci_fail.
         if [ "${fields[39]:-false}" = "true" ]; then
-            echo "WARN: plan-lock-out-of-band present but NOT honoured — a plan-lock-out-of-band downgrade also requires a 'plan-lock-disposition:<reason>' label or PR-body marker naming the lock slug(s) the Plan-lock gate reported and why crossing them is safe. Add one to merge past the 'Plan-lock gate' red; if the red is stale (the lock was released or aged out), re-run the gate instead." >&2
+            echo "WARN: plan-lock-out-of-band present but NOT honoured — a plan-lock-out-of-band downgrade also requires a disposition whose reason opens with each lock slug the Plan-lock gate reported: a 'plan-lock-disposition:<slug>' label or a PR-body line 'plan-lock-disposition: <slug> — <why crossing it is safe>'. Add one to merge past the 'Plan-lock gate' red; if the red is stale (the lock was released or aged out), re-run the gate instead." >&2
         fi
 
         # Duplicate-context divergence (backlog merge-gate-duplicate-check-name-drift).

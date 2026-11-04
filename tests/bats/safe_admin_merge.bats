@@ -56,7 +56,7 @@ fi
 if [ "$1" = "api" ]; then
     case "$2" in
         */commits/*/check-runs*) echo 4242; exit 0 ;;
-        */check-runs/*/annotations)
+        */check-runs/*/annotations*)
             [ -n "${SAM_STUB_ANNOTATIONS+x}" ] || exit 1
             printf '%s\n' "$SAM_STUB_ANNOTATIONS"; exit 0 ;;
     esac
@@ -257,11 +257,11 @@ planlock_rollup() {
     [ ! -f "$MERGE_SENTINEL" ]
 }
 
-@test "plan-lock-out-of-band + disposition with a LIVE collision on re-check downgrades (exit 0, merge fires)" {
+@test "plan-lock-out-of-band + disposition naming the slug of a LIVE collision on re-check downgrades (exit 0, merge fires)" {
     local rows="$BATS_TEST_TMPDIR/lock-rows"
     printf 'claude/other-branch\t%s\tlive-lock\tdocs/plans/INDEX.md\n' "$(date -u +%s)" > "$rows"
     export LTC_ROWS_OVERRIDE="$rows" SAM_STUB_PR_DIFF="docs/plans/INDEX.md"
-    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:coordinated"}]')"
+    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:live-lock:coordinated"}]')"
     export SAFE_ADMIN_MERGE_STUB_ROLLUP
     run bash "$SCRIPT" 2300
     [ "$status" -eq 0 ]
@@ -286,13 +286,72 @@ planlock_rollup() {
     [ ! -f "$MERGE_SENTINEL" ]
 }
 
-@test "plan-lock-out-of-band + disposition with re-check inputs unavailable -> WARN, downgrade stands (exit 0)" {
-    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:coordinated"}]')"
+@test "plan-lock-out-of-band + disposition with re-check inputs unavailable and an infra-only red -> WARN, downgrade stands (exit 0)" {
+    # No PR diff: the re-check cannot run, so the red run's annotations supply
+    # the slug set. An infrastructure-only red names no slug, so a disposition
+    # saying why stands (the poller's documented escape for an infra red).
+    export SAM_STUB_ANNOTATIONS="plan-lock-gate: origin/develop does not resolve (shallow checkout or a missing 'git fetch origin develop')."
+    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:refs-locks-fetch-broken-in-ci"}]')"
     export SAFE_ADMIN_MERGE_STUB_ROLLUP
     run bash "$SCRIPT" 2300
     [ "$status" -eq 0 ]
     [[ "$output" == *"could not re-evaluate the Plan-lock gate red"* ]]
     [ -f "$MERGE_SENTINEL" ]
+}
+
+# The poller's per-slug disposition rule on the admin path: every lock slug the
+# gate reports as colliding must be named by a plan-lock-disposition.
+planlock_two_lock_rows() {
+    local rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/a\t%s\tdocs-index\tdocs/plans/INDEX.md\nclaude/b\t%s\tagents-core\tagents/core/\n' \
+        "$(date -u +%s)" "$(date -u +%s)" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows" SAM_STUB_PR_DIFF=$'docs/plans/INDEX.md\nagents/core/architect.md'
+}
+
+@test "plan-lock slugs (admin): two colliding locks, a disposition naming one -> REFUSED (exit 1, no merge)" {
+    planlock_two_lock_rows
+    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:docs-index"}]')"
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP
+    run bash "$SCRIPT" 2300
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no plan-lock-disposition names the colliding lock slug(s): agents-core."* ]]
+    [[ "$output" == *"does not cover every colliding lock slug"* ]]
+    [ ! -f "$MERGE_SENTINEL" ]
+}
+
+@test "plan-lock slugs (admin): both colliding slugs named (a label + a body line) -> merge fires (exit 0)" {
+    planlock_two_lock_rows
+    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:docs-index"}]' \
+        $'## Intent\nx\n\n- plan-lock-disposition: agents-core (the lock covers a different file in that dir)\n')"
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP
+    run bash "$SCRIPT" 2300
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"no plan-lock-disposition names"* ]]
+    [ -f "$MERGE_SENTINEL" ]
+}
+
+@test "plan-lock slugs (admin): an unlearnable slug set (no re-check, unreadable annotations) -> REFUSED (fail closed)" {
+    # SAM_STUB_ANNOTATIONS unset: the annotation read fails.
+    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:coordinated"}]')"
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP
+    run bash "$SCRIPT" 2300
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not be determined"* ]]
+    [[ "$output" == *"annotations are unreadable"* ]]
+    [ ! -f "$MERGE_SENTINEL" ]
+}
+
+@test "plan-lock slugs (admin): an ambiguous re-check is never resolved from infra-only annotations -> REFUSED" {
+    local rows="$BATS_TEST_TMPDIR/lock-rows"
+    printf 'claude/other-branch\t%s\tLegacy_Lock\tdocs/plans/INDEX.md\n' "$(date -u +%s)" > "$rows"
+    export LTC_ROWS_OVERRIDE="$rows" SAM_STUB_PR_DIFF="docs/plans/INDEX.md"
+    export SAM_STUB_ANNOTATIONS="plan-lock-gate: origin/develop does not resolve."
+    SAFE_ADMIN_MERGE_STUB_ROLLUP="$(planlock_rollup '[{"name":"plan-lock-out-of-band"},{"name":"plan-lock-disposition:legacy_lock"}]')"
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP
+    run bash "$SCRIPT" 2300
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ambiguous"* ]]
+    [ ! -f "$MERGE_SENTINEL" ]
 }
 
 @test "REFUSES when a required context is ABSENT from the rollup (exit 1, no merge)" {

@@ -83,9 +83,13 @@
 #   plan-lock-out-of-band → "Plan-lock gate" (mirrors poll_merge_gates $planlock):
 #                        honoured only WITH a plan-lock-disposition:<reason>
 #                        label or PR-body line (the poller's disposition()
-#                        reader), and refused when the poller's own stale-red
-#                        re-check (_mg_planlock_recheck) finds that nothing
-#                        collides any more — re-run the gate instead.
+#                        reader), refused when the poller's own stale-red
+#                        re-check (_mg_planlock_recheck_detail) finds that
+#                        nothing collides any more — re-run the gate instead —
+#                        and refused unless every colliding lock slug is named
+#                        by a disposition (the poller's per-slug rule, through
+#                        _mg_planlock_colliding_slugs + _mg_planlock_slug_report;
+#                        an unlearnable slug set refuses, fail closed).
 #   tests-out-of-band / perf-out-of-band → NOT honoured by this guard
 #                        (stale-override guard, merge-pipeline-01): their
 #                        workflows are label-reactive — they re-run on `labeled`
@@ -147,7 +151,7 @@
 # cr-out-of-band waived a real CR block). Best-effort: a write failure is
 # logged, never fatal, and the live statusCheckRollup fallback covers the hole.
 # The row lands uncommitted in the working copy — commit it with the next
-# develop-bound commit (ship-loops.md § merge-time snapshot).
+# develop-bound commit (ship-loops.md § Append a merge-time gate-verdict snapshot).
 #
 # Return codes:
 #   0 — guard passed; admin-merge performed (or dry-run printed); ledger
@@ -177,10 +181,14 @@ fi
 # The disposition-trail reader (cr-disposition / plan-lock-disposition) is the
 # poller's own jq def from merge-gates.d/10-gate-filter.sh, loaded by the source
 # above — single-sourced so both merge paths accept the same attestations.
-if [ -z "${_MG_JQ_DISPOSITION_DEF:-}" ] || ! command -v _mg_planlock_recheck >/dev/null 2>&1; then
-    echo "safe-admin-merge: merge-gates.sh did not provide the disposition reader / Plan-lock re-check — refusing (fail-closed)." >&2
-    exit 2
-fi
+for _sam_fn in _mg_planlock_recheck_detail _mg_planlock_verdict_report \
+               _mg_planlock_colliding_slugs _mg_planlock_slug_report; do
+    if [ -z "${_MG_JQ_DISPOSITION_DEF:-}" ] || ! command -v "$_sam_fn" >/dev/null 2>&1; then
+        echo "safe-admin-merge: merge-gates.sh did not provide the disposition reader / Plan-lock re-check ($_sam_fn) — refusing (fail-closed)." >&2
+        exit 2
+    fi
+done
+unset _sam_fn
 
 # ----------------------------------------------------------------------------
 # read_required_contexts — newline-separated list of branch-protection required
@@ -571,7 +579,7 @@ override_labels_csv() {
 # snapshot is detection telemetry; a write failure is logged and the merge
 # stands. The appended row lands in the working copy — commit it with the
 # session's next develop-bound commit (a `chore(ledger)` commit if nothing else
-# is in flight), per ship-loops.md § merge-time snapshot.
+# is in flight), per ship-loops.md § Append a merge-time gate-verdict snapshot.
 # ----------------------------------------------------------------------------
 append_admin_merge_snapshot() {
     local pr="$1" view_json="$2" cr_waived_red="$3"
@@ -1033,11 +1041,16 @@ main() {
         exit 1
     fi
 
-    # Stale-red Plan-lock guard — the poller's rule, through the poller's own
-    # helpers: a plan-lock-out-of-band downgrade is refused when re-running the
-    # gate's decision against the CURRENT lock table finds no collision (the red
-    # went stale; re-run the gate instead of overriding it). A live collision or
-    # an undeterminable lock state leaves the downgrade standing.
+    # Plan-lock waiver guards — the poller's two rules, through the poller's own
+    # helpers, so both merge paths refuse the same waivers:
+    #   * stale red: a plan-lock-out-of-band downgrade is refused when re-running
+    #     the gate's decision against the CURRENT lock table finds no collision
+    #     (the red went stale; re-run the gate instead of overriding it);
+    #   * per slug: every lock slug the gate reports as colliding must be named
+    #     by a plan-lock-disposition. The slug set comes from the same re-check,
+    #     with the red run's annotations as the fallback; a set that cannot be
+    #     learned refuses (fail closed). An infrastructure-only red names no
+    #     slug, so the disposition saying why stands, as in the poller.
     local pl_applied
     if ! pl_applied=$(planlock_downgrade_applied "$view_json"); then
         echo "safe-admin-merge: Plan-lock downgrade evaluation failed — refusing (fail-closed)." >&2
@@ -1045,6 +1058,7 @@ main() {
     fi
     if [ "$pl_applied" = "true" ]; then
         local pl_url pl_nwo pl_owner="" pl_repo="" pl_head_ref pl_head_sha pl_verdict
+        local pl_detail pl_slugs pl_set pl_reasons
         pl_url=$(printf '%s' "$view_json" | jq -r '.url // ""' 2>/dev/null) || pl_url=""
         pl_head_ref=$(printf '%s' "$view_json" | jq -r '.headRefName // ""' 2>/dev/null) || pl_head_ref=""
         pl_head_sha=$(printf '%s' "$view_json" | jq -r '.headRefOid // ""' 2>/dev/null) || pl_head_sha=""
@@ -1054,9 +1068,25 @@ main() {
         case "$pl_nwo" in
             */*) pl_owner="${pl_nwo%%/*}"; pl_repo="${pl_nwo#*/}" ;;
         esac
-        pl_verdict=$(_mg_planlock_recheck "$pl_owner" "$pl_repo" "$pr" "$pl_head_ref" "$pl_head_sha")
-        if _mg_planlock_verdict_report "$pl_verdict" "$pl_owner" "$pl_repo" "$pl_head_sha"; then
+        # One re-check feeds both rules: line 1 is the verdict, line 2 the
+        # colliding-slug line (a missing line 2 reads as "unknown").
+        pl_detail=$(_mg_planlock_recheck_detail "$pl_owner" "$pl_repo" "$pr" "$pl_head_ref" "$pl_head_sha")
+        pl_verdict="${pl_detail%%$'\n'*}"
+        pl_slugs="${pl_detail#*$'\n'}"
+        [ "$pl_slugs" != "$pl_detail" ] || pl_slugs=unknown
+        if _mg_planlock_verdict_report "${pl_verdict:-unknown (re-check produced no verdict)}" \
+            "$pl_owner" "$pl_repo" "$pl_head_sha"; then
             echo "REFUSED — PR #$pr: the 'Plan-lock gate' red is stale; NOT admin-merging." >&2
+            exit 1
+        fi
+        if ! pl_reasons=$(printf '%s' "$view_json" \
+            | jq -r "$_MG_JQ_DISPOSITION_DEF"' planlock_disposition_subjects([.labels[]?.name]; .body)'); then
+            echo "safe-admin-merge: plan-lock-disposition reasons unreadable — refusing (fail-closed)." >&2
+            exit 2
+        fi
+        pl_set=$(_mg_planlock_colliding_slugs "$pl_owner" "$pl_repo" "$pl_head_sha" "$pl_slugs")
+        if _mg_planlock_slug_report "$pl_set" "$pl_reasons"; then
+            echo "REFUSED — PR #$pr: plan-lock-out-of-band does not cover every colliding lock slug; NOT admin-merging." >&2
             exit 1
         fi
     fi
