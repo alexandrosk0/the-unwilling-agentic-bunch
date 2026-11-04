@@ -335,3 +335,25 @@ MD
     [ "$status" -eq 0 ]
     [[ "$output" == *"ok   beta"* ]]
 }
+
+@test "an inner fence shown indented inside a fenced example does not turn a later example into prose" {
+    base_fixture
+    add_skill "$FX" gamma
+    cat >>"$FX/docs/rules.md" <<'MD'
+```markdown
+1. Build:
+    ```bash
+    make
+    ```
+```
+
+Example of a skill row:
+
+```
+[gamma](../agents/_shared/skills/gamma/SKILL.md)
+```
+MD
+    run bash "$GATE" --root "$FX"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"FAIL gamma"* ]]
+}

@@ -1080,7 +1080,7 @@ main() {
             exit 1
         fi
         if ! pl_reasons=$(printf '%s' "$view_json" \
-            | jq -r "$_MG_JQ_DISPOSITION_DEF"' planlock_reasons_text([.labels[]?.name]; .body)'); then
+            | jq -r "$_MG_JQ_DISPOSITION_DEF"' planlock_disposition_subjects([.labels[]?.name]; .body)'); then
             echo "safe-admin-merge: plan-lock-disposition reasons unreadable — refusing (fail-closed)." >&2
             exit 2
         fi

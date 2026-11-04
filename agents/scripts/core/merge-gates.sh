@@ -329,14 +329,18 @@ _mg_lock_remote() {
 # rc 1 when the run or its annotations cannot be read (no sha, no run, API
 # error); rc 2 when the page came back full. GitHub pages annotations, so the
 # read asks for the 100-item maximum and treats a full page as possibly cut
-# off, the rule all-checks-green.sh applies to the same data. Callers treat any
+# off, the rule all-checks-green.sh applies to the same data. Each message is
+# one line: its control characters become spaces, since a quoted path in a
+# gate line can carry a newline (`%0A` in a file name, which the Actions runner
+# unescapes) that would otherwise split the slug off the line. Callers treat any
 # non-zero rc as "unknown", never as "no collision". The full-page marker is
 # not a gate line (those start `plan-lock-gate:`): a message crafted to equal it
 # only makes the set unknown, which fails closed.
 _MG_PLANLOCK_ANN_FULL='__mg_planlock_annotations_page_full__'
 _MG_PLANLOCK_ANN_JQ='if (type != "array") then error("not an annotation list")
     elif (length >= 100) then "'"$_MG_PLANLOCK_ANN_FULL"'"
-    else (.[] | select((.annotation_level // "failure") == "failure") | .message) end'
+    else (.[] | select((.annotation_level // "failure") == "failure")
+          | (.message // "") | gsub("[[:cntrl:]]"; " ")) end'
 _mg_planlock_annotations() {
     local owner="$1" repo="$2" sha="$3" id out
     [ -n "$sha" ] || return 1

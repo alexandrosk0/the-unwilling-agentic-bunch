@@ -31,10 +31,13 @@
 # same rule. disposition_reasons() returns the accepted reasons themselves
 # (label suffixes first, then body-marker remainders), so a caller can check
 # WHAT a trail names (the plan-lock slug check); disposition() is "any reason
-# accepted" over the same reader, and planlock_reasons_text() is the
-# plan-lock reasons as one control-free, space-joined string (the input every
-# merge actor hands to _mg_planlock_slug_report). (NB: no apostrophes in these
-# single-quoted jq strings.)
+# accepted" over the same reader, and planlock_disposition_subjects() is the
+# SUBJECT of each plan-lock reason (the slug list it opens with, cut at the
+# first spaced dash, `:` or `(`), control-free and space-joined: the input
+# every merge actor hands to _mg_planlock_slug_report. Only the subject names
+# a slug, so a path or word in the why-part of one slug's line (`... touches
+# docs/plans/INDEX.md`) never names a lock called `docs`. (NB: no apostrophes
+# in these single-quoted jq strings.)
 # shellcheck disable=SC2016  # single-quoted jq literal — $-refs are jq vars, not bash
 _MG_JQ_DISPOSITION_DEF='
 def disposition_reasons($labels; $body; $prefix):
@@ -50,9 +53,11 @@ def disposition_reasons($labels; $body; $prefix):
        | select(test($lead; "i")) | sub($lead; ""; "i") | select(_reason_filled)) ];
 def disposition($labels; $body; $prefix):
   disposition_reasons($labels; $body; $prefix) | length > 0;
-def planlock_reasons_text($labels; $body):
+def planlock_disposition_subjects($labels; $body):
   disposition_reasons($labels; $body; "plan-lock-disposition")
-  | map(gsub("[[:cntrl:]]"; " ")) | join(" ");
+  | map(gsub("[[:cntrl:]]"; " ")
+        | sub("([[:space:]]+(\u2014|\u2013|--?)[[:space:]]|[:(]).*$"; ""))
+  | join(" ");
 '
 
 # shellcheck disable=SC2016  # single-quoted jq literal — $-refs are jq vars, not bash
@@ -535,6 +540,6 @@ _MG_GATE_FILTER_TEMPLATE="$_MG_JQ_DISPOSITION_DEF"'
     # characters blanked and space-joined, behind an "r:" sentinel so the last
     # field is never empty. Read by the plan-lock slug check (a waiver needs a
     # reason naming each colliding lock slug).
-    ("r:" + planlock_reasons_text($labels; $pr.body))
+    ("r:" + planlock_disposition_subjects($labels; $pr.body))
   )
 '

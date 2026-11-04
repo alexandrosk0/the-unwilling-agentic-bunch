@@ -2303,6 +2303,51 @@ planlock_two_lock_rows() {
     rm -f "$f"
 }
 
+@test "plan-lock slugs: a path whose %0A became a newline in the annotation still yields its slug" {
+    local f page
+    export MERGE_GATES_STUB_PR_DIFF="fail"
+    # The runner unescapes %0A in a workflow-command message, so the stored
+    # annotation carries a real newline inside the quoted path.
+    page="$(jq -cn '[{annotation_level: "failure",
+        message: "plan-lock-gate: '"'"'Source/Sync/a\nb.cpp'"'"' overlaps the write set of plan-lock '"'"'sync-rework'"'"', held by a different branch."}]')"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS_JSON="$page"
+    f="$(planlock_waived_fixture coordinated)"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no plan-lock-disposition names the colliding lock slug(s): sync-rework."* ]]
+    rm -f "$f"
+}
+
+@test "plan-lock slugs: only a disposition's subject names a slug, never a word in its why-part" {
+    local f
+    export MERGE_GATES_STUB_PR_DIFF="fail"
+    export MERGE_GATES_STUB_PLANLOCK_ANNOTATIONS="plan-lock-gate: 'a' overlaps the write set of plan-lock 'tracker-refactor', held by a different branch.
+plan-lock-gate: 'b' overlaps the write set of plan-lock 'docs', held by a different branch."
+    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"}]' \
+        "plan-lock-disposition: tracker-refactor — only touches docs/plans/INDEX.md")"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no plan-lock-disposition names the colliding lock slug(s): docs."* ]]
+    rm -f "$f"
+    f="$(plan_lock_red_fixture '[{"name":"plan-lock-out-of-band"}]' \
+        "plan-lock-disposition: tracker-refactor, docs — only touches docs/plans/INDEX.md")"
+    set_fixture "$f"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    rm -f "$f"
+}
+
+@test "planlock_disposition_subjects cuts each reason at its first spaced dash, colon or parenthesis" {
+    local out
+    out="$(jq -rn "$_MG_JQ_DISPOSITION_DEF"' planlock_disposition_subjects(
+        ["plan-lock-disposition:docs-index:coordinated", "plan-lock-disposition:a-b"];
+        "plan-lock-disposition: x-y — why docs\nplan-lock-disposition: p -- q\nplan-lock-disposition: m (n)\nplan-lock-disposition: k - l")')"
+    [ "$out" = "docs-index a-b  x-y  p  m   k" ]
+}
+
 @test "plan-lock slugs: a path spelling out the collision phrase cannot substitute its own slug" {
     # The slug is read from the LAST phrase in the line: the gate template never
     # repeats it after the slug, so a crafted path's decoy slug is ignored.

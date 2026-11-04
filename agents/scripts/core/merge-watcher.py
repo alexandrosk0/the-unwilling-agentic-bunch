@@ -547,6 +547,11 @@ def poll_one(
         }
     # Invoke merge-gates.sh once (single poll iteration — MERGE_GATES_MAX_POLLS=1).
     env = os.environ.copy()
+    # SKIP_MERGE_GATES is an operator's per-merge decision (safe-merge.sh records
+    # it as GATES_SKIPPED). An unattended daemon never inherits it: the poll
+    # would print GATES_SKIPPED and exit 0, which this watcher would read as
+    # GATES_PASSED, merge on, and log as a pass.
+    env.pop("SKIP_MERGE_GATES", None)
     env.setdefault("MERGE_GATES_MAX_POLLS", "1")
     env.setdefault("MERGE_GATES_POLL_INTERVAL", "0")
     # Gate-logic self-freshness guard (#1428): refuse GATES_PASSED when this host

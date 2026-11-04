@@ -2047,6 +2047,38 @@ print('ok')
     [[ "$output" == *"ok"* ]]
 }
 
+@test "poll_one never hands an inherited SKIP_MERGE_GATES to merge-gates.sh" {
+    # SKIP_MERGE_GATES makes the poll print GATES_SKIPPED and exit 0, which the
+    # daemon would read as GATES_PASSED, merge on and ledger as a pass. The
+    # skip is an operator's per-merge decision (safe-merge.sh records it), so
+    # the watcher strips it from the env it passes the poller.
+    run env SKIP_MERGE_GATES=true python - <<'PY'
+import importlib.util, os, sys, tempfile
+sd = os.path.join(os.environ["REPO_ROOT"], "agents", "scripts", "core")
+spec = importlib.util.spec_from_file_location("mw", os.path.join(sd, "merge-watcher.py"))
+m = importlib.util.module_from_spec(spec); sys.modules["mw"] = m; spec.loader.exec_module(m)
+m._pr_lifecycle_state = lambda pr, cp: "OPEN"
+m._poll_owner_repo = lambda pr, cp: ("alexandrosk0", "Smatchet")
+m.ensure_pr_ready_for_review = lambda owner, repo, pr: True
+m._resolve_orch_user = lambda cp: "bats"
+seen = {}
+class _Gates:
+    returncode = 1
+    stdout = "Poll 1/1: BLOCKED"
+    stderr = ""
+def _run(owner, repo, pr, env):
+    seen["env"] = dict(env)
+    return _Gates()
+m._poll_run_gates = _run
+m.poll_one({"pr": 997, "clone_path": tempfile.mkdtemp()})
+assert os.environ.get("SKIP_MERGE_GATES") == "true"
+assert "SKIP_MERGE_GATES" not in seen["env"], seen["env"].get("SKIP_MERGE_GATES")
+print("skip stripped ok")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skip stripped ok"* ]]
+}
+
 @test "poll_one maps merge-gates exit 7 to ACTIONS_UNAVAILABLE and surfaces the ESCALATE diagnosis" {
     # Exit 7 returns before the per-iteration Poll line AND before GATE_CARRY,
     # so stdout is empty and stderr leads with the long BLOCK: required-missing

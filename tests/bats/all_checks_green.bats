@@ -265,6 +265,21 @@ PL_ANN_INFRA='.planlock_annotations = ["plan-lock-gate: origin/develop does not 
     [[ "$output" == *"DOWNGRADED  Plan-lock gate (failure)"* ]]
 }
 
+@test "plan-lock per-slug rule: an annotation split by a %0A path still yields its slug (poller parity)" {
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\", \"plan-lock-disposition:coordinated\"] | .planlock_annotations = [\"plan-lock-gate: 'Source/Sync/a\nb.cpp' overlaps the write set of plan-lock 'sync-rework', held by a different branch.\"]"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no plan-lock-disposition names the colliding lock slug(s): sync-rework."* ]]
+}
+
+@test "plan-lock per-slug rule: a slug in a disposition's why-part is not named (poller parity)" {
+    local two='.planlock_annotations = ["plan-lock-gate: '"'"'a'"'"' overlaps the write set of plan-lock '"'"'tracker-refactor'"'"', held by a different branch.", "plan-lock-gate: '"'"'b'"'"' overlaps the write set of plan-lock '"'"'docs'"'"', held by a different branch."]'
+    replay final "$GREEN_EDIT | setrun(\"Plan-lock gate\"; \"failure\") | .labels = [\"plan-lock-out-of-band\"] | .body = \"plan-lock-disposition: tracker-refactor — only touches docs/plans/INDEX.md\" | $two"
+    run bash "$ACG" --fixture "$SNAP"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no plan-lock-disposition names the colliding lock slug(s): docs."* ]]
+}
+
 @test "plan-lock per-slug rule: an unlearnable slug set leaves the Plan-lock red (fail closed)" {
     # No annotations at all (unreadable), an ambiguous line, and as many gate
     # lines as GitHub keeps per step (possibly truncated): none gives a set.

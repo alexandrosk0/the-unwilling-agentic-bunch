@@ -430,7 +430,8 @@ reason_of() { printf '%s' "$1" | jq -r '.hookSpecificOutput.permissionDecisionRe
 
 # A git on PATH that wraps the real one. A call whose arguments contain SHIM_HANG
 # hangs (as a dead remote would); one whose arguments contain SHIM_FAIL fails at
-# once (as an unreachable remote would); after a call whose arguments contain
+# once (as an unreachable remote would); one whose arguments contain SHIM_SLOW
+# first sleeps SHIM_SLOW_SECS (a slow remote); after a call whose arguments contain
 # SHIM_AFTER_MATCH, the script SHIM_AFTER runs with the real git (another
 # session acting between this hook's steps).
 install_git_shim() {
@@ -446,6 +447,9 @@ fi
 if [ -n "${SHIM_FAIL:-}" ] && [[ "$args" == *"$SHIM_FAIL"* ]]; then
     echo "fatal: unable to access the remote" >&2
     exit 128
+fi
+if [ -n "${SHIM_SLOW:-}" ] && [[ "$args" == *"$SHIM_SLOW"* ]]; then
+    sleep "${SHIM_SLOW_SECS:-3}"
 fi
 "$SHIM_REAL_GIT" "$@"; rc=$?
 if [ -n "${SHIM_AFTER:-}" ] && [[ "$args" == *"${SHIM_AFTER_MATCH:-}"* ]]; then
@@ -606,8 +610,70 @@ assert_note_without_decision() {
     [ "$status" -eq 0 ]
     [[ "$output" == *'"permissionDecision":"deny"'* ]]
     reason="$(reason_of "$output")"
-    [[ "$reason" == *"another branch's plan-lock 'theirs' claims 'Source/Core/src/Sync/Race.cpp', which this branch's auto-claim lock '$slug' also covers"* ]]
+    [[ "$reason" == *"another branch's plan-lock 'theirs' claims 'Source/Core/src/Sync/Race.cpp', which your plan-lock '$slug' also covers: this edit hook claimed"* ]]
     [[ "$reason" == *"lock-release.sh $slug"* ]]
+    # Once the other branch's lock is gone, the overlap is resolved: the edit
+    # passes and the record is dropped.
+    git -C "$BARE" update-ref -d refs/locks/theirs
+    rm -f "$(table_cache_file)"
+    run run_hook "Source/Core/src/Sync/Race.cpp"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    ! grep -qs 'Race.cpp' "$TMPDIR"/.smatchet-planlock-unresolved-*
+}
+
+@test "auto-claim: a failed restore after extending a hand-claimed lock keeps denying the retried edit" {
+    command -v timeout >/dev/null 2>&1 || skip "no timeout(1)"
+    enable_autoclaim
+    reg "$REGDIR" sibling-a
+    PLANT_OWNER=alice plant_lock mywork "$AC_BRANCH" Source/Core/src/Sync/A.cpp
+    plant_lock theirs feat/other Source/Core/src/Sync/C.cpp
+    seed_mywork_cache
+    install_git_shim
+    # The extension's push lands; the restore's push (the second push of
+    # refs/locks/mywork) hangs until the budget runs out.
+    # Hang every refs/locks/mywork push once armed: the first push (the extend)
+    # arms it after it lands.
+    cat > "$SHIM_DIR/git" <<SHIM2
+#!/usr/bin/env bash
+args=" \$* "
+if [ "\$1" = push ] && [ -e "$AC_SANDBOX/armed" ] && [[ "\$args" == *"refs/locks/mywork"* ]]; then
+    exec sleep 30 </dev/null >/dev/null 2>&1
+fi
+"$SHIM_REAL_GIT" "\$@"; rc=\$?
+if [ "\$1" = push ] && [[ "\$args" == *"refs/locks/mywork"* ]]; then : > "$AC_SANDBOX/armed"; fi
+exit "\$rc"
+SHIM2
+    chmod +x "$SHIM_DIR/git"
+    SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT=4 run run_hook "Source/Core/src/Sync/C.cpp"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    reason="$(reason_of "$output")"
+    [[ "$reason" == *"Restoring your plan-lock 'mywork' to its previous write set did not complete"* ]]
+    [[ "$reason" == *"Until then this hook keeps denying edits of 'Source/Core/src/Sync/C.cpp'"* ]]
+    [ "$(ws_of mywork)" = '["Source/Core/src/Sync/A.cpp","Source/Core/src/Sync/C.cpp"]' ]
+    # The retry is denied too, naming the hand lock the hook claimed into.
+    rm -f "$AC_SANDBOX/armed"
+    run run_hook "Source/Core/src/Sync/C.cpp"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    [[ "$(reason_of "$output")" == *"which your plan-lock 'mywork' also covers: this edit hook claimed"* ]]
+}
+
+@test "auto-claim: an earlier auto-claim that another branch overlaps later is never denied by the overlap rule" {
+    enable_autoclaim
+    reg "$REGDIR" sibling-a
+    slug="$(expected_slug feat-auto-claim "$AC_BRANCH")"
+    seed_table_cache '[]'
+    run run_hook "Source/Core/src/Sync/P.cpp"
+    [ "$status" -eq 0 ]
+    [[ "$(context_of "$output")" == *"auto-claimed plan-lock '$slug'"* ]]
+    # Another branch claims the same path by hand afterwards.
+    plant_lock theirs feat/other Source/Core/src/Sync/P.cpp
+    rm -f "$(table_cache_file)"
+    run run_hook "Source/Core/src/Sync/P.cpp"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 @test "auto-claim: a hand-claimed lock of this branch overlapping another branch's lock still allows (a coordinated claim)" {
@@ -835,6 +901,27 @@ fake_limiter() { # $1 = name, $2 = absent|real
     run run_hook "#notes.md"
     [ "$status" -eq 0 ]
     [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    [ -z "$(lock_refs)" ]
+    # A raw control byte in the path: the deny must still be valid JSON, or the
+    # harness cannot read the decision and the edit goes through.
+    run run_hook "Source/Core/src/Sync/a$(printf '\001')b.cpp"
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
+    [ -z "$(lock_refs)" ]
+}
+
+@test "auto-claim: the budget counts from the hook's start, so a slow lock-table read fails OPEN without claiming" {
+    command -v timeout >/dev/null 2>&1 || skip "no timeout(1)"
+    enable_autoclaim
+    reg "$REGDIR" sibling-a
+    install_git_shim
+    export SHIM_SLOW='+refs/locks/*:refs/locks/*' SHIM_SLOW_SECS=3   # the cold-cache table read
+    start=$SECONDS
+    SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT=2 run run_hook "Source/Core/src/Sync/New.cpp"
+    [ $((SECONDS - start)) -lt 10 ]
+    [ "$status" -eq 0 ]
+    assert_note_without_decision "$output"
+    [[ "$(context_of "$output")" == *"the lock-table read took the whole 2 s auto-claim budget"* ]]
     [ -z "$(lock_refs)" ]
 }
 

@@ -178,8 +178,9 @@ skills_dir = os.path.join(layer, "agents", "_shared", "skills")
 # A fence opens on 3+ backticks or tildes at any indentation (a list item indents
 # its fences past the 0-3 spaces of a top-level block) and closes only on a bare
 # run of the same character at least as long (CommonMark: a closing fence carries
-# no info string). A backtick opener whose info string holds a backtick is an
-# inline code span, not a fence.
+# no info string), indented at most three spaces past the opener (a deeper run is
+# content, such as an inner fence shown inside a fenced example). A backtick
+# opener whose info string holds a backtick is an inline code span, not a fence.
 FENCE_OPEN_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r"^\s*(`{3,}|~{3,})\s*$")
 CODE_SPAN_RE = re.compile(r"(`+)(?:(?!\1).)+?\1", re.S)
@@ -219,13 +220,14 @@ def prose_paragraphs(text):
     for line in text.splitlines():
         if fence is not None:
             m = FENCE_CLOSE_RE.match(line)
-            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+            if (m and m.group(1)[0] == fence[0][0] and len(m.group(1)) >= len(fence[0])
+                    and len(line) - len(line.lstrip(" ")) <= fence[1] + 3):
                 fence = None
             continue
         if not in_comment:
             m = FENCE_OPEN_RE.match(line)
             if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-                fence = m.group(1)
+                fence = (m.group(1), len(line) - len(line.lstrip(" ")))
                 if para:
                     yield "\n".join(para)
                     para = []

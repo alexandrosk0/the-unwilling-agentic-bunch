@@ -299,7 +299,7 @@ planlock_slugs_named() {
     local doc="$1" id msgs ann set reasons
     id="$(jq -r --arg self "$SELF_NAME" "$ACG_DEFS"' acg_planlock_waiver_id($self)' "$doc")" || return 1
     if [ -z "$id" ]; then echo true; return 0; fi
-    if msgs="$(jq -er '.planlock_annotations | if type == "array" then map(tostring) | join("\n") else error("unreadable") end' \
+    if msgs="$(jq -er '.planlock_annotations | if type == "array" then map(tostring | gsub("[[:cntrl:]]"; " ")) | join("\n") else error("unreadable") end' \
         "$doc" 2>/dev/null)"; then
         ann="$(printf '%s\n' "$msgs" | _mg_planlock_gate_slugs annotations)"
         case "$ann" in
@@ -309,7 +309,7 @@ planlock_slugs_named() {
     else
         set="unknown (the red Plan-lock gate run's annotations are unreadable)"
     fi
-    reasons="$(jq -r "$ACG_DEFS"' planlock_reasons_text(acg_labels; .body)' "$doc")" || return 1
+    reasons="$(jq -r "$ACG_DEFS"' planlock_disposition_subjects(acg_labels; .body)' "$doc")" || return 1
     if _mg_planlock_slug_report "$set" "$reasons"; then echo false; else echo true; fi
 }
 

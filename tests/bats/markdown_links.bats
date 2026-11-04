@@ -666,6 +666,50 @@ _mk_lint_fixture() {
     [[ "$output" == *"'rules.md#not-a-heading-1'"* ]]
 }
 
+@test "a heading with a code-span link label or an undefined [A][B] reference answers to GitHub's anchor" {
+    _mk_lint_fixture
+    {
+        printf '# Headings\n\n'
+        printf '### Runner scripts (mirror [`scripts/x.sh`](a.md))\n\n'
+        printf '### 1. [High][Logic/correctness] Bug\n'
+    } > "$FIXTURE_DIR/docs/rules.md"
+    printf '# a\n\n[r](rules.md#runner-scripts-mirror-scriptsxsh) [b](rules.md#1-highlogiccorrectness-bug)\n' \
+        > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"BROKEN_LINK"* ]]
+}
+
+@test "an inner fence shown indented inside a fenced example does not close it" {
+    _mk_lint_fixture
+    {
+        printf '# Template\n\n'
+        printf '```markdown\n1. Build:\n    ```bash\n    make\n    ```\n```\n\n'
+        printf '## Verification\n\n'
+        printf '```bash\nmake test\n```\n\n'
+        printf 'See [gone](missing-file.md).\n'
+    } > "$FIXTURE_DIR/docs/rules.md"
+    printf '# a\n\n[v](rules.md#verification)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    # The heading after the example has its anchor, and the link after the
+    # later fence is checked (not swallowed by a phantom fence).
+    [[ "$output" != *"'rules.md#verification'"* ]]
+    [[ "$output" == *"missing-file.md"* ]]
+}
+
+@test "a heading inside a list item's continuation takes its duplicate slot" {
+    _mk_lint_fixture
+    printf '# Doc\n\n## Foo\n\n1. Step\n\n    ## Foo\n\n## Foo\n' > "$FIXTURE_DIR/docs/rules.md"
+    printf '# a\n\n[f](rules.md#foo-2)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+    printf '# a\n\n[f](rules.md#foo-3)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'rules.md#foo-3'"* ]]
+}
+
 @test "a non-markdown target's fragment is not checked" {
     mkdir -p "$FIXTURE_DIR/agents/scripts/core" "$FIXTURE_DIR/docs"
     cp "$LINT" "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"

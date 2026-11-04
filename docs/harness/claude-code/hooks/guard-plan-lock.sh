@@ -32,15 +32,18 @@
 #     rollback completed. This, not the claim's exit 1, is the cross-branch race
 #     guard: auto slugs are per branch. The re-read fetches strictly: a failed
 #     fetch is "could not run", never a read of stale local refs. A rollback
-#     that did not complete leaves this branch's auto lock overlapping the other
-#     branch's: later edits of the path stay DENIED until it is resolved.
+#     that did not complete is recorded on this machine (lock-table-cache.sh
+#     ltc_unresolved_*), and later edits of the path stay DENIED while the
+#     other branch's lock still covers it. An overlap the hook did not make
+#     (a hand claim, or another branch claiming over this one later) passes.
 #     The new slug already held (exit 1, normally this branch seen through a
 #     stale cache) -> fresh re-read: another branch covers -> DENY; this branch
 #     covers -> allow; else allow with a warning. Any other failure (exit 2/3/4,
 #     network, budget) -> FAIL OPEN: allow with a warning.
 #     Bounded: each claim script makes one push attempt (LOCK_RETRY_MAX=1), and
 #     every network step runs under timeout(1)/gtimeout inside one wall-clock
-#     budget (SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT, default 8 s). With neither
+#     budget (SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT, default 8 s) counted from the
+#     hook's start, so a slow lock-table read leaves less for the claim. With neither
 #     timeout(1) nor gtimeout, auto-claim does not run: the classic deny (fail
 #     closed), never an unbounded network step.
 #     Every claim, extend or rollback drops the cached lock table.
@@ -84,13 +87,27 @@ set -u
 # does NOT work).
 [ "${SMATCHET_REQUIRE_PLAN_LOCK:-1}" = "0" ] && exit 0
 
-json_escape() { # backslash, double-quote and the control characters a path can carry
-  local s="$1"
+json_escape() { # backslash, double-quote and every control character (U+0001-U+001F, U+007F)
+  local s="$1" out="" c i
   s="${s//\\/\\\\}"
   s="${s//\"/\\\"}"
   s="${s//$'\n'/\\n}"
   s="${s//$'\r'/\\r}"
   s="${s//$'\t'/\\t}"
+  case "$s" in
+    *[[:cntrl:]]*)
+      # Rare (a path carrying a raw control byte): escape byte by byte, so the
+      # deny stays valid JSON the harness can act on.
+      for ((i = 0; i < ${#s}; i++)); do
+        c="${s:i:1}"
+        case "$c" in
+          [[:cntrl:]]) out+="$(printf '\\u%04x' "'$c")" ;;
+          *) out+="$c" ;;
+        esac
+      done
+      s="$out"
+      ;;
+  esac
   printf '%s' "$s"
 }
 
@@ -276,27 +293,35 @@ autoclaim_slug() { # $1 = branch
 SLUG_RE='^[a-z0-9][a-z0-9-]{0,63}$'
 aslug="$(autoclaim_slug "$mybr")"
 
-deny_overlap() { # $1 = the other branch's slug
-  deny "Plan-lock: ${count} other live session(s) share this repo and another branch's plan-lock '${1}' claims '${rel}', which this branch's auto-claim lock '${aslug}' also covers: an earlier auto-claim lost a race and its rollback did not complete. Drop '${rel}' from '${aslug}' (bash agents/scripts/core/lock-claim-update.sh ${aslug} <full-write-set-file>, listing every other path) or release it (bash agents/scripts/core/lock-release.sh ${aslug}), then coordinate with that branch (bash agents/scripts/core/locks-show.sh). Override: export SMATCHET_REQUIRE_PLAN_LOCK=0 in the session env BEFORE launch (an inline prefix does NOT reach this hook)."
+deny_overlap() { # $1 = the other branch's slug, $2 = this branch's lock the hook claimed the path into
+  deny "Plan-lock: ${count} other live session(s) share this repo and another branch's plan-lock '${1}' claims '${rel}', which your plan-lock '${2}' also covers: this edit hook claimed '${rel}' into '${2}', lost the race to that branch, and could not roll the claim back. Drop '${rel}' from '${2}' (bash agents/scripts/core/lock-claim-update.sh ${2} <full-write-set-file>, listing every other path; or bash agents/scripts/core/lock-release.sh ${2} if it holds nothing else), then coordinate with that branch (bash agents/scripts/core/locks-show.sh). Override: export SMATCHET_REQUIRE_PLAN_LOCK=0 in the session env BEFORE launch (an inline prefix does NOT reach this hook)."
 }
 
 # Allow iff covered by a lock whose branch == mine. rc: 0 covered, 1 not, 2
-# undetermined (table unavailable -> fail-open allow). One exception: this
-# branch's AUTO-claim lock covering a path another branch's lock also covers is
-# the trace of a lost cross-branch race whose rollback did not complete (see
-# crosscheck_after_claim), so the edit stays denied until it is resolved, rather
-# than a retried edit passing silently. A lock claimed by hand that overlaps
-# another branch's is a deliberate, coordinated claim and stays allowed.
-sslug="$(ltc_covering_slug "$rel" same "$mybr")"; cov=$?
+# undetermined (table unavailable -> fail-open allow). One exception: a path
+# this hook claimed into this branch's lock, lost to another branch's claim and
+# could not roll back (crosscheck_after_claim records it) stays denied while
+# that other lock still covers it, rather than a retried edit passing silently.
+# Any other overlap passes, as before: a lock claimed by hand over another
+# branch's is a deliberate, coordinated claim, and a later claim by another
+# branch over this branch's earlier one is that branch's to resolve (Layers B
+# and C flag both).
+ltc_covering_slug "$rel" same "$mybr" >/dev/null; cov=$?
 case "$cov" in
   0)
-    if [ "$sslug" = "$aslug" ]; then
-      oslug="$(ltc_covering_slug "$rel" other "$mybr")" && deny_overlap "$oslug"
+    if uslug="$(ltc_unresolved_slug "$mybr" "$rel")"; then
+      oslug="$(ltc_covering_slug "$rel" other "$mybr")"; ocov=$?
+      case "$ocov" in
+        0) deny_overlap "$oslug" "$uslug" ;;
+        1) ltc_unresolved_drop "$mybr" "$rel" ;; # the other lock is gone: resolved
+      esac
     fi
     exit 0
     ;;
   2) exit 0 ;;
 esac
+# This branch no longer covers the path: any unresolved-rollback record for it is stale.
+ltc_unresolved_drop "$mybr" "$rel"
 
 # Another branch's claim covering the path is real contention: always deny.
 oslug="$(ltc_covering_slug "$rel" other "$mybr")"; ocov=$?
@@ -362,7 +387,12 @@ AC_BUDGET="${SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT:-8}"
 case "$AC_BUDGET" in ''|*[!0-9]*) AC_BUDGET=8 ;; esac
 AC_BUDGET=$((10#$AC_BUDGET)) # a leading 0 is not octal
 [ "$AC_BUDGET" -gt 0 ] || AC_BUDGET=8
-AC_START=$SECONDS
+# The budget runs from the hook's start ($SECONDS counts from shell start), so
+# the lock-table reads above, which a cold cache runs without a limiter, count
+# against it too: a slow read leaves less for the claim, never more.
+AC_START=0
+[ $((AC_BUDGET - SECONDS)) -gt 0 ] ||
+  fail_open "the lock-table read took the whole ${AC_BUDGET} s auto-claim budget"
 run_bounded() { # run "$@" in what is left of the budget; 124 once it is spent
   local left=$((AC_BUDGET - (SECONDS - AC_START)))
   [ "$left" -gt 0 ] || return 124
@@ -432,10 +462,11 @@ rollback_new() {
   fi
   if [ "$rc" -eq 0 ]; then
     printf " Its auto-claim '%s' is released again." "$aslug"
-  else
-    printf " Rolling back its auto-claim '%s' did not complete (%s): release it with bash agents/scripts/core/lock-release.sh %s." \
-      "$aslug" "$(rollback_failure "$rc" lock-release.sh "$out")" "$aslug"
+    return 0
   fi
+  printf " Rolling back its auto-claim '%s' did not complete (%s): release it with bash agents/scripts/core/lock-release.sh %s. Until then this hook keeps denying edits of '%s'." \
+    "$aslug" "$(rollback_failure "$rc" lock-release.sh "$out")" "$aslug" "$rel"
+  return 1
 }
 
 # Undo a just-made extension: restore the previous write set, pinned to the
@@ -451,10 +482,11 @@ rollback_extend() {
   fi
   if [ "$rc" -eq 0 ]; then
     printf " Your plan-lock '%s' is restored to its previous write set." "$own"
-  else
-    printf " Restoring your plan-lock '%s' to its previous write set did not complete (%s): drop '%s' from it with bash agents/scripts/core/lock-claim-update.sh %s <full-write-set-file>." \
-      "$own" "$(rollback_failure "$rc" lock-claim-update.sh "$out")" "$rel" "$own"
+    return 0
   fi
+  printf " Restoring your plan-lock '%s' to its previous write set did not complete (%s): drop '%s' from it with bash agents/scripts/core/lock-claim-update.sh %s <full-write-set-file>. Until then this hook keeps denying edits of '%s'." \
+    "$own" "$(rollback_failure "$rc" lock-claim-update.sh "$out")" "$rel" "$own" "$rel"
+  return 1
 }
 
 # Another branch can claim the path between this hook's cached read and its own
@@ -465,18 +497,24 @@ rollback_extend() {
 # which is safe). Another branch covers the path -> roll back best-effort, then
 # DENY, also when the budget is spent and the rollback did not run. Re-read
 # undetermined -> allow with the note, fail-open, saying the re-check did not run.
-crosscheck_after_claim() { # $1 = rollback function, $2 = the allow note
+crosscheck_after_claim() { # $1 = rollback function, $2 = the claimed slug, $3 = the allow note
   local xslug xrc rb
   xslug="$(other_cover_fresh)"; xrc=$?
   case "$xrc" in
     0)
-      rb="$("$1")"
+      # An incomplete rollback is recorded, so the deny holds on a retried edit.
+      if rb="$("$1")"; then
+        ltc_unresolved_drop "$mybr" "$rel"
+      else
+        ltc_unresolved_add "$mybr" "$2" "$rel" ||
+          rb="$rb (This machine could not record it, so a retry may not be denied.)"
+      fi
       drop_table_cache
       deny_other "$xslug" "$rb"
       ;;
-    1) allow_note "$2" ;;
+    1) allow_note "$3" ;;
   esac
-  allow_note "$2 The fresh cross-branch re-check did not run (exit ${xrc}), so a claim another branch filed moments ago is not ruled out; the pre-push gate (Layer B) still checks."
+  allow_note "$3 The fresh cross-branch re-check did not run (exit ${xrc}), so a claim another branch filed moments ago is not ruled out; the pre-push gate (Layer B) still checks."
 }
 
 # One extend attempt under a pinned lease. Exits on success-without-write and on
@@ -533,7 +571,7 @@ if [ -n "$own" ]; then
   extend_own || extend_own ||
     fail_open "plan-lock '${own}' changed again while this hook re-read it (${ext_err}); nothing was written"
   drop_table_cache
-  crosscheck_after_claim rollback_extend "Plan-lock: ${count} other live session(s) share this repo, so this edit hook extended your plan-lock '${own}' on branch '${mybr}' with '${rel}' (${n} paths now; none dropped). Keep editing; release it with the rest of the work as usual."
+  crosscheck_after_claim rollback_extend "$own" "Plan-lock: ${count} other live session(s) share this repo, so this edit hook extended your plan-lock '${own}' on branch '${mybr}' with '${rel}' (${n} paths now; none dropped). Keep editing; release it with the rest of the work as usual."
 fi
 
 # Claim a new lock for this branch under its deterministic slug.
@@ -545,7 +583,7 @@ case "$rc" in
   0)
     claim_sha="$(printf '%s\n' "$out" | sed -n 's/.* claimed at \([0-9a-f]\{40,64\}\) (owner=.*/\1/p' | tail -n 1)"
     drop_table_cache
-    crosscheck_after_claim rollback_new "Plan-lock: ${count} other live session(s) share this repo, so this edit hook auto-claimed plan-lock '${aslug}' for '${rel}' on branch '${mybr}'. Later uncovered edits on this branch extend it. Set its plan with LOCK_PLAN=<your plan-doc> bash agents/scripts/core/lock-claim-update.sh ${aslug} <full-write-set-file>, and release it with the rest of the work as usual."
+    crosscheck_after_claim rollback_new "$aslug" "Plan-lock: ${count} other live session(s) share this repo, so this edit hook auto-claimed plan-lock '${aslug}' for '${rel}' on branch '${mybr}'. Later uncovered edits on this branch extend it. Set its plan with LOCK_PLAN=<your plan-doc> bash agents/scripts/core/lock-claim-update.sh ${aslug} <full-write-set-file>, and release it with the rest of the work as usual."
     ;;
   1)
     # The slug is already held. It is derived from this branch, so the holder is

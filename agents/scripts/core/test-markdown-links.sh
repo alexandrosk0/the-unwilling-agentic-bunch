@@ -621,25 +621,30 @@ _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 class FenceTracker:
     """CommonMark fenced-code state, fed one line at a time. A fence closes only
     on a run of the opener's character at least as long as the opener, with
-    nothing after it but blanks, so a ``` line inside a ~~~ block (or a short
-    run inside a longer one) stays code. A backtick run followed by another
-    backtick on the line is an inline code span, not an opener. Indentation is
-    not capped at three spaces: a fence nested in a list item is indented
-    further, and treating it as code is the established reading here."""
+    nothing after it but blanks, indented at most three spaces past the
+    opener: so a ``` line inside a ~~~ block, a short run inside a longer one,
+    or an inner fence shown indented inside a fenced example all stay code. A
+    backtick run followed by another backtick on the line is an inline code
+    span, not an opener. The opener's own indentation is not capped at three
+    spaces: a fence nested in a list item is indented further, and treating it
+    as code is the established reading here."""
 
     def __init__(self):
-        self.opener = None  # (character, run length) while inside a fence
+        self.opener = None  # (character, run length, indentation) while inside a fence
 
     def step(self, line):
         """True when `line` opens, closes or lies inside a fence."""
-        m = _FENCE_RE.match(line.rstrip("\r\n"))
+        line = line.rstrip("\r\n")
+        m = _FENCE_RE.match(line)
+        indent = len(line) - len(line.lstrip(" "))
         if self.opener is None:
             if m is None or (m.group(1)[0] == "`" and "`" in m.group(2)):
                 return False
-            self.opener = (m.group(1)[0], len(m.group(1)))
+            self.opener = (m.group(1)[0], len(m.group(1)), indent)
             return True
         if (m is not None and m.group(1)[0] == self.opener[0]
-                and len(m.group(1)) >= self.opener[1] and not m.group(2).strip()):
+                and len(m.group(1)) >= self.opener[1] and not m.group(2).strip()
+                and indent <= self.opener[2] + 3):
             self.opener = None
         return True
 
@@ -656,8 +661,11 @@ def github_slug(text):
     return "".join(kept).replace(" ", "-")
 
 
-def _render_inline(seg, strip_emphasis):
-    """Plain text of a non-code-span stretch of a heading, as GitHub renders it."""
+def _render_inline(seg, strip_emphasis, keep_refs=False):
+    """Plain text of a non-code-span stretch of a heading, as GitHub renders it.
+    keep_refs leaves a full or collapsed reference (`[a][b]`, `[a][]`) as its
+    literal bracketed text, which is how GitHub renders one whose label the file
+    never defines."""
     escaped = []
 
     def _protect(m):
@@ -667,7 +675,8 @@ def _render_inline(seg, strip_emphasis):
     seg = re.sub(r"\\([!-/:-@\[-`{-~])", _protect, seg)
     seg = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", seg)
     seg = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", seg)
-    seg = re.sub(r"\[([^\]]*)\]\[[^\]]*\]", r"\1", seg)
+    if not keep_refs:
+        seg = re.sub(r"\[([^\]]*)\]\[[^\]]*\]", r"\1", seg)
     seg = re.sub(r"<((?:https?|mailto):[^>\s]+)>", r"\1", seg)
     seg = re.sub(r"<[^>]+>", "", seg)
     if strip_emphasis:
@@ -678,22 +687,35 @@ def _render_inline(seg, strip_emphasis):
     return re.sub(r"\x00(\d+)\x00", lambda m: escaped[int(m.group(1))], seg)
 
 
+# An inline link or image, its label allowed one level of nested brackets.
+_HEADING_LINK_RE = re.compile(r"!?\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\([^)]*\)")
+
+
 def heading_renderings(raw):
-    """Every plausible rendered text of heading source `raw` (see the block comment)."""
+    """Every plausible rendered text of heading source `raw` (see the block
+    comment). Link destinations also come out BEFORE the code-span split, so a
+    link whose label is a code span (`[`x.sh`](x.sh)`) renders as its label;
+    and full / collapsed references are rendered both resolved and literal."""
     out = []
-    for strip_emphasis in (True, False):
-        parts, pos = [], 0
-        for m in _HEADING_CODE_RE.finditer(raw):
-            parts.append(_render_inline(raw[pos:m.start()], strip_emphasis))
-            code = m.group(2)
-            if len(code) > 2 and code.startswith(" ") and code.endswith(" ") and code.strip():
-                code = code[1:-1]
-            parts.append(code)
-            pos = m.end()
-        parts.append(_render_inline(raw[pos:], strip_emphasis))
-        text = "".join(parts)
-        if text not in out:
-            out.append(text)
+    sources = [raw]
+    delinked = _HEADING_LINK_RE.sub(r"\1", raw)
+    if delinked != raw:
+        sources.append(delinked)
+    for src in sources:
+        for strip_emphasis in (True, False):
+            for keep_refs in (False, True):
+                parts, pos = [], 0
+                for m in _HEADING_CODE_RE.finditer(src):
+                    parts.append(_render_inline(src[pos:m.start()], strip_emphasis, keep_refs))
+                    code = m.group(2)
+                    if len(code) > 2 and code.startswith(" ") and code.endswith(" ") and code.strip():
+                        code = code[1:-1]
+                    parts.append(code)
+                    pos = m.end()
+                parts.append(_render_inline(src[pos:], strip_emphasis, keep_refs))
+                text = "".join(parts)
+                if text not in out:
+                    out.append(text)
     return out
 
 
@@ -715,8 +737,9 @@ def heading_sources(lines):
     alone is kept as a second alternative. The underline must sit at the
     paragraph's quote depth, so a quoted paragraph above a top-level `---`
     (a thematic break) is not misread as a heading that would shift the
-    duplicate numbering. A list item's continuation paragraph is not tracked
-    for setext underlines."""
+    duplicate numbering. A heading inside a list item's continuation counts at
+    the item's content column. A list item's continuation paragraph is not
+    tracked for setext underlines."""
     heads = []
     fence = FenceTracker()
     fence_depth = 0
@@ -728,6 +751,7 @@ def heading_sources(lines):
                 break
     para = []
     para_depth = 0
+    item_offset = None  # content column of the open list item, if any
     for line in lines[start:]:
         depth, content = _quote_split(line.rstrip("\n"))
         if fence.opener is not None:
@@ -741,7 +765,19 @@ def heading_sources(lines):
             para = []
             continue
         lm = _LIST_MARKER_RE.match(content)
-        m = _ATX_HEADING_RE.match(content[lm.end():] if lm else content)
+        target = content
+        if lm:
+            target = content[lm.end():]
+            item_offset = lm.end() if target.strip() else lm.end() + 1
+        elif content.strip():
+            indent = len(content) - len(content.lstrip(" "))
+            if item_offset is not None and indent >= item_offset:
+                # A line inside the open item: a heading there is indented by
+                # the item's content column, not by the 0-3 spaces of the top level.
+                target = content[item_offset:]
+            elif item_offset is not None:
+                item_offset = None
+        m = _ATX_HEADING_RE.match(target)
         if m:
             heads.append([m.group(2) or ""])
             para = []

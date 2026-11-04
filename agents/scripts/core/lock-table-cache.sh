@@ -31,7 +31,8 @@
 # docs/plans/plan-lock-enforcement.md § Approach (identity note).
 #
 # Public functions: ltc_sibling_count, ltc_covering_slug, ltc_lock_rows,
-# ltc_lock_table_json, ltc_invalidate_table. `_ltc_*` names are internal.
+# ltc_lock_table_json, ltc_invalidate_table, ltc_unresolved_add,
+# ltc_unresolved_slug, ltc_unresolved_drop. `_ltc_*` names are internal.
 #
 # Test/override seams (read-only):
 #   LTC_PROJ           force the repo root (default CLAUDE_PROJECT_DIR | $PWD)
@@ -136,6 +137,43 @@ ltc_lock_table_json() {
       && mv -f "$cache.tmp.$$" "$cache" 2>/dev/null || rm -f "$cache.tmp.$$" 2>/dev/null
   fi
   printf '%s' "$json"
+  return 0
+}
+
+# --- unresolved auto-claim rollbacks -----------------------------------------
+# When the Layer A hook's own claim loses a cross-branch race and rolling it
+# back does not complete, this branch's lock is left overlapping another
+# branch's on that path. The hook records it here (branch<TAB>slug<TAB>path) so
+# later edits of the path stay denied until the overlap is resolved. Only the
+# hook's own failed rollbacks are recorded: an overlap a person claimed by hand,
+# or one another branch made later over this branch's earlier claim, is never
+# denied here. Per machine and per repo, like the table cache; a cleared TMPDIR
+# drops the record and the deny fails open (Layers B and C still check). Values
+# reach awk through ENVIRON, never -v, so a backslash in a path stays literal.
+_ltc_unresolved_path() { printf '%s/.smatchet-planlock-unresolved-%s' "$(_ltc_cache_dir)" "$1"; }
+ltc_unresolved_add() { # $1 = branch, $2 = slug, $3 = path; rc 1 when it cannot be recorded
+  local key
+  key="$(_ltc_repo_key)" || return 1
+  [ -n "$key" ] || return 1
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$(_ltc_unresolved_path "$key")" 2>/dev/null
+}
+ltc_unresolved_slug() { # $1 = branch, $2 = path -> the recorded slug; rc 0 found, 1 not
+  local key f
+  key="$(_ltc_repo_key)" || return 1
+  [ -n "$key" ] || return 1
+  f="$(_ltc_unresolved_path "$key")"
+  [ -f "$f" ] || return 1
+  LTC_B="$1" LTC_P="$2" awk -F '\t' '$1 == ENVIRON["LTC_B"] && $3 == ENVIRON["LTC_P"] { s = $2 }
+    END { if (s == "") exit 1; print s }' "$f" 2>/dev/null
+}
+ltc_unresolved_drop() { # $1 = branch, $2 = path; always rc 0
+  local key f
+  key="$(_ltc_repo_key)" || return 0
+  [ -n "$key" ] || return 0
+  f="$(_ltc_unresolved_path "$key")"
+  [ -f "$f" ] || return 0
+  LTC_B="$1" LTC_P="$2" awk -F '\t' '!($1 == ENVIRON["LTC_B"] && $3 == ENVIRON["LTC_P"])' "$f" > "$f.tmp.$$" 2>/dev/null \
+    && mv -f "$f.tmp.$$" "$f" 2>/dev/null || rm -f "$f.tmp.$$" 2>/dev/null
   return 0
 }
 

@@ -85,11 +85,13 @@ _mg_planlock_gate_slugs() {
     fi
 }
 
-# _mg_planlock_unnamed_slugs <reasons> <slug> … — print (space-separated) each
-# slug that no plan-lock-disposition reason names. A reason names a slug when
-# the slug appears in it as a whole word: lower-cased, with every character
-# outside the slug alphabet treated as a separator, so `docs-index` is named by
-# "docs-index: coordinated" or "(docs-index)" but not by "docs-index-v2".
+# _mg_planlock_unnamed_slugs <subjects> <slug> … — print (space-separated) each
+# slug that no plan-lock-disposition subject names (planlock_disposition_subjects
+# in merge-gates.d/10-gate-filter.sh cuts each reason to its subject). A subject
+# names a slug when the slug appears in it as a whole word: lower-cased, with
+# every character outside the slug alphabet treated as a separator, so
+# `docs-index` is named by "docs-index" or "docs-index, sync" but not by
+# "docs-index-v2".
 _mg_planlock_unnamed_slugs() {
     local norm slug out=""
     norm=" $(printf '%s' "$1" | LC_ALL=C tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz' \
