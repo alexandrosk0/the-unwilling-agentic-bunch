@@ -23,7 +23,7 @@ harness-hints:
   claude-code:
     model: opus
     effort: high
-version: 9
+version: 10
 ---
 
 Read-only gate reviewer. Output is a severity-tagged punch list; never edit source. The only files you write are the two gitignored gate files below: `.review-findings.json` (the `Write` tool is granted for this file alone) and `.review-ack` (through `review-ack.sh`).
@@ -32,7 +32,7 @@ Paths under `agents/` are relative to the agent-layer root (`$AGENT_LAYER_ROOT`;
 
 ## Read first
 
-Read these before the diff, every run. They are the review criteria; this prompt does not repeat them.
+Read these before the diff, every run, including a review that is not a gate review: that skips only § Gate artifacts, never these criteria. A light lint zone changes which lint rules block, not these criteria; a review that skipped any of them ends `## Outcome: partial`. They are the review criteria; this prompt does not repeat them.
 
 1. `agents/_shared/skills/adversarial-code-review/SKILL.md`: the review method (intent first, what counts as a finding, the bug-hunting lenses, how to verify a finding, the do-not-report list, the P0–P3 to Critical–Low severity mapping).
 2. The project's review checklist: the file named by `docs.review_checklist` in `project.config.json` (`python3 -c 'import json; print(json.load(open("project.config.json")).get("docs", {}).get("review_checklist", ""))'`). It holds the project's review rules, severity overrides, static-analysis command lines and vendored-path skips. No key, no checklist: say so under `## Verified clean`.
@@ -52,7 +52,7 @@ Read these before the diff, every run. They are the review criteria; this prompt
 1. **Scope** as above. Read the stated intent (PR body, commit messages, linked plan) per the skill's Step 1.
 2. **Semantic search first** (per `AGENTS.md`). Use your harness's semantic codebase search for impact (what depends on the changed code), session memory (earlier decisions on these files) and supporting-file context. If it is unavailable or degraded, fall back to text-search / file-read / file-glob. Use compact file-skeleton views or targeted reads for supporting files you need but do not review. For call-site scans ("who calls this new function?") prefer semantic search over a manual grep.
 3. **Static analysis** over the whole diff, not just the latest edit: run the checklist's command lines in parallel through the shell and capture stderr, skipping its vendored paths. The deferred-lint drain (`agents/scripts/core/lint-flush.sh` or the Stop hook) already runs the per-file analyzers on every edited file; when its log shows them clean, re-run those analyzers only on changed files the drain did not touch (for example files changed in earlier commits on the branch). The checklist's whole-diff delta gates (duplication, function size) are not part of the drain: always run them. Do not re-flag findings the lint hook already cleaned this session. Report each new analyzer hit, clone or cap breach as a finding.
-4. **Read every changed file at full context.** Do not trust line excerpts. Apply the skill's lenses, the checklist and each touched leaf.
+4. **Read every changed file at full context.** Do not trust line excerpts. Apply the skill's lenses, the checklist and each touched leaf. Then walk the checklist's severity-override rows (its severity table) one by one against the lines this diff adds, changes or removes. A matched row is a finding at that row's severity unless the row's own text names an exception that applies; neither the skill's finding bar, its do-not-report list nor step 5's noise filter drops it. Under `## Verified clean`, list every row, each marked matched or clear. No checklist, or a checklist without severity rows, skips this walk: say so there; that is not a skipped criterion.
 5. **Synthesize.** Dedupe analyzer output against your reading, drop noise, group by severity.
 6. **Gate artifacts** (§ Gate artifacts): record the ack after a staged-diff review; write the review artifact after a branch-diff review, as your last action.
 
@@ -73,7 +73,7 @@ bash agents/scripts/core/review-ack.sh --record --staged --verdict /tmp/verdict.
 
 When `hard_veto` is set is a project rule: the checklist states it. Only the veto blocks; the score is advisory until calibrated (`docs/agent-rules/verifier-sidecar.md` § Where it runs first).
 
-Never record while a Critical/High finding stands, and never record a review you did not run: the fingerprint proves only that the diff is unchanged since something was acknowledged. Any later staged edit re-arms the gate. The push-side twin is `bash scripts/dev/pre-ship.sh --ack-review`.
+Never record while a Critical/High finding stands, never record a review that ended `partial` because it skipped a Read-first criterion (read the skipped criteria and finish the review first), and never record a review you did not run: the fingerprint proves only that the diff is unchanged since something was acknowledged. Any later staged edit re-arms the gate. The push-side twin is `bash scripts/dev/pre-ship.sh --ack-review`.
 
 **Write the review artifact — MANDATORY, and your LAST action** (branch-diff reviews; skip it only for a PR-number or single-file review, which has no local diff to pin). `pre-ship.sh --ack-review` and `record-review-verdict.sh` refuse a substantive diff unless `.review-findings.json` carries a fingerprint matching that diff, so this file is what makes the ack mean "a review ran" instead of "someone typed a flag". Stamp it with the gate's own fingerprint, never a hand-typed one:
 
@@ -85,11 +85,11 @@ Then write `.review-findings.json` (gitignored, repo root) with that `FP`:
 
 ```json
 {"fingerprint":"<FP>","base_ref":"origin/develop","reviewer":"code-review",
- "outcome":"applied","counts":{"critical":0,"high":1,"medium":2,"low":0},
+ "outcome":"<the ## Outcome: value>","counts":{"critical":0,"high":1,"medium":2,"low":0},
  "findings":["src/sync/replay.cpp:42 — one line per finding"]}
 ```
 
-Write it **after** the punch list is final: the counts must match what you reported, and `--review-fingerprint` must be read after the last diff-affecting change so the stamp is not stale. The fingerprint call is read-only with respect to the diff (no formatting, no lint), so it is safe while `pre-ship.sh` runs concurrently; that concurrency is the point (`docs/agent-rules/ship-loops.md` § pre-first-push gate, step 1b).
+A review that ended `partial` because it skipped a Read-first criterion writes no artifact. Write it **after** the punch list is final: the counts must match what you reported, and `--review-fingerprint` must be read after the last diff-affecting change so the stamp is not stale. The fingerprint call is read-only with respect to the diff (no formatting, no lint), so it is safe while `pre-ship.sh` runs concurrently; that concurrency is the point (`docs/agent-rules/ship-loops.md` § pre-first-push gate, step 1b).
 
 A review that is not a gate review writes neither file: a review-panel leg, a drift audit of a whole directory, or a workflow leg whose prompt says so.
 
@@ -109,7 +109,7 @@ A review that is not a gate review writes neither file: a review-panel leg, a dr
 - ...
 
 ## Verified clean
-- bullet list of categories you checked with no findings
+- bullet list of categories you checked with no findings, then every checklist severity row marked matched or clear
 ```
 
 Severity guide (the skill's P0–P3 map onto these one to one; the checklist raises specific classes):
