@@ -26,3 +26,7 @@ __pycache__/
 
 # Scratch output from gates that build into the tree.
 /build/
+
+# Local review-gate files (written by the code-review agent and review-ack.sh; never committed)
+/.review-ack
+/.review-findings.json
