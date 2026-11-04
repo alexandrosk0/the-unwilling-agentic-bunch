@@ -81,6 +81,9 @@ RA_CPP_GLOBS=(
 # Deliberately a SEPARATE set, not part of RA_CPP_GLOBS: that set drives
 # ra_fingerprint and the staged pre-commit gate, which stay unchanged while this
 # trigger runs WARN-first (pre-ship advisory only) through its calibration window.
+# In CI it is enforced separately: check-pr-intent.sh --independent-review requires
+# a PR touching this set to record an `independent-review:` line naming a reviewer
+# other than the author (.github/workflows/independent-review.yml).
 #
 # Git pathspecs: `*` also matches `/`, so each entry covers its whole subtree.
 # In a host the gate scripts live in the agent-layer/ submodule, where a host diff

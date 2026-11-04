@@ -82,6 +82,82 @@ print("check-pr-intent: OK — `## Intent` present and filled; review verdict re
 PY
 }
 
+# _check_independent <body-text> <changed-files-file> — the independent-review
+# requirement for a diff that edits the review-enforcement surface itself
+# (RA_ENFORCEMENT_GLOBS: gate scripts, lint rules, dev scripts, git hooks, CI,
+# harness hooks, gate config, the agent-layer gitlink). A self-review is where a
+# blind spot in gate logic is most expensive, so such a diff must also record a
+# review by someone other than the author: `independent-review: <who>; N
+# findings[, <disposition>] (head=<sha>)` (process 2026-08-17
+# cr-finding-gate-accepts-a-verdict-line-without-a-review, action 3). Like the
+# verdict line, this proves a claim was recorded for THIS head, never that the
+# review ran. A diff that touches none of those paths needs no such line.
+_check_independent() {
+    local body="$1" files="$2"
+    [ -r "$files" ] || { echo "check-pr-intent: cannot read changed-files list: $files" >&2; return 2; }
+    # shellcheck source=agents/scripts/core/lib/review-ack.sh
+    . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/review-ack.sh"
+    PR_BODY="$body" CHANGED_FILES="$files" PR_AUTHOR="${PR_AUTHOR:-}" \
+        ENFORCEMENT_GLOBS="$(printf '%s\n' "${RA_ENFORCEMENT_GLOBS[@]}")" "$PY" - <<'PY'
+import fnmatch, os, re, sys
+body = os.environ.get("PR_BODY", "") or ""
+globs = [g for g in os.environ["ENFORCEMENT_GLOBS"].splitlines() if g]
+with open(os.environ["CHANGED_FILES"], encoding="utf-8") as fh:
+    changed = [ln.strip() for ln in fh if ln.strip()]
+# Git pathspec glob semantics: `*` also matches `/`, as fnmatchcase does.
+hits = [f for f in changed if any(fnmatch.fnmatchcase(f, g) for g in globs)]
+if not hits:
+    print("check-pr-intent: independent review not required — no change under the review-enforcement surface.")
+    sys.exit(0)
+shown = ", ".join(hits[:3]) + (" …" if len(hits) > 3 else "")
+# Text GitHub does not render as a plain line cannot carry the review: closed and
+# unclosed HTML comments, and fenced code blocks.
+# CRLF (the web editor's line ending) is normalised first so `$` meets a bare `\n`.
+stripped = re.sub(r'(?s)<!--.*?(?:-->|\Z)', '', body.replace('\r\n', '\n'))
+stripped = re.sub(r'(?ms)^[ \t]*(`{3,}|~{3,}).*?(?:^[ \t]*\1[`~]*[ \t]*$|\Z)', '', stripped)
+ind_re = re.compile(
+    r'(?mi)^\s*(?:[-*+]\s+)?(?:\[[ xX]\]\s+)?[*_`]*independent-review[*_`]*\s*:[*_]*\s*'
+    r'(?P<who>(?![<\s])[^;\n]*?)\s*;\s*\d+\s+findings?\b(?:[\s,:;—–-]*(?![<,\s:;—–-])\S.*)?[ \t]*\r?$')
+NOT_A_REVIEWER = {"self", "myself", "none", "n/a", "na", "author", "the author",
+                  "me", "reviewer", "<reviewer>"}
+expected = os.environ.get("PR_HEAD_SHA", "")
+author = (os.environ.get("PR_AUTHOR", "") or "").strip().lstrip("@").lower()
+
+def problem(m):
+    """None when this line is a valid, current independent review, else why not."""
+    who = m.group("who").strip().strip("*_`").strip().rstrip(".,!").strip()
+    key = who.lstrip("@").lower()
+    if not who or key in NOT_A_REVIEWER or (author and key == author):
+        return ("independent review names no independent reviewer (%r). Name who reviewed it, "
+                "other than the PR author: a separate review agent run, a review bot, or a person." % who)
+    hm = re.search(r'\bhead=([0-9a-f]{7,40})\b', m.group(0))
+    if not hm:
+        return ("MISSING head= binding on the independent review. Append `(head=<sha>)` "
+                "naming the reviewed head.")
+    if expected and not (expected.startswith(hm.group(1)) or hm.group(1).startswith(expected)):
+        return ("STALE independent review — recorded head=%s but the PR head is %s. Have the "
+                "delta re-reviewed and update the line." % (hm.group(1), expected))
+    return None
+
+matches = list(ind_re.finditer(stripped))
+if not matches:
+    print("check-pr-intent: MISSING independent review. This diff edits the review-enforcement "
+          "surface (%s), so the PR body must also record a review by someone other than the "
+          "author: `independent-review: <reviewer>; N findings, <disposition> (head=<sha>)` "
+          "(ship-loops.md § [pre-first-push gate] item 5)." % shown, file=sys.stderr)
+    sys.exit(1)
+# Any one valid line passes, so an older line left above a re-recorded one is harmless.
+problems = [problem(m) for m in matches]
+for m, why in zip(matches, problems):
+    if why is None:
+        print("check-pr-intent: OK — independent review recorded by %s and head-bound "
+              "(%d enforcement-surface file(s))." % (m.group("who").strip(), len(hits)))
+        sys.exit(0)
+print("check-pr-intent: " + problems[-1], file=sys.stderr)
+sys.exit(1)
+PY
+}
+
 run_selftest() {
     local rc=0
     # Failure path: a body with no `## Intent` MUST be rejected.
@@ -291,7 +367,76 @@ run_selftest() {
            printf '%s\n' "$out" | sed 's/^/    /' >&2
            return 1 ;;
     esac
+    run_selftest_independent || return 1
     echo "check-pr-intent --selftest: PASS"
+}
+
+# run_selftest_independent — the --independent-review mode. Each red case asserts
+# the reason, so a python error or a broken regex cannot pass as a rejection.
+run_selftest_independent() {
+    local tmpd out rc body
+    tmpd="$(mktemp -d)" || { echo "check-pr-intent --selftest: FAIL — mktemp failed" >&2; return 1; }
+    printf '%s\n' "docs/README.md" "Source/Core/src/Foo.cpp" > "$tmpd/plain"
+    printf '%s\n' "docs/README.md" "agents/scripts/core/merge-gates.sh" > "$tmpd/gate"
+    printf '%s\n' "agent-layer" > "$tmpd/bump"
+    body="## Intent"$'\n\n'"Fix it."$'\n\n'"adversarial-code-review: 0 findings (head=abc1234)"
+    _ind_expect() { # <want: ok|reason-substring> <files> <body> <label>
+        local want="$1" files="$2" b="$3" label="$4"
+        rc=0
+        out="$(PR_HEAD_SHA="${IND_HEAD:-}" PR_AUTHOR="${IND_AUTHOR:-}" _check_independent "$b" "$files" 2>&1)" || rc=$?
+        if [ "$want" = ok ]; then
+            [ "$rc" -eq 0 ] && return 0
+            echo "check-pr-intent --selftest: FAIL — independent: $label was rejected:" >&2
+        else
+            [ "$rc" -ne 0 ] && case "$out" in *"$want"*) return 0 ;; esac
+            echo "check-pr-intent --selftest: FAIL — independent: $label was not rejected for '$want':" >&2
+        fi
+        printf '%s\n' "$out" | sed 's/^/    /' >&2
+        return 1
+    }
+    local fail=0
+    # Not required: nothing under the enforcement surface.
+    _ind_expect ok "$tmpd/plain" "$body" "a diff outside the enforcement surface" || fail=1
+    # Required and missing, for a gate script and for a bare layer-pointer bump.
+    _ind_expect "MISSING independent review" "$tmpd/gate" "$body" "a gate-script diff with no line" || fail=1
+    _ind_expect "MISSING independent review" "$tmpd/bump" "$body" "an agent-layer gitlink bump with no line" || fail=1
+    # Recorded properly.
+    _ind_expect ok "$tmpd/gate" "$body"$'\n'"independent-review: code-review agent run; 2 findings, both fixed (head=abc1234)" \
+        "a named reviewer with findings and head" || fail=1
+    _ind_expect ok "$tmpd/gate" "$body"$'\n'"- independent-review: the-unwilling-agentic-bunch#11 review; 0 findings (head=abc1234)" \
+        "a bulleted line citing a layer PR's review" || fail=1
+    # Self, an unfilled placeholder, no head, a stale head, a commented-out line.
+    _ind_expect "names no independent reviewer" "$tmpd/gate" "$body"$'\n'"independent-review: self; 0 findings (head=abc1234)" \
+        "a self-review" || fail=1
+    _ind_expect "MISSING independent review" "$tmpd/gate" "$body"$'\n'"independent-review: <reviewer>; N findings, <disposition> (head=<sha>)" \
+        "the unfilled template line" || fail=1
+    _ind_expect "MISSING head=" "$tmpd/gate" "$body"$'\n'"independent-review: CodeRabbit; 1 finding, fixed" \
+        "a line with no head binding" || fail=1
+    IND_HEAD="deadbeef00112233445566778899aabbccddeeff" \
+        _ind_expect "STALE independent review" "$tmpd/gate" "$body"$'\n'"independent-review: CodeRabbit; 1 finding, fixed (head=abc1234)" \
+        "a line bound to another head" || fail=1
+    _ind_expect "MISSING independent review" "$tmpd/gate" "$body"$'\n'"<!--"$'\n'"independent-review: CodeRabbit; 0 findings (head=abc1234)"$'\n'"-->" \
+        "a line inside an HTML comment" || fail=1
+    _ind_expect "MISSING independent review" "$tmpd/gate" "$body"$'\n'"<!--"$'\n'"independent-review: CodeRabbit; 0 findings (head=abc1234)" \
+        "a line after an unclosed HTML comment (hidden when rendered)" || fail=1
+    _ind_expect "MISSING independent review" "$tmpd/gate" "$body"$'\n'"\`\`\`"$'\n'"independent-review: CodeRabbit; 0 findings (head=abc1234)"$'\n'"\`\`\`" \
+        "a line inside a fenced code block" || fail=1
+    _ind_expect ok "$tmpd/gate" "## Intent"$'\r\n\r\n'"\`\`\`bash"$'\r\n'"foo"$'\r\n'"\`\`\`"$'\r\n\r\n'"independent-review: CodeRabbit; 0 findings (head=abc1234)"$'\r\n' \
+        "a CRLF body with a closed code block before the line" || fail=1
+    _ind_expect ok "$tmpd/gate" "$body"$'\n'"\`\`\`\`"$'\n'"foo"$'\n'"\`\`\`\`"$'\n'"independent-review: CodeRabbit; 0 findings (head=abc1234)" \
+        "a four-backtick fence closed before the line" || fail=1
+    _ind_expect "names no independent reviewer" "$tmpd/gate" "$body"$'\n'"independent-review: Myself.; 0 findings (head=abc1234)" \
+        "a self-review spelled 'Myself.'" || fail=1
+    IND_AUTHOR="octo-dev" \
+        _ind_expect "names no independent reviewer" "$tmpd/gate" "$body"$'\n'"independent-review: @Octo-Dev; 0 findings (head=abc1234)" \
+        "a review naming the PR author" || fail=1
+    # An older line left above a re-recorded one does not turn the check red.
+    IND_HEAD="deadbeef00112233445566778899aabbccddeeff" \
+        _ind_expect ok "$tmpd/gate" "$body"$'\n'"independent-review: CodeRabbit; 1 finding (head=abc1234)"$'\n'"independent-review: CodeRabbit; 0 findings (head=deadbeef0011)" \
+        "a stale line followed by a current one" || fail=1
+    rm -rf "$tmpd"
+    unset -f _ind_expect
+    return "$fail"
 }
 
 # --check-workflow-sync — the machine check behind the KEEP IN SYNC comment.
@@ -335,6 +480,25 @@ PY
 case "${1:-}" in
     --selftest) run_selftest; exit $? ;;
     --check-workflow-sync) check_workflow_sync; exit $? ;;
+    --independent-review)
+        shift
+        FILES=""
+        case "${1:-}" in
+            --changed-files=*) FILES="${1#--changed-files=}"; shift ;;
+            --changed-files) FILES="${2:-}"; shift; shift || true ;;
+        esac
+        [ -n "$FILES" ] ||
+            { echo "check-pr-intent: usage: --independent-review --changed-files <file> [<body-file>]" >&2; exit 2; }
+        if [ -n "${1:-}" ]; then
+            [ -f "$1" ] || { echo "check-pr-intent: no such file: $1" >&2; exit 2; }
+            BODY="$(cat "$1")"
+        else
+            BODY="$(cat)"
+        fi
+        rc=0
+        _check_independent "$BODY" "$FILES" || rc=$?
+        exit "$rc"
+        ;;
     --help | -h) sed -n '2,12p' "$0"; exit 0 ;;
     "") BODY="$(cat)" ;;
     *)
