@@ -99,7 +99,12 @@ query($owner: String!, $repo: String!, $pr: Int!) {
                     # rerun-to-green holds under either reading.
                     # See docs/agent-rules/merge-gates.md, section
                     # Duplicate check-name divergence.
-                    checkSuite { createdAt }
+                    # databaseId + checkSuite.app.slug pick CodeRabbit's own
+                    # newest "CodeRabbit" run for crRunClean (the gate filter):
+                    # a check-run id fits GraphQL's BigInt-backed databaseId,
+                    # unlike workflowRun.databaseId above.
+                    databaseId
+                    checkSuite { createdAt app { slug } }
                     isRequired(pullRequestNumber: $pr)
                   }
                   ... on StatusContext {
