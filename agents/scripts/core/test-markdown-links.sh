@@ -764,7 +764,7 @@ def heading_sources(lines):
                 break
     para = []
     para_depth = 0
-    items = []         # content columns of the open list items, outermost first
+    stacks = {0: []}   # per quote depth: content columns of the open list items, outermost first
     last_text = False  # the previous line was paragraph text (lazy continuation)
     for line in lines[start:]:
         depth, content = _quote_split(line.rstrip("\n"))
@@ -780,6 +780,12 @@ def heading_sources(lines):
             para = []
             last_text = False
             continue
+        # Each quote depth keeps its own list items: a quoted line neither opens
+        # nor closes the enclosing document's items, and a line at a shallower
+        # depth ends every deeper quote's items.
+        for d in [k for k in stacks if k > depth]:
+            del stacks[d]
+        items = stacks.setdefault(depth, [])
         # Columns, with leading tabs expanded, for the list-item arithmetic.
         lead = content[:len(content) - len(content.lstrip(" \t"))]
         cols = lead.expandtabs(4) + content[len(lead):]
@@ -791,11 +797,7 @@ def heading_sources(lines):
         if lm and indent > (items[-1] if items else 0) + 3:
             lm = None
         target = content
-        if depth:
-            # A quoted line sits inside whatever item is open; its indent is the
-            # quote's own, so it neither opens nor closes list items here.
-            lm = None
-        elif lm:
+        if lm:
             # A marker closes every open item nested at or past its column.
             while items and items[-1] > indent:
                 items.pop()

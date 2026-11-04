@@ -151,8 +151,9 @@ ltc_lock_table_json() {
 # or one another branch made later over this branch's earlier claim, is never
 # denied here. A record only denies while its lock is still at the commit the
 # hook wrote (any later write, a person's update, release or re-claim, means
-# someone acted on it; the hook's own later writes to that lock re-pin the
-# record with ltc_unresolved_repin, so they never count), still covers the path for this branch, and another
+# someone acted on it; the edit hook's own later writes to that lock, from any
+# session of the branch in this checkout, re-pin the record with
+# ltc_unresolved_repin, so they never count), still covers the path for this branch, and another
 # branch's lock does too (guard-plan-lock.sh): a record outliving any of those
 # is dropped on the next edit of the path. Per machine
 # and per repo, like the table cache; a cleared TMPDIR drops the record and the

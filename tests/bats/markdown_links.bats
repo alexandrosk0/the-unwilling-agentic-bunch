@@ -758,7 +758,9 @@ _mk_lint_fixture() {
     local body
     for body in \
         '## Foo\n\n-\tStep\n      - sub\n        ## Foo\n\n## Foo\n' \
-        '## Foo\n\n- a\n\n  > note\n\n    - c\n      ## Foo\n\n## Foo\n'; do
+        '## Foo\n\n- a\n\n  > note\n\n    - c\n      ## Foo\n\n## Foo\n' \
+        '## Foo\n\n> - ## Foo\n\n## Foo\n' \
+        '## Foo\n\n> - a\n>   - b\n>     ## Foo\n\n## Foo\n'; do
         printf "# Doc\n\n$body" > "$FIXTURE_DIR/docs/rules.md"
         printf '# a\n\n[f](rules.md#foo-2)\n' > "$FIXTURE_DIR/docs/a.md"
         run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all

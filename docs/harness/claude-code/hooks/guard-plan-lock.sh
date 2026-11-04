@@ -598,9 +598,12 @@ if [ -n "$own" ]; then
   new_sha="" ext_err="" ext_from="" n=0 c_owner="" c_plan="" c_notes=""
   extend_own || extend_own ||
     fail_open "plan-lock '${own}' changed again while this hook re-read it (${ext_err}); nothing was written"
-  # This hook's own write: an unresolved-rollback record pinned to the commit
-  # the extension replaced moves to the new one, so it keeps denying. A write
-  # by a person or another session is never re-pinned, and still clears it.
+  # A hook write: an unresolved-rollback record pinned to the commit the
+  # extension replaced moves to the new one, so it keeps denying. That holds
+  # for this hook in any session of this branch in this checkout (the record
+  # file is per repo, keyed by branch, not by session), and only when the
+  # extension was pinned to the recorded commit. A person's write, or one from
+  # another clone or machine, is never re-pinned, and still clears it.
   ltc_unresolved_repin "$mybr" "$own" "$ext_from" "$new_sha"
   drop_table_cache
   crosscheck_after_claim rollback_extend "$own" "Plan-lock: ${count} other live session(s) share this repo, so this edit hook extended your plan-lock '${own}' on branch '${mybr}' with '${rel}' (${n} paths now; none dropped). Keep editing; release it with the rest of the work as usual." "$new_sha"
