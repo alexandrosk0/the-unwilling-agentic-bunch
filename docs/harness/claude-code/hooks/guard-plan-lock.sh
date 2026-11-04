@@ -505,6 +505,9 @@ rollback_extend() {
       LOCK_REMOTE="$remote" LOCK_RETRY_MAX=1 LOCK_EXPECT_SHA="$new_sha" run_bounded bash "$_update" "$own" "$ws_prev" 2>&1)"; rc=$?
   fi
   if [ "$rc" -eq 0 ]; then
+    # This hook's own write: carry any unresolved-rollback record on the lock forward.
+    ltc_unresolved_repin "$mybr" "$own" "$new_sha" \
+      "$(printf '%s\n' "$out" | sed -n 's/.* updated to \([0-9a-f]\{40,64\}\) (was .*/\1/p' | tail -n 1)"
     printf " Your plan-lock '%s' is restored to its previous write set." "$own"
     return 0
   fi
@@ -582,6 +585,7 @@ for p in d.get("write_set") or []:
     *) fail_open "lock-claim-update.sh ${own} exit ${rc}: $(last_line "$out")" ;;
   esac
   new_sha="$(printf '%s\n' "$out" | sed -n 's/.* updated to \([0-9a-f]\{40,64\}\) (was .*/\1/p' | tail -n 1)"
+  ext_from="$esha"
   return 0
 }
 
@@ -591,9 +595,13 @@ if [ -n "$own" ]; then
   # is pinned to the commit it was read from (LOCK_EXPECT_SHA): a concurrent
   # extension from another session of this branch is re-read, never dropped. A
   # second lost lease fails open without writing.
-  new_sha="" ext_err="" n=0 c_owner="" c_plan="" c_notes=""
+  new_sha="" ext_err="" ext_from="" n=0 c_owner="" c_plan="" c_notes=""
   extend_own || extend_own ||
     fail_open "plan-lock '${own}' changed again while this hook re-read it (${ext_err}); nothing was written"
+  # This hook's own write: an unresolved-rollback record pinned to the commit
+  # the extension replaced moves to the new one, so it keeps denying. A write
+  # by a person or another session is never re-pinned, and still clears it.
+  ltc_unresolved_repin "$mybr" "$own" "$ext_from" "$new_sha"
   drop_table_cache
   crosscheck_after_claim rollback_extend "$own" "Plan-lock: ${count} other live session(s) share this repo, so this edit hook extended your plan-lock '${own}' on branch '${mybr}' with '${rel}' (${n} paths now; none dropped). Keep editing; release it with the rest of the work as usual." "$new_sha"
 fi

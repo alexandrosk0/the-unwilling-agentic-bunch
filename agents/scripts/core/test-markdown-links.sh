@@ -791,12 +791,18 @@ def heading_sources(lines):
         if lm and indent > (items[-1] if items else 0) + 3:
             lm = None
         target = content
-        if lm:
+        if depth:
+            # A quoted line sits inside whatever item is open; its indent is the
+            # quote's own, so it neither opens nor closes list items here.
+            lm = None
+        elif lm:
             # A marker closes every open item nested at or past its column.
             while items and items[-1] > indent:
                 items.pop()
             target = cols[lm.end():]
-            items.append(lm.end() if target.strip() else lm.end() + 1)
+            # The content column, with a tab after the marker expanded too.
+            col = len(cols[:lm.end()].expandtabs(4))
+            items.append(col if target.strip() else col + 1)
         elif cols.strip():
             if items and indent < items[-1]:
                 # A heading at any enclosing item's column (or at the top level)
@@ -872,6 +878,25 @@ def file_anchors(path):
                         break
             seen[slug] = 0
             anchors.add(slug)
+    # The variant pass pairs renderings by index, so two duplicates whose right
+    # renderings sit at different indices never meet in one numbering. Add, per
+    # base slug, every suffix its duplicates could reach: base-1 .. base-(k - 1 + e)
+    # for k headings that can render to the base and e that can render to a
+    # base-N (github-slugger bumps past those). Only ever adds anchors.
+    bases = {}
+    for texts in renderings:
+        for b in {github_slug(t) for t in texts}:
+            bases[b] = bases.get(b, 0) + 1
+    numbered = re.compile(r"^(.*)-\d+$")
+    bumped = {}
+    for b, k in bases.items():
+        m = numbered.match(b)
+        if m:
+            bumped[m.group(1)] = bumped.get(m.group(1), 0) + k
+    for b, k in bases.items():
+        anchors.add(b)
+        for n in range(1, k + bumped.get(b, 0)):
+            anchors.add("%s-%d" % (b, n))
     fence = FenceTracker()
     for line in lines:
         if not fence.step(line):

@@ -32,7 +32,8 @@
 #
 # Public functions: ltc_sibling_count, ltc_covering_slug, ltc_lock_rows,
 # ltc_lock_table_json, ltc_invalidate_table, ltc_unresolved_add,
-# ltc_unresolved_get, ltc_unresolved_drop. `_ltc_*` names are internal.
+# ltc_unresolved_get, ltc_unresolved_repin, ltc_unresolved_drop. `_ltc_*` names
+# are internal.
 #
 # Test/override seams (read-only):
 #   LTC_PROJ           force the repo root (default CLAUDE_PROJECT_DIR | $PWD)
@@ -150,7 +151,8 @@ ltc_lock_table_json() {
 # or one another branch made later over this branch's earlier claim, is never
 # denied here. A record only denies while its lock is still at the commit the
 # hook wrote (any later write, a person's update, release or re-claim, means
-# someone acted on it), still covers the path for this branch, and another
+# someone acted on it; the hook's own later writes to that lock re-pin the
+# record with ltc_unresolved_repin, so they never count), still covers the path for this branch, and another
 # branch's lock does too (guard-plan-lock.sh): a record outliving any of those
 # is dropped on the next edit of the path. Per machine
 # and per repo, like the table cache; a cleared TMPDIR drops the record and the
@@ -195,6 +197,23 @@ ltc_unresolved_get() { # $1 = branch, $2 = path -> "slug<TAB>commit" of the late
   [ -f "$f" ] || return 1
   LTC_B="$1" LTC_P="$2" awk -F '\t' '$1 == ENVIRON["LTC_B"] && $3 == ENVIRON["LTC_P"] && $2 != "" { s = $2; c = $4 }
     END { if (s == "") exit 1; printf "%s\t%s\n", s, c }' "$f" 2>/dev/null
+}
+ltc_unresolved_repin() { # $1 = branch, $2 = slug, $3 = old commit, $4 = new commit; always rc 0
+  local key f
+  [ -n "${3:-}" ] && [ -n "${4:-}" ] || return 0
+  key="$(_ltc_repo_key)" || return 0
+  [ -n "$key" ] || return 0
+  f="$(_ltc_unresolved_path "$key")"
+  [ -f "$f" ] || return 0
+  LTC_B="$1" LTC_S="$2" LTC_O="$3" awk -F '\t' '$1 == ENVIRON["LTC_B"] && $2 == ENVIRON["LTC_S"] && $4 == ENVIRON["LTC_O"] { found = 1; exit }
+    END { exit !found }' "$f" 2>/dev/null || return 0
+  _ltc_unresolved_lock "$f" || return 0
+  LTC_B="$1" LTC_S="$2" LTC_O="$3" LTC_N="$4" awk -F '\t' -v OFS='\t' '
+    $1 == ENVIRON["LTC_B"] && $2 == ENVIRON["LTC_S"] && $4 == ENVIRON["LTC_O"] { $4 = ENVIRON["LTC_N"] }
+    { print }' "$f" > "$f.tmp.$$" 2>/dev/null \
+    && mv -f "$f.tmp.$$" "$f" 2>/dev/null || rm -f "$f.tmp.$$" 2>/dev/null
+  _ltc_unresolved_unlock "$f"
+  return 0
 }
 ltc_unresolved_drop() { # $1 = branch, $2 = path; always rc 0
   local key f

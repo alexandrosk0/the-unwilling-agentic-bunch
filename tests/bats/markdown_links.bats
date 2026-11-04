@@ -753,6 +753,24 @@ _mk_lint_fixture() {
     [ "$status" -eq 0 ]
 }
 
+@test "list items after a tab marker or a quoted line, and duplicates rendered through different link shapes, keep their slots" {
+    _mk_lint_fixture
+    local body
+    for body in \
+        '## Foo\n\n-\tStep\n      - sub\n        ## Foo\n\n## Foo\n' \
+        '## Foo\n\n- a\n\n  > note\n\n    - c\n      ## Foo\n\n## Foo\n'; do
+        printf "# Doc\n\n$body" > "$FIXTURE_DIR/docs/rules.md"
+        printf '# a\n\n[f](rules.md#foo-2)\n' > "$FIXTURE_DIR/docs/a.md"
+        run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+        [ "$status" -eq 0 ]
+    done
+    # Both headings render as "a a" on GitHub, through different link shapes.
+    printf '# Doc\n\n## [`a`](a.md) [`a`][q]\n\n## [a][] _a_\n\n[q]: a.md\n[a]: a.md\n' > "$FIXTURE_DIR/docs/rules.md"
+    printf '# a\n\n[f](rules.md#a-a-1)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+}
+
 @test "a non-markdown target's fragment is not checked" {
     mkdir -p "$FIXTURE_DIR/agents/scripts/core" "$FIXTURE_DIR/docs"
     cp "$LINT" "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"

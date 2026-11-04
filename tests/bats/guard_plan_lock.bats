@@ -658,6 +658,19 @@ SHIM2
     [ "$status" -eq 0 ]
     [[ "$output" == *'"permissionDecision":"deny"'* ]]
     [[ "$(reason_of "$output")" == *"which your plan-lock 'mywork' also covers: this edit hook claimed"* ]]
+    # The session goes on: the hook auto-extends 'mywork' with another path.
+    # That is the hook's own write, so the contested path stays denied.
+    rm -f "$SHIM_DIR/git"
+    rm -f "$(table_cache_file)"
+    run run_hook "Source/Core/src/Sync/D.cpp"
+    [ "$status" -eq 0 ]
+    [[ "$(context_of "$output")" == *"extended your plan-lock 'mywork'"* ]]
+    [ "$(ws_of mywork)" = '["Source/Core/src/Sync/A.cpp","Source/Core/src/Sync/C.cpp","Source/Core/src/Sync/D.cpp"]' ]
+    rm -f "$(table_cache_file)"
+    run run_hook "Source/Core/src/Sync/C.cpp"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"permissionDecision":"deny"'* ]]
+    [[ "$(reason_of "$output")" == *"which your plan-lock 'mywork' also covers: this edit hook claimed"* ]]
 }
 
 @test "auto-claim: an earlier auto-claim that another branch overlaps later is never denied by the overlap rule" {
