@@ -827,7 +827,7 @@ GROW
     export GIT_SSH_COMMAND="sh -c 'sleep 30' hung-ssh"
     seed_table_cache '[]'
     start=$SECONDS
-    SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT=1 run run_hook "Source/Core/src/Sync/New.cpp"
+    SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT=2 run run_hook "Source/Core/src/Sync/New.cpp"
     [ $((SECONDS - start)) -lt 10 ]
     [ "$status" -eq 0 ]
     assert_note_without_decision "$output"
@@ -934,6 +934,58 @@ fake_limiter() { # $1 = name, $2 = absent|real
     [[ "$output" == *'"permissionDecision":"deny"'* ]]
     [[ "$output" == *"on branch 'develop'"* ]]
     [ -z "$(lock_refs)" ]
+}
+
+@test "auto-claim: an inherited SECONDS does not make the budget look spent" {
+    # bash imports SECONDS from the environment; the budget is measured from
+    # the hook's own start, so a huge inherited value changes nothing.
+    enable_autoclaim
+    reg "$REGDIR" sibling-a
+    slug="$(expected_slug feat-auto-claim "$AC_BRANCH")"
+    seed_table_cache '[]'
+    payload="$(jq -cn --arg fp "$PROJ/Source/Core/src/Sync/New.cpp" '{tool_name:"Edit", tool_input:{file_path:$fp}, session_id:"mysid"}')"
+    run env SECONDS=100000 bash "$HOOK" <<<"$payload"
+    [ "$status" -eq 0 ]
+    [[ "$(context_of "$output")" == *"auto-claimed plan-lock '$slug'"* ]]
+}
+
+@test "auto-claim: a stale record never denies once its lock no longer covers the path (released, then hand-claimed)" {
+    command -v timeout >/dev/null 2>&1 || skip "no timeout(1)"
+    enable_autoclaim
+    reg "$REGDIR" sibling-a
+    slug="$(expected_slug feat-auto-claim "$AC_BRANCH")"
+    plant_lock theirs feat/other Source/Core/src/Sync/Race.cpp
+    seed_table_cache '[]'
+    install_git_shim
+    export SHIM_HANG=" :refs/locks/$slug "   # the rollback's release push hangs
+    SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT=4 run run_hook "Source/Core/src/Sync/Race.cpp"
+    [[ "$(reason_of "$output")" == *"did not complete"* ]]
+    grep -qs "$slug" "$TMPDIR"/.smatchet-planlock-unresolved-*
+    unset SHIM_HANG
+    # The user follows the remediation: release the auto lock, coordinate, and
+    # claim the path by hand. The retried edit passes and the record goes.
+    git -C "$BARE" update-ref -d "refs/locks/$slug"
+    plant_lock handlock "$AC_BRANCH" Source/Core/src/Sync/Race.cpp
+    rm -f "$(table_cache_file)"
+    run run_hook "Source/Core/src/Sync/Race.cpp"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    ! grep -qs "$slug" "$TMPDIR"/.smatchet-planlock-unresolved-*
+}
+
+@test "lock-table-cache: concurrent record adds and no-op drops lose no record" {
+    local lib="$REPO_ROOT/agents/scripts/core/lock-table-cache.sh" n
+    run bash -c '
+        . "$1"; cd "$2" || exit 9
+        ( for i in $(seq 60); do ltc_unresolved_drop other-branch some/path; done ) &
+        ( for i in $(seq 60); do ltc_unresolved_drop feat/a "p-nomatch"; done ) &
+        for i in $(seq 60); do ltc_unresolved_add feat/a slug "p$i"; done
+        wait
+        for i in $(seq 60); do ltc_unresolved_slug feat/a "p$i" >/dev/null || echo "lost p$i"; done
+        echo done' _ "$lib" "$PROJ"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"done"* ]]
+    [[ "$output" != *"lost"* ]]
 }
 
 @test "auto-claim: a zero-padded budget is read as decimal, not octal" {

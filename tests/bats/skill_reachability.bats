@@ -357,3 +357,12 @@ MD
     [ "$status" -eq 1 ]
     [[ "$output" == *"FAIL gamma"* ]]
 }
+
+@test "a tab-indented fence closes on a space-indented closer at the same column" {
+    base_fixture
+    add_skill "$FX" beta
+    printf '1.  Install:\n\n\t```bash\n\tmake\n      ```\n\nRun [beta](../agents/_shared/skills/beta/SKILL.md).\n' >>"$FX/docs/rules.md"
+    run bash "$GATE" --root "$FX"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ok   beta"* ]]
+}

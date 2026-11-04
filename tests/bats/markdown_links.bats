@@ -710,6 +710,46 @@ _mk_lint_fixture() {
     [[ "$output" == *"'rules.md#foo-3'"* ]]
 }
 
+@test "a tab-indented fence opener closes on a space-indented closer at the same column" {
+    _mk_lint_fixture
+    printf '# Setup\n\n1.  Install:\n\n\t```bash\n\tmake\n      ```\n\n## Verification\n\nSee [gone](missing.md).\n' \
+        > "$FIXTURE_DIR/docs/rules.md"
+    printf '# a\n\n[v](rules.md#verification)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"'rules.md#verification'"* ]]
+    [[ "$output" == *"missing.md"* ]]
+}
+
+@test "a full reference whose label is a code span renders as its label" {
+    _mk_lint_fixture
+    printf '# Doc\n\n## Use [`run.sh`][run] now\n\n[run]: a.md\n' > "$FIXTURE_DIR/docs/rules.md"
+    printf '# a\n\n[r](rules.md#use-runsh-now)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"BROKEN_LINK"* ]]
+}
+
+@test "list-item headings: an outer item after a nested one, a lazy line and a tab continuation keep their slots" {
+    _mk_lint_fixture
+    local body
+    for body in \
+        '## Foo\n\n- a\n  - b\n\n  para\n\n    ## Foo\n\n## Foo\n' \
+        '## Foo\n\n1. Step\nlazy\n\n    ## Foo\n\n## Foo\n' \
+        '## Foo\n\n- Step\n\n\t## Foo\n\n## Foo\n'; do
+        printf "# Doc\n\n$body" > "$FIXTURE_DIR/docs/rules.md"
+        printf '# a\n\n[f](rules.md#foo-2)\n' > "$FIXTURE_DIR/docs/a.md"
+        run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+        [ "$status" -eq 0 ]
+    done
+    # A thematic break is not a list item, and a top-level heading after a list
+    # still counts.
+    printf '# Doc\n\n## Foo\n\n- - -\n\n## Foo\n' > "$FIXTURE_DIR/docs/rules.md"
+    printf '# a\n\n[f](rules.md#foo-1)\n' > "$FIXTURE_DIR/docs/a.md"
+    run bash "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh" --all
+    [ "$status" -eq 0 ]
+}
+
 @test "a non-markdown target's fragment is not checked" {
     mkdir -p "$FIXTURE_DIR/agents/scripts/core" "$FIXTURE_DIR/docs"
     cp "$LINT" "$FIXTURE_DIR/agents/scripts/core/test-markdown-links.sh"

@@ -34,7 +34,8 @@
 #     fetch is "could not run", never a read of stale local refs. A rollback
 #     that did not complete is recorded on this machine (lock-table-cache.sh
 #     ltc_unresolved_*), and later edits of the path stay DENIED while the
-#     other branch's lock still covers it. An overlap the hook did not make
+#     lock it names still covers the path for this branch and the other
+#     branch's lock does too. An overlap the hook did not make
 #     (a hand claim, or another branch claiming over this one later) passes.
 #     The new slug already held (exit 1, normally this branch seen through a
 #     stale cache) -> fresh re-read: another branch covers -> DENY; this branch
@@ -73,7 +74,7 @@
 #   SMATCHET_REQUIRE_PLAN_LOCK=0    disable the hook entirely.
 #   SMATCHET_PLAN_LOCK_AUTOCLAIM=0  no auto-claim: an uncovered contended edit is
 #                                   denied with a lock-claim.sh remediation.
-#   SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT=<secs>  auto-claim budget (default 8);
+#   SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT=<secs>  auto-claim budget (default 8, at least 2);
 #                                   keep it under this hook's harness timeout
 #                                   (30 s in settings.json.tmpl).
 #
@@ -81,6 +82,9 @@
 #     docs/agent-rules/process-rules.md § Concurrent interactive sessions.
 
 set -u
+# The hook's own start, for the auto-claim budget. Relative, so an inherited
+# SECONDS (bash imports it from the environment) cannot shift it.
+HOOK_T0=$SECONDS
 
 # Override reaches the hook only via the session env (the hook reads its own env
 # before the tool runs; an inline `SMATCHET_REQUIRE_PLAN_LOCK=0 <edit>` prefix
@@ -310,11 +314,19 @@ ltc_covering_slug "$rel" same "$mybr" >/dev/null; cov=$?
 case "$cov" in
   0)
     if uslug="$(ltc_unresolved_slug "$mybr" "$rel")"; then
-      oslug="$(ltc_covering_slug "$rel" other "$mybr")"; ocov=$?
-      case "$ocov" in
-        0) deny_overlap "$oslug" "$uslug" ;;
-        1) ltc_unresolved_drop "$mybr" "$rel" ;; # the other lock is gone: resolved
-      esac
+      # The record holds only while the lock it names still covers the path for
+      # this branch (not released, the path not dropped, the branch not reused)
+      # AND another branch's lock covers it too. Either one gone: resolved.
+      ltc_covering_slug "$rel" same-slug "$mybr" "" "$uslug" >/dev/null; ucov=$?
+      if [ "$ucov" -eq 0 ]; then
+        oslug="$(ltc_covering_slug "$rel" other "$mybr")"; ocov=$?
+        case "$ocov" in
+          0) deny_overlap "$oslug" "$uslug" ;;
+          1) ltc_unresolved_drop "$mybr" "$rel" ;;
+        esac
+      elif [ "$ucov" -eq 1 ]; then
+        ltc_unresolved_drop "$mybr" "$rel"
+      fi
     fi
     exit 0
     ;;
@@ -387,11 +399,14 @@ AC_BUDGET="${SMATCHET_PLAN_LOCK_AUTOCLAIM_TIMEOUT:-8}"
 case "$AC_BUDGET" in ''|*[!0-9]*) AC_BUDGET=8 ;; esac
 AC_BUDGET=$((10#$AC_BUDGET)) # a leading 0 is not octal
 [ "$AC_BUDGET" -gt 0 ] || AC_BUDGET=8
-# The budget runs from the hook's start ($SECONDS counts from shell start), so
-# the lock-table reads above, which a cold cache runs without a limiter, count
-# against it too: a slow read leaves less for the claim, never more.
-AC_START=0
-[ $((AC_BUDGET - SECONDS)) -gt 0 ] ||
+# $SECONDS has whole-second resolution and can tick 1 well before a second has
+# passed, so a budget under 2 s could read as spent at once: 2 s is the floor.
+[ "$AC_BUDGET" -ge 2 ] || AC_BUDGET=2
+# The budget runs from the hook's start (HOOK_T0), so the lock-table reads
+# above, which a cold cache runs without a limiter, count against it too: a
+# slow read leaves less for the claim, never more.
+AC_START=$HOOK_T0
+[ $((AC_BUDGET - (SECONDS - AC_START))) -gt 0 ] ||
   fail_open "the lock-table read took the whole ${AC_BUDGET} s auto-claim budget"
 run_bounded() { # run "$@" in what is left of the budget; 124 once it is spent
   local left=$((AC_BUDGET - (SECONDS - AC_START)))

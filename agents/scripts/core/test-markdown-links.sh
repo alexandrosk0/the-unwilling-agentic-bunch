@@ -618,6 +618,12 @@ _GH_LINE_ANCHOR_RE = re.compile(r"^L\d+(?:C\d+)?(?:-L\d+(?:C\d+)?)?$")
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 
 
+def _indent_cols(line):
+    """Columns of leading whitespace, tabs expanded to 4-column stops."""
+    lead = line[:len(line) - len(line.lstrip(" \t"))]
+    return len(lead.expandtabs(4))
+
+
 class FenceTracker:
     """CommonMark fenced-code state, fed one line at a time. A fence closes only
     on a run of the opener's character at least as long as the opener, with
@@ -636,7 +642,7 @@ class FenceTracker:
         """True when `line` opens, closes or lies inside a fence."""
         line = line.rstrip("\r\n")
         m = _FENCE_RE.match(line)
-        indent = len(line) - len(line.lstrip(" "))
+        indent = _indent_cols(line)
         if self.opener is None:
             if m is None or (m.group(1)[0] == "`" and "`" in m.group(2)):
                 return False
@@ -687,15 +693,17 @@ def _render_inline(seg, strip_emphasis, keep_refs=False):
     return re.sub(r"\x00(\d+)\x00", lambda m: escaped[int(m.group(1))], seg)
 
 
-# An inline link or image, its label allowed one level of nested brackets.
-_HEADING_LINK_RE = re.compile(r"!?\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\([^)]*\)")
+# An inline link or image, or a full / collapsed reference, its label allowed
+# one level of nested brackets.
+_HEADING_LINK_RE = re.compile(r"!?\[((?:[^\[\]]|\[[^\[\]]*\])*)\](?:\([^)]*\)|\[[^\]]*\])")
 
 
 def heading_renderings(raw):
     """Every plausible rendered text of heading source `raw` (see the block
-    comment). Link destinations also come out BEFORE the code-span split, so a
-    link whose label is a code span (`[`x.sh`](x.sh)`) renders as its label;
-    and full / collapsed references are rendered both resolved and literal."""
+    comment). Link destinations and reference labels also come out BEFORE the
+    code-span split, so a link or reference whose label is a code span
+    (`[`x.sh`](x.sh)`, `[`x.sh`][x]`) renders as its label; and full /
+    collapsed references are rendered both resolved and literal."""
     out = []
     sources = [raw]
     delinked = _HEADING_LINK_RE.sub(r"\1", raw)
@@ -751,7 +759,8 @@ def heading_sources(lines):
                 break
     para = []
     para_depth = 0
-    item_offset = None  # content column of the open list item, if any
+    items = []         # content columns of the open list items, outermost first
+    last_text = False  # the previous line was paragraph text (lazy continuation)
     for line in lines[start:]:
         depth, content = _quote_split(line.rstrip("\n"))
         if fence.opener is not None:
@@ -759,42 +768,60 @@ def heading_sources(lines):
             if depth == fence_depth:
                 fence.step(content)
             para = []
+            last_text = False
             continue
         if fence.step(content):
             fence_depth = depth
             para = []
+            last_text = False
             continue
-        lm = _LIST_MARKER_RE.match(content)
+        # Columns, with leading tabs expanded, for the list-item arithmetic.
+        lead = content[:len(content) - len(content.lstrip(" \t"))]
+        cols = lead.expandtabs(4) + content[len(lead):]
+        indent = len(cols) - len(cols.lstrip(" "))
+        # A thematic break (`- - -`, `* * *`) wins over a list marker.
+        lm = None if _THEMATIC_BREAK_RE.match(cols) else _LIST_MARKER_RE.match(cols)
         target = content
         if lm:
-            target = content[lm.end():]
-            item_offset = lm.end() if target.strip() else lm.end() + 1
-        elif content.strip():
-            indent = len(content) - len(content.lstrip(" "))
-            if item_offset is not None and indent >= item_offset:
-                # A line inside the open item: a heading there is indented by
-                # the item's content column, not by the 0-3 spaces of the top level.
-                target = content[item_offset:]
-            elif item_offset is not None:
-                item_offset = None
+            # A marker closes every open item nested at or past its column.
+            while items and items[-1] > indent:
+                items.pop()
+            target = cols[lm.end():]
+            items.append(lm.end() if target.strip() else lm.end() + 1)
+        elif cols.strip():
+            if items and indent < items[-1]:
+                top_heading = _ATX_HEADING_RE.match(cols) is not None
+                if last_text and not top_heading:
+                    pass  # a lazy continuation line keeps every item open
+                else:
+                    while items and items[-1] > indent:
+                        items.pop()
+            if items and indent >= items[-1]:
+                # A line inside an open item: a heading there is indented by
+                # the item's content column, not the 0-3 spaces of the top level.
+                target = cols[items[-1]:]
         m = _ATX_HEADING_RE.match(target)
         if m:
             heads.append([m.group(2) or ""])
             para = []
+            last_text = False
             continue
         if para and depth == para_depth and _SETEXT_UNDERLINE_RE.match(content):
             folded = " ".join(p.strip() for p in para)
             last = para[-1].strip()
             heads.append([folded] if folded == last else [folded, last])
             para = []
+            last_text = False
             continue
         if lm or _THEMATIC_BREAK_RE.match(content) or _SETEXT_NOT_TEXT_RE.match(content):
             para = []
+            last_text = bool(lm and target.strip())
             continue
         if para and depth != para_depth:
             para = []
         para.append(content)
         para_depth = depth
+        last_text = True
     return heads
 
 

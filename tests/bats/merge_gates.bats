@@ -2346,6 +2346,11 @@ plan-lock-gate: 'b' overlaps the write set of plan-lock 'docs', held by a differ
         ["plan-lock-disposition:docs-index:coordinated", "plan-lock-disposition:a-b"];
         "plan-lock-disposition: x-y — why docs\nplan-lock-disposition: p -- q\nplan-lock-disposition: m (n)\nplan-lock-disposition: k - l")')"
     [ "$out" = "docs-index a-b  x-y  p  m   k" ]
+    # A no-break space before the dash (macOS Option-Space, rich-text paste)
+    # is folded to ASCII first, so jq and gh's gojq cut the same way.
+    out="$(jq -rn --arg b "$(printf 'plan-lock-disposition: tracker-refactor\302\240\342\200\224 only touches docs/plans/INDEX.md')" \
+        "$_MG_JQ_DISPOSITION_DEF"' planlock_disposition_subjects([]; $b)')"
+    [ "$out" = " tracker-refactor" ]
 }
 
 @test "plan-lock slugs: a path spelling out the collision phrase cannot substitute its own slug" {

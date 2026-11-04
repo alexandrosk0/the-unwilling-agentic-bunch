@@ -211,6 +211,12 @@ def read_text(path):
         env_error("cannot read %s: %s" % (path, exc))
 
 
+def indent_cols(line):
+    """Columns of leading whitespace, tabs expanded to 4-column stops."""
+    lead = line[:len(line) - len(line.lstrip(" \t"))]
+    return len(lead.expandtabs(4))
+
+
 def prose_paragraphs(text):
     """Paragraphs outside fenced code blocks and HTML comments, lines joined by
     newlines, so a link or code span wrapped across lines is still one match."""
@@ -221,13 +227,13 @@ def prose_paragraphs(text):
         if fence is not None:
             m = FENCE_CLOSE_RE.match(line)
             if (m and m.group(1)[0] == fence[0][0] and len(m.group(1)) >= len(fence[0])
-                    and len(line) - len(line.lstrip(" ")) <= fence[1] + 3):
+                    and indent_cols(line) <= fence[1] + 3):
                 fence = None
             continue
         if not in_comment:
             m = FENCE_OPEN_RE.match(line)
             if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-                fence = (m.group(1), len(line) - len(line.lstrip(" ")))
+                fence = (m.group(1), indent_cols(line))
                 if para:
                     yield "\n".join(para)
                     para = []

@@ -34,7 +34,9 @@
 # accepted" over the same reader, and planlock_disposition_subjects() is the
 # SUBJECT of each plan-lock reason (the slug list it opens with, cut at the
 # first spaced dash, `:` or `(`), control-free and space-joined: the input
-# every merge actor hands to _mg_planlock_slug_report. Only the subject names
+# every merge actor hands to _mg_planlock_slug_report. Unicode spaces such as a
+# no-break space are folded to ASCII before the cut, so Oniguruma jq and gh's
+# RE2-based gojq cut a reason the same way. Only the subject names
 # a slug, so a path or word in the why-part of one slug's line (`... touches
 # docs/plans/INDEX.md`) never names a lock called `docs`. (NB: no apostrophes
 # in these single-quoted jq strings.)
@@ -56,7 +58,8 @@ def disposition($labels; $body; $prefix):
 def planlock_disposition_subjects($labels; $body):
   disposition_reasons($labels; $body; "plan-lock-disposition")
   | map(gsub("[[:cntrl:]]"; " ")
-        | sub("([[:space:]]+(\u2014|\u2013|--?)[[:space:]]|[:(]).*$"; ""))
+        | gsub("[\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"; " ")
+        | sub("([ \t]+(\u2014|\u2013|--?)[ \t]|[:(]).*$"; ""))
   | join(" ");
 '
 

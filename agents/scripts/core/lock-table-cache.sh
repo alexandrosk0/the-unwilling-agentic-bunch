@@ -147,15 +147,35 @@ ltc_lock_table_json() {
 # later edits of the path stay denied until the overlap is resolved. Only the
 # hook's own failed rollbacks are recorded: an overlap a person claimed by hand,
 # or one another branch made later over this branch's earlier claim, is never
-# denied here. Per machine and per repo, like the table cache; a cleared TMPDIR
-# drops the record and the deny fails open (Layers B and C still check). Values
-# reach awk through ENVIRON, never -v, so a backslash in a path stays literal.
+# denied here. A record only denies while its own lock still covers the path
+# for this branch and another branch's lock does too (guard-plan-lock.sh): a
+# record outliving either is dropped on the next edit of the path. Per machine
+# and per repo, like the table cache; a cleared TMPDIR drops the record and the
+# deny fails open (Layers B and C still check). Values reach awk through
+# ENVIRON, never -v, so a backslash in a path stays literal. Writers serialise
+# on a mkdir lock beside the file (portable where flock is not); a drop that
+# cannot take it keeps the file as it is, and an add that cannot take it
+# appends anyway, so a contended or stale lock never loses a record.
 _ltc_unresolved_path() { printf '%s/.smatchet-planlock-unresolved-%s' "$(_ltc_cache_dir)" "$1"; }
+_ltc_unresolved_lock() { # $1 = record file; rc 0 once its lock dir is held (about 1 s of tries)
+  local n=0
+  while ! mkdir "$1.lock" 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -lt 20 ] || return 1
+    sleep 0.05 2>/dev/null || sleep 1
+  done
+  return 0
+}
+_ltc_unresolved_unlock() { rmdir "$1.lock" 2>/dev/null || :; }
 ltc_unresolved_add() { # $1 = branch, $2 = slug, $3 = path; rc 1 when it cannot be recorded
-  local key
+  local key f rc locked=0
   key="$(_ltc_repo_key)" || return 1
   [ -n "$key" ] || return 1
-  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$(_ltc_unresolved_path "$key")" 2>/dev/null
+  f="$(_ltc_unresolved_path "$key")"
+  _ltc_unresolved_lock "$f" && locked=1
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$f" 2>/dev/null; rc=$?
+  [ "$locked" -eq 0 ] || _ltc_unresolved_unlock "$f"
+  return "$rc"
 }
 ltc_unresolved_slug() { # $1 = branch, $2 = path -> the recorded slug; rc 0 found, 1 not
   local key f
@@ -172,8 +192,13 @@ ltc_unresolved_drop() { # $1 = branch, $2 = path; always rc 0
   [ -n "$key" ] || return 0
   f="$(_ltc_unresolved_path "$key")"
   [ -f "$f" ] || return 0
+  # Nothing to drop is the common case: never rewrite the file for it.
+  LTC_B="$1" LTC_P="$2" awk -F '\t' '$1 == ENVIRON["LTC_B"] && $3 == ENVIRON["LTC_P"] { found = 1; exit }
+    END { exit !found }' "$f" 2>/dev/null || return 0
+  _ltc_unresolved_lock "$f" || return 0
   LTC_B="$1" LTC_P="$2" awk -F '\t' '!($1 == ENVIRON["LTC_B"] && $3 == ENVIRON["LTC_P"])' "$f" > "$f.tmp.$$" 2>/dev/null \
     && mv -f "$f.tmp.$$" "$f" 2>/dev/null || rm -f "$f.tmp.$$" 2>/dev/null
+  _ltc_unresolved_unlock "$f"
   return 0
 }
 
@@ -192,17 +217,19 @@ ltc_lock_rows() {
 }
 
 # Coverage primitive — the shared exact-path-or-dir-prefix match.
-#   $1 repo-relative path          $2 mode: same|other
+#   $1 repo-relative path          $2 mode: same|same-slug|other
 #   $3 my branch                   $4 (optional) stale-cutoff epoch
-# mode=same  : a lock whose branch == mine (Layer A: my own seed -> allow).
-# mode=other : a lock whose branch is non-empty and != mine (Layer B/C: block).
+#   $5 the slug, for mode=same-slug
+# mode=same      : a lock whose branch == mine (Layer A: my own seed -> allow).
+# mode=same-slug : that one lock ($5), and only while its branch == mine.
+# mode=other     : a lock whose branch is non-empty and != mine (Layer B/C: block).
 # An empty/detached lock branch is UNATTRIBUTABLE -> never matches "other"
 # (bias-to-allow; the stale sweep ages it out). A stale-cutoff (B/C) skips locks
 # older than it; Layer A passes none so its own seed always covers (no
 # self-denial of long-running work — the F3 nuance).
 # exit 0 covered (slug on stdout) | 1 not covered | 2 undetermined (fail-open).
 ltc_covering_slug() {
-  local path="$1" mode="$2" mybr="$3" cutoff="${4:-}" rows
+  local path="$1" mode="$2" mybr="$3" cutoff="${4:-}" want="${5:-}" rows
   rows="$(ltc_lock_rows)" || return 2
   path="$(_ltc_norm_path "$path")"
   [ -n "$path" ] || return 1
@@ -211,6 +238,7 @@ ltc_covering_slug() {
     [ -n "$lp" ] || continue
     case "$mode" in
       same)  [ "$br" = "$mybr" ] || continue ;;
+      same-slug) { [ "$br" = "$mybr" ] && [ -n "$want" ] && [ "$slug" = "$want" ]; } || continue ;;
       other) { [ -n "$br" ] && [ "$br" != "$mybr" ]; } || continue ;;
       *) continue ;;
     esac
