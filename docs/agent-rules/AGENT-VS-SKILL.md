@@ -18,7 +18,7 @@ A new agent needs a reason the three existing ones do not cover: a role whose va
 So every skill ships with both:
 
 1. A `description:` that names the user-visible symptoms and requests that should load it ("crash", "wrong output", "doesn't work", "address the CodeRabbit comments") — not only the procedure's name.
-2. A route on every harness: an on-demand row when the trigger is a user request any session can raise; otherwise a path link at the step of a routed doc where the procedure runs. A skill named only in prose, without its path, reaches Claude Code alone.
+2. A route on every harness: an on-demand row when the trigger is a top-level task class (debugging, perf, tests, PR-bot feedback, cleanup); otherwise a path link from a doc that AGENTS.md routes to, at the step where the procedure runs or in a heuristic bullet (`delegation.md` links the self-check and session-recall skills that way). AGENTS.md has a hard line cap, so a narrow trigger takes a link, not a row. A skill named only in prose, without its path, reaches Claude Code alone.
 
 ## Shaping a skill
 

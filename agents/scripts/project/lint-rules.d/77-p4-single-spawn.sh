@@ -23,15 +23,18 @@
 #
 # Text proxy, not a parser: comment stripping treats a `//` or `/*` inside a string literal as a
 # comment start. That can only hide code from the counts, which fails the Run and override checks
-# closed; the one open case (a second Run on the same line as such a literal) is not a realistic
-# shape.
+# closed; the open case is code after such a literal on the same line (a second Run, or a spawn
+# primitive after a `"//depot/..."` path literal). It is not a realistic shape, but depot-path
+# literals are common in this file, so keep each spawn call on a line of its own.
 # shellcheck disable=SC2034  # the rule-id registry is consumed by the entry point (--selftest card check).
 P4_SPAWN_RULES=(p4-single-spawn)
 P4_SPAWN_IMPL="Source/Core/src/P4Annotate.cpp"
 P4_SPAWN_HEADER="Source/Core/include/P4Annotate.h"
-# Any process-spawn call other than SubprocessCapture::Run. The leading class keeps a longer
-# identifier (`my_system(`, `RunSystem(`) from matching.
-P4_SPAWN_PRIMITIVE_RE='(^|[^A-Za-z0-9_])(_?w?system|_?w?popen|_?w?exec[lv]p?e?|_w?spawn[lv]p?e?|posix_spawnp?|WinExec)[[:space:]]*\(|(CreateProcess|ShellExecute)[A-Za-z]*[[:space:]]*\('
+# Any process-spawn call other than SubprocessCapture::Run. The leading class, which applies to every
+# alternative, keeps a longer identifier (`my_system(`, `RunSystem(`, `TryCreateProcessAsUser(`) from
+# matching. String literals are not stripped, so a spawn name quoted inside a call such as
+# `LOG_INFO("... system(...)")` matches too (fail closed; the deviation escapes it).
+P4_SPAWN_PRIMITIVE_RE='(^|[^A-Za-z0-9_])((_?w?system|_?w?popen|_?w?exec[lv]p?e?|_w?spawn[lv]p?e?|posix_spawnp?|WinExec)|(CreateProcess|ShellExecute)[A-Za-z]*)[[:space:]]*\('
 
 p4_spawn_strip_comments() {
     # $1 = a C++ file. Prints it line for line (numbering preserved) with `/* ... */` (multi-line)

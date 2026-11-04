@@ -16,9 +16,10 @@
 #      `"name"` in the host's CMakePresets.json. A brace form
 #      (`ninja-test-{msvc,clang}`) is expanded first; a family prefix
 #      (`ninja-test-*`) must match at least one preset. A historical mention is
-#      exempt when the word "retired" follows the token in the same sentence
-#      with no other preset token in between ("the `ninja-foo` preset is
-#      retired", "`ninja-foo` (retired)"); each retired token needs its own.
+#      exempt when "retired" is one of the first five words after the token, in
+#      the same sentence, with no other preset token in between and not negated
+#      ("the `ninja-foo` preset is retired", "`ninja-foo` (retired)"; not
+#      "`ninja-foo` is not retired"); each retired token needs its own.
 #   2. No retired-build-toolchain phrase ("MinGW UCRT") in the scanned docs.
 #      (MSYS2-as-lint-tooling / MinGW-GCC-sanitizer-runtime mentions stay
 #      allowed — only the retired C++ *build-target* phrasing is banned.)
@@ -94,9 +95,11 @@ expand_braces() {
 
 # preset_tokens <file> — the ninja-* preset tokens <file> cites, brace forms
 # expanded; a token ending in `-` is a family prefix (`ninja-test-*`). A token
-# is skipped as historical when "retired" follows it before the next preset
-# token or the end of its sentence (paragraphs are joined, so a sentence may
-# wrap lines).
+# is skipped as historical only when "retired" is one of the first five words
+# after it, before the next preset token or the end of its sentence, and is not
+# negated ("not retired", "isn't retired", "never retired"): the documented
+# shapes are "`ninja-foo` preset is retired" and "`ninja-foo` (retired)".
+# Paragraphs are joined, so a sentence may wrap lines.
 preset_tokens() {
   local raw
   while IFS= read -r raw; do
@@ -112,7 +115,21 @@ preset_tokens() {
         n = index(win, "ninja-")
         if (n > 0) win = substr(win, 1, n - 1)
         if (match(win, /[.!?]([ \t]|$)/)) win = substr(win, 1, RSTART)
-        if (tolower(win) !~ /retired/) print tok
+        w = tolower(win)
+        gsub(/[`*()_,;:.!?]/, " ", w)
+        nw = split(w, words, /[ \t]+/)
+        hist = 0
+        seen = 0
+        for (i = 1; i <= nw && seen < 5; i++) {
+          if (words[i] == "") continue
+          seen++
+          if (words[i] == "retired") {
+            prev = (i > 1) ? words[i - 1] : ""
+            if (prev != "not" && prev != "never" && prev !~ /n.t$/) hist = 1
+            break
+          }
+        }
+        if (!hist) print tok
       }
     }' "$1" 2>/dev/null || true)
 }

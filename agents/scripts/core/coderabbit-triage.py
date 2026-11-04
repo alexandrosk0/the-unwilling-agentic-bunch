@@ -38,6 +38,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -451,14 +452,44 @@ _ROOTS_SNIPPET = (
 )
 
 
+_WINDOWS_BASH_CANDIDATES = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+    r"C:\msys64\usr\bin\bash.exe",
+)
+
+
+def _bash_bin() -> str | None:
+    """A bash that can source project-config.sh, or None (the superproject probe then decides).
+
+    On Windows a bare `bash` often resolves to the WSL launcher (System32\\bash.exe or the
+    WindowsApps store shim), which cannot source a C:/ path; use Git for Windows' bash instead,
+    the way merge-watcher.py resolves it.
+    """
+    found = shutil.which("bash")
+    if os.name != "nt":
+        return found
+    if found:
+        low = found.lower()
+        if not (low.endswith("\\system32\\bash.exe") or "\\windowsapps\\" in low):
+            return found
+    for candidate in _WINDOWS_BASH_CANDIDATES:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def _project_root() -> Path:
     layer = _layer_root()
     config_sh = layer / "scripts" / "dev" / "project-config.sh"
     if not config_sh.is_file():
         return layer
+    bash = _bash_bin()
     try:
+        if bash is None:
+            raise OSError("no usable bash")
         proc = subprocess.run(
-            ["bash", "-c", _ROOTS_SNIPPET, "_", config_sh.as_posix()],
+            [bash, "-c", _ROOTS_SNIPPET, "_", config_sh.as_posix()],
             capture_output=True,
             text=True,
             encoding="utf-8",

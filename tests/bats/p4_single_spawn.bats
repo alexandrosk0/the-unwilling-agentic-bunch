@@ -108,7 +108,7 @@ GOOD='bool P4RunCommand(const Cfg& cfg) {\n    if (cfg.P4RunOverride) {\n       
 }
 
 @test "a longer identifier ending in a spawn name does not fail" {
-    _fixture "$GOOD"'int ParseSystem(int x) { return x; }\nint Run_popen(int x) { return ParseSystem(x); }\n'
+    _fixture "$GOOD"'int ParseSystem(int x) { return x; }\nint Run_popen(int x) { return ParseSystem(x); }\nint TryCreateProcessAsUser(int x) { return Run_popen(x); }\n'
     _scan
     [ "$status" -eq 0 ]
     [ -z "$output" ]
@@ -142,8 +142,13 @@ GOOD='bool P4RunCommand(const Cfg& cfg) {\n    if (cfg.P4RunOverride) {\n       
 @test "the real host tree passes" {
     # The host tree is PROJECT_ROOT (the superproject when this layer is its agent-layer/
     # submodule). The layer's own checkout has no Source/, so there is nothing to scan there.
+    # Resolved with the inherited roots cleared: the host's test-all.sh runs layer suites with the
+    # layer as PROJECT_ROOT, which would otherwise always skip this case there.
     local host
-    host="$(PC_ROOTS_ONLY=1 . "$REPO_ROOT/scripts/dev/project-config.sh" >/dev/null 2>&1; printf '%s' "${PROJECT_ROOT:-}")"
+    host="$(env -u PROJECT_ROOT -u PC_PROJECT_ROOT -u AGENT_LAYER_ROOT -u PC_AGENT_LAYER_ROOT \
+        -u SMATCHET_PROJECT_ROOT_OVERRIDE -u SMATCHET_PROJECT_CONFIG \
+        bash -c 'PC_ROOTS_ONLY=1 . "$1" >/dev/null 2>&1; printf %s "${PROJECT_ROOT:-}"' _ \
+        "$REPO_ROOT/scripts/dev/project-config.sh")"
     if [ -z "$host" ] || [ ! -f "$host/Source/Core/include/P4Annotate.h" ]; then
         skip "no host tree with Source/Core/include/P4Annotate.h (layer-only checkout)"
     fi

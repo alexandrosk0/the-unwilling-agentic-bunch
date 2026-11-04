@@ -100,13 +100,16 @@ JSON
 }
 
 @test "selftest validates the host area map when the layer is mounted in a host" {
-    # The host is the PROJECT_ROOT project-config.sh resolves, exactly as the script does.
+    # The host is the PROJECT_ROOT project-config.sh resolves with no inherited root, the way a
+    # caller runs the script: the host's test-all.sh points layer suites at the layer itself
+    # (PROJECT_ROOT=<layer> + SMATCHET_PROJECT_ROOT_OVERRIDE=1), which would otherwise skip this,
+    # the only CI check that every route's docs still exist.
     local host
-    host="$(PC_ROOTS_ONLY=1 . "$REPO_ROOT/scripts/dev/project-config.sh" >/dev/null 2>&1; printf '%s' "${PROJECT_ROOT:-}")"
+    host="$(host_root)"
     if [ -z "$host" ] || [ ! -f "$host/docs/area-map.json" ]; then
         skip "standalone layer: no host area map"
     fi
-    run "$PY" "$PY_SRC" selftest
+    run_rooted "$PY" "$PY_SRC" selftest
     [ "$status" -eq 0 ]
     [[ "$output" == *"area map OK"* ]]
 }
@@ -213,6 +216,14 @@ JSON
 run_rooted() {
     run env -u PROJECT_ROOT -u PC_PROJECT_ROOT -u AGENT_LAYER_ROOT -u PC_AGENT_LAYER_ROOT \
         -u SMATCHET_PROJECT_ROOT_OVERRIDE -u SMATCHET_PROJECT_CONFIG "$@"
+}
+
+# The project root project-config.sh resolves for this checkout with no inherited root.
+host_root() {
+    env -u PROJECT_ROOT -u PC_PROJECT_ROOT -u AGENT_LAYER_ROOT -u PC_AGENT_LAYER_ROOT \
+        -u SMATCHET_PROJECT_ROOT_OVERRIDE -u SMATCHET_PROJECT_CONFIG \
+        bash -c 'PC_ROOTS_ONLY=1 . "$1" >/dev/null 2>&1; printf %s "${PROJECT_ROOT:-}"' _ \
+        "$REPO_ROOT/scripts/dev/project-config.sh"
 }
 
 @test "area: finds the map under a SMATCHET_PROJECT_CONFIG host, like sync-issue-labels.sh" {

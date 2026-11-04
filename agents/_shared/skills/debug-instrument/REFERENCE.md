@@ -87,10 +87,10 @@ jq -c 'select(.category == "temp-debug")' <session-id>.ndjson
 jq -c '{ts, tid, scope, payload}' <session-id>.ndjson
 ```
 
-**Template helper** — `debug-<hex>.log`: on Windows at the root of the first ancestor clone with a `.git` directory (from a linked worktree nested in the main clone, that is the main clone, the parent of `--git-common-dir`) or beside the exe; elsewhere in the process working directory:
+**Template helper** — `debug-<hex>.log`: on Windows at the root of the first ancestor clone with a `.git` directory (from a linked worktree nested in the main clone, that is the main clone, the parent of `--git-common-dir`) or beside the exe; elsewhere in the process working directory (normally the checkout root, `--show-toplevel`, which in a linked worktree is the worktree, not the main clone). The commands list all three spots:
 
 ```bash
-ls -la "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/debug-<hex>.log" "$(dirname <exe>)/debug-<hex>.log"
+ls -la "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/debug-<hex>.log" "$(git rev-parse --show-toplevel)/debug-<hex>.log" "$(dirname <exe>)/debug-<hex>.log"
 jq -c 'select(.hypothesisId == "h1")' debug-<hex>.log            # one hypothesis
 jq -c 'select(.location == "ApplySort")' debug-<hex>.log         # one call site
 jq -c '{ts: .timestamp, loc: .location, h: .hypothesisId, i: .data.i, msg: .message}' debug-<hex>.log
@@ -201,7 +201,7 @@ git grep --untracked -n "\[temp-debug\]" -- . ':(exclude)ThirdParty' ':(exclude)
 git ls-files <helper> | grep -q . || rm -f <helper>
 
 # 12c. Delete the NDJSON logs this investigation wrote
-rm -f "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/debug-<hex>.log" "$(dirname <exe>)/debug-<hex>.log"
+rm -f "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/debug-<hex>.log" "$(git rev-parse --show-toplevel)/debug-<hex>.log" "$(dirname <exe>)/debug-<hex>.log"
 rm -f <debug-dir>/<session-id>.ndjson
 
 # 12d. Rebuild clean
