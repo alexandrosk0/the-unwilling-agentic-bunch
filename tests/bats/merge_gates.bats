@@ -133,6 +133,45 @@ case "$1" in
                     *)    echo "${MERGE_GATES_STUB_RUNS_CREATED:-1}"; exit 0 ;;
                 esac
                 ;;
+            */pulls/*/files*)
+                # Plan CI-proof gate, step 1: the PR's file list. The caller's real
+                # --jq filter runs over a pulls/<n>/files-shaped JSON array, so an
+                # entry with no `patch` key is modelled the way the API sends it.
+                #   MERGE_GATES_STUB_PR_FILES_JSON — that array; unset → [] (the PR
+                #   changes nothing this gate reads); "fail" → list error
+                [ "${MERGE_GATES_STUB_PR_FILES_JSON:-}" = fail ] && { echo "gh: stub pr files error" >&2; exit 1; }
+                _filter=""; _prev=""
+                for _a in "$@"; do
+                    if [ "$_prev" = "--jq" ]; then _filter="$_a"; break; fi
+                    _prev="$_a"
+                done
+                printf '%s' "${MERGE_GATES_STUB_PR_FILES_JSON:-[]}" | "${MERGE_GATES_STUB_JQ:-jq}" -r "$_filter"; exit $?
+                ;;
+            */contents/docs/plans/*)
+                # Step 2: a plan's head copy, base64 (the --jq .content output).
+                #   MERGE_GATES_STUB_PLAN_FILE — local file served for every plan
+                #   path; unset → read error
+                #   MERGE_GATES_STUB_PLAN_UNREADABLE — a path substring that errors
+                case "$2" in
+                    *"${MERGE_GATES_STUB_PLAN_UNREADABLE:-//none//}"*) echo "gh: stub contents error" >&2; exit 1 ;;
+                esac
+                if [ -n "${MERGE_GATES_STUB_PLAN_FILE:-}" ]; then
+                    base64 < "$MERGE_GATES_STUB_PLAN_FILE"; exit 0
+                fi
+                echo "gh: stub contents error" >&2; exit 1
+                ;;
+            */commits/*/statuses*)
+                # Step 3b: the head's commit-status contexts, one per line.
+                #   MERGE_GATES_STUB_STATUS_CONTEXTS (default: none)
+                [ -n "${MERGE_GATES_STUB_STATUS_CONTEXTS:-}" ] && printf '%s\n' "$MERGE_GATES_STUB_STATUS_CONTEXTS"
+                exit 0
+                ;;
+            */issues/*/labels*)
+                # Plan CI-proof waiver read: the PR's label names, one per line.
+                #   MERGE_GATES_STUB_LABELS (default: none)
+                [ -n "${MERGE_GATES_STUB_LABELS:-}" ] && printf '%s\n' "$MERGE_GATES_STUB_LABELS"
+                exit 0
+                ;;
             */pulls/*)
                 # Silent-BLOCKED live probe step 1: gh api repos/<o>/<r>/pulls/<n>
                 #   --jq .base.ref (the PR's ACTUAL base for the protection read).
@@ -145,6 +184,25 @@ case "$1" in
                 echo "gh: stub pulls error" >&2; exit 1
                 ;;
             */commits/*/check-runs*)
+                # Plan CI-proof gate, step 3, when the call passes -f check_name=<n>:
+                # the caller's real --jq filter runs over {"check_runs": <runs>}.
+                #   MERGE_GATES_STUB_PROOF_RUNS_JSON — object: check name → array of
+                #   check-run objects; a name not in it → []; "fail" → lookup error
+                _proof_name=""
+                for _a in "$@"; do
+                    case "$_a" in check_name=*) _proof_name="${_a#check_name=}" ;; esac
+                done
+                if [ -n "$_proof_name" ]; then
+                    [ "${MERGE_GATES_STUB_PROOF_RUNS_JSON:-}" = fail ] && { echo "gh: stub check-runs error" >&2; exit 1; }
+                    _filter=""; _prev=""
+                    for _a in "$@"; do
+                        if [ "$_prev" = "--jq" ]; then _filter="$_a"; break; fi
+                        _prev="$_a"
+                    done
+                    printf '%s' "${MERGE_GATES_STUB_PROOF_RUNS_JSON:-{\}}" \
+                        | "${MERGE_GATES_STUB_JQ:-jq}" --arg n "$_proof_name" '{check_runs: (.[$n] // [])}' \
+                        | "${MERGE_GATES_STUB_JQ:-jq}" -r "$_filter"; exit $?
+                fi
                 # Stale-red Plan-lock re-check, step 1: the head's latest
                 # "Plan-lock gate" run id (the --jq output).
                 #   MERGE_GATES_STUB_PLANLOCK_RUN_ID — id to emit (default 4242)
@@ -5296,4 +5354,267 @@ stale_no_header_fixture() {
     [ ! -s "$MERGE_GATES_STUB_COMMENT_COUNTER" ]
     rm -f "$MERGE_GATES_STUB_COMMENT_COUNTER" "$base"
     unset MERGE_GATES_PRIOR_STALE_HEAD MERGE_GATES_PRIOR_STALE_STREAK
+}
+
+# ---------- Plan CI-proof gate (merge-gates.d/30-plan-proof.sh) ----------
+# A plan this PR adds `CI: "<check>" green on this PR` to names a proof; when
+# that check SKIPPED (or never ran) on the head, the proof never ran and a
+# skipped check reads as a pass everywhere else. The fixture's other gates are
+# all green (merge_gates_pass.json), so each case isolates this gate. The file
+# list and check-run stubs run the script's real --jq over API-shaped JSON.
+
+# _pp_plan [extra line…] — write the plan the stub serves as the head copy:
+#   line 3  ## Verification
+#   line 5  - CI: "Sanitizer (UBSan via Clang)" green on this PR.
+#   line 7  ## Verification (actual)
+#   line 8  - CI: "Recorded check" green on this PR.
+_pp_plan() {
+    local f="$BATS_TEST_TMPDIR/plan.md"
+    printf '%s\n' '# Plan' '' '## Verification' '' \
+        '- CI: "Sanitizer (UBSan via Clang)" green on this PR.' '' \
+        '## Verification (actual)' '- CI: "Recorded check" green on this PR.' > "$f"
+    export MERGE_GATES_STUB_PLAN_FILE="$f"
+}
+
+# _pp_file <path> <changes> [<patch>] — a one-entry pulls/<n>/files response;
+# no <patch> argument → the entry has no `patch` key at all (as the API sends a
+# pure rename or an oversized diff).
+_pp_file() {
+    if [ "$#" -ge 3 ]; then
+        MERGE_GATES_STUB_PR_FILES_JSON="$(jq -nc --arg f "$1" --argjson c "$2" --arg p "$3" \
+            '[{filename: $f, status: "modified", changes: $c, patch: $p}]')"
+    else
+        MERGE_GATES_STUB_PR_FILES_JSON="$(jq -nc --arg f "$1" --argjson c "$2" \
+            '[{filename: $f, status: (if $c == 0 then "renamed" else "modified" end), changes: $c}]')"
+    fi
+    export MERGE_GATES_STUB_PR_FILES_JSON
+}
+
+# _pp_runs <conclusion…> — the UBSan proof's runs on the head, one per argument.
+_pp_runs() {
+    MERGE_GATES_STUB_PROOF_RUNS_JSON="$(printf '%s\n' "$@" | jq -Rsc \
+        '{"Sanitizer (UBSan via Clang)": (split("\n") | map(select(length > 0)) | map({conclusion: .}))}')"
+    export MERGE_GATES_STUB_PROOF_RUNS_JSON
+}
+
+# The patch that adds line 5 (the UBSan proof line).
+PP_ADD5=$'@@ -4,0 +5 @@\n+- CI: "Sanitizer (UBSan via Clang)" green on this PR.'
+PP_PLAN="docs/plans/active/lane-change.md"
+
+@test "plan-proof: added proof line whose check SKIPPED on the head -> BLOCK at once, no pass" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    export MERGE_GATES_MAX_POLLS=3
+    _pp_plan; _pp_file "$PP_PLAN" 1 "$PP_ADD5"; _pp_runs skipped
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"BLOCK: plan CI-proof skipped"* ]]
+    [[ "$output" == *"$PP_PLAN"': "Sanitizer (UBSan via Clang)" (skipped)'* ]]
+    # Final for the head: one poll, not MAX_POLLS.
+    [ "$(grep -c '^Poll ' <<<"$output")" -eq 1 ]
+}
+
+@test "plan-proof: the named check succeeded on the head -> GATES_PASSED" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_file "$PP_PLAN" 1 "$PP_ADD5"; _pp_runs success
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+}
+
+@test "plan-proof: several runs of the name pass when any one ran, block when all skipped" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_file "$PP_PLAN" 1 "$PP_ADD5"
+    _pp_runs skipped success
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    _pp_runs success skipped
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    _pp_runs skipped skipped
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+}
+
+@test "plan-proof: no run of the named check on the head -> BLOCK (absent)" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_file "$PP_PLAN" 1 "$PP_ADD5"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'"Sanitizer (UBSan via Clang)" (absent)'* ]]
+}
+
+@test "plan-proof: a commit-status context of that name counts as having run" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_file "$PP_PLAN" 1 "$PP_ADD5"
+    export MERGE_GATES_STUB_STATUS_CONTEXTS=$'other/context\nSanitizer (UBSan via Clang)'
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+}
+
+@test "plan-proof: plan-proof-out-of-band downgrades to WARN and lands in GATE_SNAPSHOT" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_file "$PP_PLAN" 1 "$PP_ADD5"; _pp_runs skipped
+    export MERGE_GATES_STUB_LABELS=$'cr-out-of-band\nplan-proof-out-of-band'
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"WARN: plan-proof-out-of-band waives the plan CI-proof gate"* ]]
+    grep -q '^GATE_SNAPSHOT cr_override=0 downgraded=.*Plan CI-proof: Sanitizer (UBSan via Clang)' <<<"$output"
+}
+
+@test "plan-proof: several waived proofs are each prefixed in GATE_SNAPSHOT" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    local f="$BATS_TEST_TMPDIR/plan.md"
+    printf '%s\n' '## Verification' '- CI: "A, one" green on this PR; CI: "B" green on this PR.' > "$f"
+    export MERGE_GATES_STUB_PLAN_FILE="$f"
+    _pp_file "$PP_PLAN" 1 $'@@ -0,0 +1,2 @@\n+## Verification\n+- CI: "A, one" green on this PR; CI: "B" green on this PR.'
+    export MERGE_GATES_STUB_LABELS=plan-proof-out-of-band
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    grep -q '^GATE_SNAPSHOT .*downgraded=.*Plan CI-proof: A, one, Plan CI-proof: B' <<<"$output"
+}
+
+@test "plan-proof: every proof on one line is checked, not only the last" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    local f="$BATS_TEST_TMPDIR/plan.md"
+    printf '%s\n' '## Verification' '- CI: "Sanitizer (UBSan via Clang)" green on this PR; CI: "Other" green on this PR.' > "$f"
+    export MERGE_GATES_STUB_PLAN_FILE="$f"
+    _pp_file "$PP_PLAN" 1 $'@@ -0,0 +1,2 @@\n+## Verification\n+- CI: "Sanitizer (UBSan via Clang)" green on this PR; CI: "Other" green on this PR.'
+    MERGE_GATES_STUB_PROOF_RUNS_JSON='{"Sanitizer (UBSan via Clang)":[{"conclusion":"skipped"}],"Other":[{"conclusion":"success"}]}'
+    export MERGE_GATES_STUB_PROOF_RUNS_JSON
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'"Sanitizer (UBSan via Clang)" (skipped)'* ]]
+}
+
+@test "plan-proof: a fenced code block neither ends the section nor counts as a proof" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    local f="$BATS_TEST_TMPDIR/plan.md"
+    printf '%s\n' '## Verification' '```' '## not a heading' '- CI: "Fenced example" green on this PR.' '```' \
+        '- CI: "Sanitizer (UBSan via Clang)" green on this PR.' > "$f"
+    export MERGE_GATES_STUB_PLAN_FILE="$f"
+    _pp_file "$PP_PLAN" 9; _pp_runs skipped
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'"Sanitizer (UBSan via Clang)" (skipped)'* ]]
+    [[ "$output" != *"Fenced example"* ]]
+}
+
+@test "plan-proof: an unchanged proof line is not re-checked (the PR edits another line)" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_file "$PP_PLAN" 2 $'@@ -1 +1 @@\n-# Old title\n+# Plan'; _pp_runs skipped
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+}
+
+@test "plan-proof: a pure rename (no patch key, 0 changes) and a deletion-only patch prove nothing" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_runs skipped
+    _pp_file "docs/plans/shipped/lane-change.md" 0
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    _pp_file "docs/plans/shipped/lane-change.md" 1 $'@@ -9 +8,0 @@\n-- an old line'
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+}
+
+@test "plan-proof: a plan the API sends no patch for but that changed is read whole" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_file "$PP_PLAN" 4000; _pp_runs skipped
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"BLOCK: plan CI-proof skipped"* ]]
+    # Only ## Verification counts, even when read whole: the (actual) line's
+    # "Recorded check" is never looked up, so it is not reported absent.
+    [[ "$output" != *"Recorded check"* ]]
+}
+
+@test "plan-proof: files outside docs/plans/{active,shipped}/*.md are not read" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_runs skipped
+    local p
+    for p in docs/plans/active/sub/lane-change.md docs/notes/lane-change.md docs/plans/deferred/lane-change.md; do
+        _pp_file "$p" 9
+        run poll_merge_gates org repo 1
+        [ "$status" -eq 0 ] || { echo "read $p" >&2; return 1; }
+    done
+}
+
+@test "plan-proof: an unreadable file list holds the poll (no GATES_PASSED)" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    export MERGE_GATES_STUB_PR_FILES_JSON=fail
+    run poll_merge_gates org repo 1
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" == *"plan CI-proof gate could not decide (the PR's file list could not be read)"* ]]
+}
+
+@test "plan-proof: an unreadable plan copy or check lookup holds the poll" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_file "$PP_PLAN" 1 "$PP_ADD5"
+    run poll_merge_gates org repo 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"could not decide (the head copy of $PP_PLAN could not be read)"* ]]
+    _pp_plan
+    export MERGE_GATES_STUB_PROOF_RUNS_JSON=fail
+    run poll_merge_gates org repo 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'could not decide (the check runs for "Sanitizer (UBSan via Clang)" ('"$PP_PLAN"') could not be read)'* ]]
+}
+
+@test "plan-proof: plan-proof-out-of-band also waives an undecidable gate" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    export MERGE_GATES_STUB_PR_FILES_JSON=fail
+    export MERGE_GATES_STUB_LABELS=plan-proof-out-of-band
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GATES_PASSED"* ]]
+    [[ "$output" == *"plan-proof-out-of-band waives the plan CI-proof gate"* ]]
+    # The waived undecidable gate is on the ledger, not a moot override.
+    grep -q "^GATE_SNAPSHOT .*downgraded=.*Plan CI-proof: undecided (the PR's file list could not be read)" <<<"$output"
+}
+
+@test "plan-proof: an unreadable plan does not hide a skipped proof in another plan" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_runs skipped
+    MERGE_GATES_STUB_PR_FILES_JSON="$(jq -nc --arg p "$PP_ADD5" '[
+        {filename: "docs/plans/active/huge.md", status: "modified", changes: 9000},
+        {filename: "docs/plans/active/lane-change.md", status: "modified", changes: 1, patch: $p}]')"
+    export MERGE_GATES_STUB_PR_FILES_JSON
+    export MERGE_GATES_STUB_PLAN_UNREADABLE=huge.md
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"BLOCK: plan CI-proof skipped"* ]]
+    [[ "$output" == *"$PP_PLAN"': "Sanitizer (UBSan via Clang)" (skipped)'* ]]
+    [[ "$output" == *"Also undecided: the head copy of docs/plans/active/huge.md could not be read"* ]]
+    # Waived, both land in GATE_SNAPSHOT.
+    export MERGE_GATES_STUB_LABELS=plan-proof-out-of-band
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    grep -q '^GATE_SNAPSHOT .*downgraded=.*Plan CI-proof: Sanitizer (UBSan via Clang), Plan CI-proof: undecided (the head copy of docs/plans/active/huge.md could not be read)' <<<"$output"
+}
+
+@test "plan-proof: a fence that never closes is ignored, so it hides no proof" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    local f="$BATS_TEST_TMPDIR/plan.md"
+    printf '%s\n' '## Verification' '  ```bash' '- CI: "Sanitizer (UBSan via Clang)" green on this PR.' > "$f"
+    export MERGE_GATES_STUB_PLAN_FILE="$f"
+    _pp_file "$PP_PLAN" 9; _pp_runs skipped
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'"Sanitizer (UBSan via Clang)" (skipped)'* ]]
+}
+
+@test "plan-proof helper: _mg_planproof_added_lines numbers only the added head-side lines" {
+    run _mg_planproof_added_lines <<< $'@@ -1,3 +1,4 @@\n context\n-gone\n+new two\n+new three\n context\n\\ No newline at end of file\n@@ -10 +11,2 @@\n+eleven\n twelve'
+    [ "$status" -eq 0 ]
+    [ "$output" = " 2 3 11 " ]
+}
+
+@test "plan-proof helper: _mg_planproof_uri_path encodes everything outside the unreserved set and /" {
+    run _mg_planproof_uri_path 'docs/plans/active/a b#?%é.md'
+    [ "$output" = 'docs/plans/active/a%20b%23%3F%25%C3%A9.md' ]
 }
