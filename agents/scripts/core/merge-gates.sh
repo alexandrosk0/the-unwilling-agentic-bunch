@@ -541,27 +541,30 @@ _mg_planlock_verdict_report() {
 # `## Verification`, look the check up on the head and print one
 # "<plan path><TAB><check><TAB><conclusion>" line per proof that did not run
 # (SKIPPED, or no run of that name on the head at all).
+# An unreadable plan copy or check lookup does not stop the walk: it prints
+# "UNDECIDED<TAB><reason>" and the rest is still checked, so a waiver over an
+# undecidable plan cannot hide a real skip in another one.
 #   rc 0 — no such line, or every named proof ran
-#   rc 1 — at least one named proof was skipped (lines printed on stdout)
-#   rc 2 — undecidable: the file list, a plan's head copy or a check lookup
-#          could not be read (a reason on stdout). The caller does not pass.
+#   rc 1 — at least one named proof was skipped (UNDECIDED lines may follow)
+#   rc 2 — nothing skipped, but something was undecidable (or the file list
+#          itself could not be read: one UNDECIDED line). The caller does not pass.
 # REST only, one call when the PR changes no plan doc. Runs on the pass path
 # only, so a PR that is red for another reason costs nothing extra. Every gh
 # call names its path first: the bats stub dispatches on the second argument.
 # ----------------------------------------------------------------------------
 _mg_plan_proof_verdict() {
     local owner="$1" repo="$2" pr="$3" sha="$4"
-    local files path changes patch added tmp check concl contexts enc skipped=0
+    local files path changes patch added tmp check concl contexts enc skipped=0 undecided=0
     # One row per changed file: path, line-change count, base64 patch. GitHub
     # omits `patch` both for a pure rename (changes == 0: nothing added, nothing
     # to prove) and for a diff too large to send (changes > 0: read the plan
     # whole), so the count tells the two apart.
     if ! files="$(gh api "repos/${owner}/${repo}/pulls/${pr}/files?per_page=100" --paginate \
         --jq '.[] | select(.status != "removed") | [.filename, (.changes // 0 | tostring), (if .patch == null then "NOPATCH" else (.patch | @base64) end)] | @tsv' 2>/dev/null)"; then
-        echo "the PR's file list could not be read"
+        printf 'UNDECIDED\t%s\n' "the PR's file list could not be read"
         return 2
     fi
-    tmp="$(mktemp)" || { echo "no temp file"; return 2; }
+    tmp="$(mktemp)" || { printf 'UNDECIDED\t%s\n' "no temp file"; return 2; }
     while IFS=$'\t' read -r path changes patch; do
         if [ -z "$path" ] || ! _mg_planproof_is_plan "$path"; then
             continue
@@ -581,9 +584,9 @@ _mg_plan_proof_verdict() {
         gh api "repos/${owner}/${repo}/contents/${enc}?ref=${sha}" --jq '.content // empty' 2>/dev/null \
             | base64 -d > "$tmp" 2>/dev/null
         if [ ! -s "$tmp" ]; then
-            echo "the head copy of ${path} could not be read"
-            rm -f "$tmp"
-            return 2
+            printf 'UNDECIDED\t%s\n' "the head copy of ${path} could not be read"
+            undecided=1
+            continue
         fi
         while IFS= read -r check; do
             [ -n "$check" ] || continue
@@ -593,9 +596,9 @@ _mg_plan_proof_verdict() {
             if ! concl="$(gh api "repos/${owner}/${repo}/commits/${sha}/check-runs" -X GET \
                 -f check_name="$check" -f filter=latest -f per_page=100 \
                 --jq '[.check_runs[] | (.conclusion // .status)] | if length == 0 then "absent" elif all(. == "skipped") then "skipped" else (map(select(. != "skipped")) | .[0]) end' 2>/dev/null)"; then
-                echo "the check runs for \"${check}\" could not be read"
-                rm -f "$tmp"
-                return 2
+                printf 'UNDECIDED\t%s\n' "the check runs for \"${check}\" (${path}) could not be read"
+                undecided=1
+                continue
             fi
             # A proof can also be a commit-status context; one that reported is not
             # skipped. Captured, then matched: a `gh … | grep -q` pipe can SIGPIPE
@@ -615,6 +618,7 @@ _mg_plan_proof_verdict() {
     done <<< "$files"
     rm -f "$tmp"
     [ "$skipped" -eq 0 ] || return 1
+    [ "$undecided" -eq 0 ] || return 2
     return 0
 }
 
@@ -2287,29 +2291,35 @@ poll_merge_gates() {
                     proof_waive=true
                 fi
             fi
+            # Split the verdict: skip rows (<plan> <check> <conclusion>) and the
+            # reasons nothing could be decided for.
+            local proof_skips proof_undecided _pp_check _pp_plan _pp_concl _pp_waived=""
+            proof_skips="$(grep -v '^UNDECIDED' <<< "$proof_out" || true)"
+            proof_undecided="$(grep '^UNDECIDED' <<< "$proof_out" | cut -f2 | paste -sd';' - | sed 's/;/; /g' || true)"
             if [ "$proof_rc" -eq 0 ]; then
                 proof_ok=true
-            elif [ "$proof_rc" -eq 1 ] && [ "$proof_waive" = true ]; then
-                local _pp_check _pp_waived=""
+            elif [ "$proof_waive" = true ]; then
+                # Waived: every skipped check AND every undecided reason goes into
+                # GATE_SNAPSHOT, so the ledger row names what the label let through.
                 while IFS= read -r _pp_check; do
                     [ -n "$_pp_check" ] && _pp_waived="${_pp_waived:+${_pp_waived}, }Plan CI-proof: ${_pp_check}"
-                done < <(cut -f2 <<< "$proof_out" | sort -u)
-                echo "WARN: plan-proof-out-of-band downgraded a skipped plan CI proof to WARN: ${_pp_waived}" >&2
+                done < <(cut -f2 <<< "$proof_skips" | sed '/^$/d' | sort -u)
+                if [ -n "$proof_undecided" ]; then
+                    _pp_waived="${_pp_waived:+${_pp_waived}, }Plan CI-proof: undecided (${proof_undecided})"
+                fi
+                echo "WARN: plan-proof-out-of-band waives the plan CI-proof gate: ${_pp_waived}" >&2
                 dg_names="${dg_names:+${dg_names}, }${_pp_waived}"
                 proof_ok=true
             elif [ "$proof_rc" -eq 1 ]; then
                 echo "BLOCK: plan CI-proof skipped — a plan this PR changes names a CI check as its proof \"green on this PR\", and that check did not run on head ${head_sha:0:8} (SKIPPED, or no run of that name). A skipped check is a pass to branch protection, so the proof the plan asked for never ran:" >&2
-                local _pp_plan _pp_concl
                 while IFS=$'\t' read -r _pp_plan _pp_check _pp_concl; do
-                    echo "  ${_pp_plan}: \"${_pp_check}\" (${_pp_concl})" >&2
-                done <<< "$proof_out"
+                    [ -n "$_pp_plan" ] && echo "  ${_pp_plan}: \"${_pp_check}\" (${_pp_concl})" >&2
+                done <<< "$proof_skips"
+                [ -z "$proof_undecided" ] || echo "  Also undecided: ${proof_undecided}" >&2
                 echo "  Make the diff run the check (fix the delta gate's trigger set), or change the plan's proof to one that ran. To merge anyway, apply the 'plan-proof-out-of-band' label." >&2
                 break
-            elif [ "$proof_waive" = true ]; then
-                echo "WARN: plan CI-proof gate could not decide (${proof_out}); plan-proof-out-of-band waives it." >&2
-                proof_ok=true
             else
-                echo "BLOCK: plan CI-proof gate could not decide (${proof_out}); not passing this poll. If this persists, apply the 'plan-proof-out-of-band' label." >&2
+                echo "BLOCK: plan CI-proof gate could not decide (${proof_undecided}); not passing this poll. If this persists, apply the 'plan-proof-out-of-band' label." >&2
             fi
             if [ "$proof_ok" = true ]; then
                 local cr_override_flag=0

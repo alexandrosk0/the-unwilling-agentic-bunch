@@ -151,6 +151,10 @@ case "$1" in
                 # Step 2: a plan's head copy, base64 (the --jq .content output).
                 #   MERGE_GATES_STUB_PLAN_FILE — local file served for every plan
                 #   path; unset → read error
+                #   MERGE_GATES_STUB_PLAN_UNREADABLE — a path substring that errors
+                case "$2" in
+                    *"${MERGE_GATES_STUB_PLAN_UNREADABLE:-//none//}"*) echo "gh: stub contents error" >&2; exit 1 ;;
+                esac
                 if [ -n "${MERGE_GATES_STUB_PLAN_FILE:-}" ]; then
                     base64 < "$MERGE_GATES_STUB_PLAN_FILE"; exit 0
                 fi
@@ -5456,7 +5460,7 @@ PP_PLAN="docs/plans/active/lane-change.md"
     run poll_merge_gates org repo 1
     [ "$status" -eq 0 ]
     [[ "$output" == *"GATES_PASSED"* ]]
-    [[ "$output" == *"WARN: plan-proof-out-of-band downgraded"* ]]
+    [[ "$output" == *"WARN: plan-proof-out-of-band waives the plan CI-proof gate"* ]]
     grep -q '^GATE_SNAPSHOT cr_override=0 downgraded=.*Plan CI-proof: Sanitizer (UBSan via Clang)' <<<"$output"
 }
 
@@ -5558,7 +5562,7 @@ PP_PLAN="docs/plans/active/lane-change.md"
     export MERGE_GATES_STUB_PROOF_RUNS_JSON=fail
     run poll_merge_gates org repo 1
     [ "$status" -ne 0 ]
-    [[ "$output" == *'could not decide (the check runs for "Sanitizer (UBSan via Clang)" could not be read)'* ]]
+    [[ "$output" == *'could not decide (the check runs for "Sanitizer (UBSan via Clang)" ('"$PP_PLAN"') could not be read)'* ]]
 }
 
 @test "plan-proof: plan-proof-out-of-band also waives an undecidable gate" {
@@ -5568,7 +5572,40 @@ PP_PLAN="docs/plans/active/lane-change.md"
     run poll_merge_gates org repo 1
     [ "$status" -eq 0 ]
     [[ "$output" == *"GATES_PASSED"* ]]
-    [[ "$output" == *"plan-proof-out-of-band waives it"* ]]
+    [[ "$output" == *"plan-proof-out-of-band waives the plan CI-proof gate"* ]]
+    # The waived undecidable gate is on the ledger, not a moot override.
+    grep -q "^GATE_SNAPSHOT .*downgraded=.*Plan CI-proof: undecided (the PR's file list could not be read)" <<<"$output"
+}
+
+@test "plan-proof: an unreadable plan does not hide a skipped proof in another plan" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_runs skipped
+    MERGE_GATES_STUB_PR_FILES_JSON="$(jq -nc --arg p "$PP_ADD5" '[
+        {filename: "docs/plans/active/huge.md", status: "modified", changes: 9000},
+        {filename: "docs/plans/active/lane-change.md", status: "modified", changes: 1, patch: $p}]')"
+    export MERGE_GATES_STUB_PR_FILES_JSON
+    export MERGE_GATES_STUB_PLAN_UNREADABLE=huge.md
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"BLOCK: plan CI-proof skipped"* ]]
+    [[ "$output" == *"$PP_PLAN"': "Sanitizer (UBSan via Clang)" (skipped)'* ]]
+    [[ "$output" == *"Also undecided: the head copy of docs/plans/active/huge.md could not be read"* ]]
+    # Waived, both land in GATE_SNAPSHOT.
+    export MERGE_GATES_STUB_LABELS=plan-proof-out-of-band
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 0 ]
+    grep -q '^GATE_SNAPSHOT .*downgraded=.*Plan CI-proof: Sanitizer (UBSan via Clang), Plan CI-proof: undecided (the head copy of docs/plans/active/huge.md could not be read)' <<<"$output"
+}
+
+@test "plan-proof: a fence that never closes is ignored, so it hides no proof" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    local f="$BATS_TEST_TMPDIR/plan.md"
+    printf '%s\n' '## Verification' '  ```bash' '- CI: "Sanitizer (UBSan via Clang)" green on this PR.' > "$f"
+    export MERGE_GATES_STUB_PLAN_FILE="$f"
+    _pp_file "$PP_PLAN" 9; _pp_runs skipped
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'"Sanitizer (UBSan via Clang)" (skipped)'* ]]
 }
 
 @test "plan-proof helper: _mg_planproof_added_lines numbers only the added head-side lines" {

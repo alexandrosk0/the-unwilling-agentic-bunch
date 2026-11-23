@@ -75,16 +75,34 @@ _mg_planproof_added_lines() {
 # records what happened, not what is asked). A proof reads
 # `CI: "<check>" green on this PR` (or `the PR`); the name may sit in backticks
 # instead of quotes, and one line may carry several. Lines inside a fenced code
-# block (``` or ~~~) are neither headings nor proofs, so a `## …` line in an
+# block (``` or ~~~, closed by the same marker) are neither headings nor proofs, so a `## …` line in an
 # example cannot close the section early, and a quoted grammar example is not a
 # proof. A name with a `<placeholder>` shape is a template, never a check.
 # shellcheck disable=SC2016  # awk / sed programs; the backticks are literal
 _mg_planproof_checks() {
     local file="$1" added="$2"
     [ "$added" = all ] || added=" ${added# } "
-    awk -v added="$added" '
-        /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
-        fence { next }
+    # A fence closes only on the marker that opened it (same character, at least
+    # as long). A fence that never closes would hide the rest of the file, so in
+    # that case fences are ignored altogether: over-reading only adds proofs to
+    # check, under-reading lets one through unchecked.
+    local fences=1
+    awk '
+        match($0, /^[[:space:]]*(```+|~~~+)/) {
+            m = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*/, "", m)
+            if (open == "") open = m
+            else if (substr(m, 1, 1) == substr(open, 1, 1) && length(m) >= length(open)) open = ""
+        }
+        END { exit open == "" ? 0 : 1 }
+    ' "$file" || fences=0
+    awk -v added="$added" -v fences="$fences" '
+        fences && match($0, /^[[:space:]]*(```+|~~~+)/) {
+            m = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*/, "", m)
+            if (open == "") open = m
+            else if (substr(m, 1, 1) == substr(open, 1, 1) && length(m) >= length(open)) open = ""
+            next
+        }
+        open != "" { next }
         /^## / { in_v = ($0 ~ /^## Verification[[:space:]]*$/); next }
         in_v && (added == "all" || index(added, " " NR " ")) { print }
     ' "$file" \
