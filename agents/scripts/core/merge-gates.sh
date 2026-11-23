@@ -64,6 +64,10 @@
 #                       waived. Mandatory for every cr-out-of-band downgrade.
 #   bugbot-out-of-band → downgrades a Cursor Bugbot block → WARN (Bugbot gate
 #                       only; CI + CR + user-comment gates still bind)
+#   plan-proof-out-of-band → downgrades a skipped plan CI proof → WARN: a check
+#                       a plan this PR adds a `CI: "<check>" green on this PR`
+#                       line for concluded SKIPPED (or never ran) on the head
+#                       (_mg_plan_proof_verdict; recorded in GATE_SNAPSHOT).
 # Downgraded failures are logged on stderr but do NOT contribute to ci_fail
 # (CI downgrades) / do NOT block the CR gate (cr-out-of-band) / do NOT block
 # the Bugbot gate (bugbot-out-of-band).
@@ -171,7 +175,8 @@
 #
 # Return codes (poll_merge_gates):
 #   0 — gates passed
-#   1 — gates still blocked at MAX_POLLS
+#   1 — gates still blocked at MAX_POLLS, or at once when a plan's CI proof
+#       skipped on the head (final for that head; the cause is on stderr)
 #   2 — timeout (≥MERGE_GATES_TIMEOUT_SECONDS wall-clock)
 #   3 — gh API down (3 consecutive failures)
 #   4 — PR closed or merged externally
@@ -254,7 +259,7 @@ MERGE_GATES_CONFIG_FILE="${MERGE_GATES_CONFIG_FILE:-${PC_CONFIG_FILE:-$SCRIPT_DI
 MERGE_GATES_D="$SCRIPT_DIR/merge-gates.d"
 for _mg_mod in "$SCRIPT_DIR"/lib/script-freshness.sh \
                "$MERGE_GATES_D"/00-common.sh "$MERGE_GATES_D"/10-gate-filter.sh \
-               "$MERGE_GATES_D"/20-planlock-slugs.sh; do
+               "$MERGE_GATES_D"/20-planlock-slugs.sh "$MERGE_GATES_D"/30-plan-proof.sh; do
     if [ ! -f "$_mg_mod" ]; then
         echo "merge-gates: ERROR: missing module $_mg_mod" >&2
         # sourced (bats) → return; executed → exit. Fail-closed either way.
@@ -530,6 +535,90 @@ _mg_planlock_verdict_report() {
 }
 
 # ----------------------------------------------------------------------------
+# _mg_plan_proof_verdict <owner> <repo> <pr> <head sha> — the plan CI-proof gate
+# (merge-gates.d/30-plan-proof.sh holds the parsers and the why). For every
+# `CI: "<check>" green on this PR` line the PR ADDS to a plan's
+# `## Verification`, look the check up on the head and print one
+# "<plan path><TAB><check><TAB><conclusion>" line per proof that did not run
+# (SKIPPED, or no run of that name on the head at all).
+#   rc 0 — no such line, or every named proof ran
+#   rc 1 — at least one named proof was skipped (lines printed on stdout)
+#   rc 2 — undecidable: the file list, a plan's head copy or a check lookup
+#          could not be read (a reason on stdout). The caller does not pass.
+# REST only, one call when the PR changes no plan doc. Runs on the pass path
+# only, so a PR that is red for another reason costs nothing extra. Every gh
+# call names its path first: the bats stub dispatches on the second argument.
+# ----------------------------------------------------------------------------
+_mg_plan_proof_verdict() {
+    local owner="$1" repo="$2" pr="$3" sha="$4"
+    local files path changes patch added tmp check concl contexts enc skipped=0
+    # One row per changed file: path, line-change count, base64 patch. GitHub
+    # omits `patch` both for a pure rename (changes == 0: nothing added, nothing
+    # to prove) and for a diff too large to send (changes > 0: read the plan
+    # whole), so the count tells the two apart.
+    if ! files="$(gh api "repos/${owner}/${repo}/pulls/${pr}/files?per_page=100" --paginate \
+        --jq '.[] | select(.status != "removed") | [.filename, (.changes // 0 | tostring), (if .patch == null then "NOPATCH" else (.patch | @base64) end)] | @tsv' 2>/dev/null)"; then
+        echo "the PR's file list could not be read"
+        return 2
+    fi
+    tmp="$(mktemp)" || { echo "no temp file"; return 2; }
+    while IFS=$'\t' read -r path changes patch; do
+        if [ -z "$path" ] || ! _mg_planproof_is_plan "$path"; then
+            continue
+        fi
+        if [ "$patch" = NOPATCH ]; then
+            [ "${changes:-0}" != 0 ] || continue
+            added=all
+        else
+            added="$(printf '%s' "$patch" | base64 -d 2>/dev/null | _mg_planproof_added_lines)"
+            # No added line: a deletion-only edit. Nothing to prove.
+            [ -n "${added// /}" ] || continue
+        fi
+        # Plan paths are kebab-case by the naming gate; encode anything else so a
+        # stray character cannot turn into a 404 on every poll.
+        enc="$(_mg_planproof_uri_path "$path")"
+        : > "$tmp"
+        gh api "repos/${owner}/${repo}/contents/${enc}?ref=${sha}" --jq '.content // empty' 2>/dev/null \
+            | base64 -d > "$tmp" 2>/dev/null
+        if [ ! -s "$tmp" ]; then
+            echo "the head copy of ${path} could not be read"
+            rm -f "$tmp"
+            return 2
+        fi
+        while IFS= read -r check; do
+            [ -n "$check" ] || continue
+            # filter=latest is the latest run per check suite, so a head can carry
+            # several runs of one name (push + pull_request suites, a re-trigger).
+            # The proof ran when any of them did not skip.
+            if ! concl="$(gh api "repos/${owner}/${repo}/commits/${sha}/check-runs" -X GET \
+                -f check_name="$check" -f filter=latest -f per_page=100 \
+                --jq '[.check_runs[] | (.conclusion // .status)] | if length == 0 then "absent" elif all(. == "skipped") then "skipped" else (map(select(. != "skipped")) | .[0]) end' 2>/dev/null)"; then
+                echo "the check runs for \"${check}\" could not be read"
+                rm -f "$tmp"
+                return 2
+            fi
+            # A proof can also be a commit-status context; one that reported is not
+            # skipped. Captured, then matched: a `gh … | grep -q` pipe can SIGPIPE
+            # its writer.
+            if [ "$concl" = absent ]; then
+                contexts="$(gh api "repos/${owner}/${repo}/commits/${sha}/statuses?per_page=100" --paginate \
+                    --jq '.[].context' 2>/dev/null || true)"
+                if grep -qxF -- "$check" <<< "$contexts"; then
+                    concl=status
+                fi
+            fi
+            if _mg_planproof_conclusion_skipped "$concl"; then
+                printf '%s\t%s\t%s\n' "$path" "$check" "$concl"
+                skipped=1
+            fi
+        done < <(_mg_planproof_checks "$tmp" "$added")
+    done <<< "$files"
+    rm -f "$tmp"
+    [ "$skipped" -eq 0 ] || return 1
+    return 0
+}
+
+# ----------------------------------------------------------------------------
 # poll_merge_gates <owner> <repo> <pr_number>
 # ----------------------------------------------------------------------------
 poll_merge_gates() {
@@ -621,6 +710,7 @@ poll_merge_gates() {
             "agents/scripts/core/merge-gates.d/00-common.sh"
             "agents/scripts/core/merge-gates.d/10-gate-filter.sh"
             "agents/scripts/core/merge-gates.d/20-planlock-slugs.sh"
+            "agents/scripts/core/merge-gates.d/30-plan-proof.sh"
             "agents/scripts/core/lib/script-freshness.sh"
         )
         # Detection is delegated to lib/script-freshness.sh (the bounded fetch, the
@@ -2180,16 +2270,59 @@ poll_merge_gates() {
             # Both empty/0 on a clean (no-override) pass, so the snapshot writer
             # leaves redChecks=[] and never double-flags a moot label. Distinct
             # prefix like GATE_CARRY; the watcher parses it on the merged path only.
-            local cr_override_flag=0
-            [ "$cr_overridden" = true ] && cr_override_flag=1
-            # GATE_HEAD — the head SHA this passing poll evaluated, so a merge
-            # actor can bind its merge to it (safe-merge.sh arms with
-            # --match-head-commit and refuses a head that moved since).
-            printf 'GATE_HEAD %s\n' "$head_sha"
-            printf 'GATE_SNAPSHOT cr_override=%s downgraded=%s\n' \
-                "$cr_override_flag" "${dg_names:-}"
-            echo "GATES_PASSED"
-            return 0
+            # Plan CI-proof gate (merge-gates.d/30-plan-proof.sh). Everything else is
+            # green, but SKIPPED is green too: when a plan this PR adds a proof line to
+            # names a check as "green on this PR" and that check skipped (or never ran)
+            # on the head, the proof the plan asked for did not run. A skip on this
+            # head is final, so the poll ends here (rc 1 at once, not at MAX_POLLS);
+            # an unreadable lookup only holds this poll. plan-proof-out-of-band
+            # downgrades either to WARN, and a waived skip is recorded in
+            # GATE_SNAPSHOT's downgraded list, one "Plan CI-proof: <check>" per check.
+            local proof_out proof_rc=0 proof_labels proof_waive=false proof_ok=false
+            proof_out="$(_mg_plan_proof_verdict "$owner" "$repo" "$prNumber" "$head_sha")" || proof_rc=$?
+            if [ "$proof_rc" -ne 0 ]; then
+                proof_labels="$(gh api "repos/${owner}/${repo}/issues/${prNumber}/labels?per_page=100" --paginate \
+                    --jq '.[].name' 2>/dev/null || true)"
+                if grep -qxF -- "plan-proof-out-of-band" <<< "$proof_labels"; then
+                    proof_waive=true
+                fi
+            fi
+            if [ "$proof_rc" -eq 0 ]; then
+                proof_ok=true
+            elif [ "$proof_rc" -eq 1 ] && [ "$proof_waive" = true ]; then
+                local _pp_check _pp_waived=""
+                while IFS= read -r _pp_check; do
+                    [ -n "$_pp_check" ] && _pp_waived="${_pp_waived:+${_pp_waived}, }Plan CI-proof: ${_pp_check}"
+                done < <(cut -f2 <<< "$proof_out" | sort -u)
+                echo "WARN: plan-proof-out-of-band downgraded a skipped plan CI proof to WARN: ${_pp_waived}" >&2
+                dg_names="${dg_names:+${dg_names}, }${_pp_waived}"
+                proof_ok=true
+            elif [ "$proof_rc" -eq 1 ]; then
+                echo "BLOCK: plan CI-proof skipped — a plan this PR changes names a CI check as its proof \"green on this PR\", and that check did not run on head ${head_sha:0:8} (SKIPPED, or no run of that name). A skipped check is a pass to branch protection, so the proof the plan asked for never ran:" >&2
+                local _pp_plan _pp_concl
+                while IFS=$'\t' read -r _pp_plan _pp_check _pp_concl; do
+                    echo "  ${_pp_plan}: \"${_pp_check}\" (${_pp_concl})" >&2
+                done <<< "$proof_out"
+                echo "  Make the diff run the check (fix the delta gate's trigger set), or change the plan's proof to one that ran. To merge anyway, apply the 'plan-proof-out-of-band' label." >&2
+                break
+            elif [ "$proof_waive" = true ]; then
+                echo "WARN: plan CI-proof gate could not decide (${proof_out}); plan-proof-out-of-band waives it." >&2
+                proof_ok=true
+            else
+                echo "BLOCK: plan CI-proof gate could not decide (${proof_out}); not passing this poll. If this persists, apply the 'plan-proof-out-of-band' label." >&2
+            fi
+            if [ "$proof_ok" = true ]; then
+                local cr_override_flag=0
+                [ "$cr_overridden" = true ] && cr_override_flag=1
+                # GATE_HEAD — the head SHA this passing poll evaluated, so a merge
+                # actor can bind its merge to it (safe-merge.sh arms with
+                # --match-head-commit and refuses a head that moved since).
+                printf 'GATE_HEAD %s\n' "$head_sha"
+                printf 'GATE_SNAPSHOT cr_override=%s downgraded=%s\n' \
+                    "$cr_override_flag" "${dg_names:-}"
+                echo "GATES_PASSED"
+                return 0
+            fi
         fi
 
         # When the ONLY thing blocking is mergeStateStatus, name it explicitly —

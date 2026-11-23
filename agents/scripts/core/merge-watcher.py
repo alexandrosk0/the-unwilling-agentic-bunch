@@ -1077,13 +1077,15 @@ _GATE_LOGIC_RELPATHS = (
     "agents/scripts/core/merge-gates.sh",
     # merge-gates.sh fail-closed-sources these; they hold the block allow-list
     # (00-common.sh), the GATE_FILTER jq projection (10-gate-filter.sh) and the
-    # plan-lock slug parser (20-planlock-slugs.sh), so drift in a module is
+    # plan-lock slug parser (20-planlock-slugs.sh) and the plan CI-proof
+    # parsers (30-plan-proof.sh), so drift in a module is
     # drift in the gate logic just as much as the entry file.
     # NOT in _DAEMON_CODE_RELPATHS: merge-gates.sh re-reads them from disk each
     # poll, so an ff-pull suffices — no daemon re-exec needed.
     "agents/scripts/core/merge-gates.d/00-common.sh",
     "agents/scripts/core/merge-gates.d/10-gate-filter.sh",
     "agents/scripts/core/merge-gates.d/20-planlock-slugs.sh",
+    "agents/scripts/core/merge-gates.d/30-plan-proof.sh",
     "agents/scripts/core/merge-gates.graphql",
     "agents/scripts/core/merge-watcher.py",
     "agents/scripts/core/merge-watcher-cli.py",

@@ -561,7 +561,8 @@ override_labels_csv() {
     # (the coverage-out-of-band omission a review caught).
     printf '%s' "$view_json" | jq -r --argjson cfg "$cfg_json" '
         ($cfg + ["tests-out-of-band","perf-out-of-band","intent-out-of-band",
-                 "plan-lock-out-of-band","cr-out-of-band","coverage-out-of-band"]
+                 "plan-lock-out-of-band","cr-out-of-band","coverage-out-of-band",
+                 "plan-proof-out-of-band"]
          | unique) as $known
         | [.labels[]?.name | select(. as $n | $known | any(. == $n))]
         | join(",")
