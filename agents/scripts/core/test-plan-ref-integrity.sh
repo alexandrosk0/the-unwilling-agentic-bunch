@@ -26,6 +26,14 @@
 # Both are verbatim agent output stored for the reconcile pass, so they must not be
 # edited to satisfy a gate. Prose in the ledger itself (historical-review-findings.md)
 # IS still scanned and should use the move-proof tier-less form.
+#
+# Also skips docs/plans/active/_plan-locks.generated.md, the locks-render mirror of
+# refs/locks/*. This check flags ANY plan path, even one written as plain code, not
+# just links. Each lock names its originating plan, which normally exists only on the
+# lock owner's unmerged branch, so the mirror cites plans develop does not have yet BY
+# DESIGN; scanning it kept the bot sync PR red while any lock was live.
+# locks-render-markdown.sh still links the plan only when the file exists, so the
+# markdown-link checker keeps guarding the mirror's real links.
 set -uo pipefail
 
 # Absolute self-path, taken before the cd below (the standalone skip re-runs it).
@@ -61,6 +69,7 @@ mapfile -t refs < <(git grep -hoE --untracked 'docs/plans/((active|shipped|defer
                       -- ':!.understand-anything/' ':!agents/scripts/core/test-plan-ref-integrity.sh' \
                       ':!agents/scripts/core/archive-plan.sh' ':!agents/scripts/core/test-archive-plan.sh' \
                       ':!docs/high-integrity/markdown-link-baseline.md' \
+                      ':!docs/plans/active/_plan-locks.generated.md' \
                       ':!docs/self-improvement/historical-review-findings-*.jsonl' \
                       2>/dev/null | sort -u)
 

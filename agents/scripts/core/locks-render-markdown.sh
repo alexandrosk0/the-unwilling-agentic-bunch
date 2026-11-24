@@ -101,11 +101,20 @@ cat <<EOF
 
 EOF
 
+# The originating plan usually lives only on the lock owner's unmerged branch,
+# so it is linked only when the file exists in this checkout; otherwise it is
+# printed as code. A dangling link reds test-markdown-links.sh and
+# test-plan-ref-integrity.sh on the sync PR, and the next lock brings another
+# unlanded plan, so the mirror PR could otherwise never go green.
+render_root=$(git rev-parse --show-toplevel)
+
 for ref in $refs; do
     slug=${ref#refs/locks/}
     claim=$(git cat-file blob "${ref}:claim.json" 2>/dev/null || echo '{}')
     printf '%s' "$claim" | "$PYBIN" -c '
-import json, sys
+import json, os, sys
+
+root = sys.argv[1]
 
 c = json.load(sys.stdin)
 
@@ -126,8 +135,10 @@ print(f"### `{slug}`")
 print()
 print(f"- **Owner**: `{owner}`")
 print(f"- **Branch**: `{branch}`")
-if plan:
+if plan and os.path.isfile(os.path.join(root, plan)):
     print(f"- **Originating plan**: [`{plan}`](../../../{plan})")
+elif plan:
+    print(f"- **Originating plan**: `{plan}` (not on this branch yet)")
 print(f"- **Started**: {started}")
 if updated and updated != started:
     print(f"- **Updated**: {updated}")
@@ -140,5 +151,5 @@ else:
 if notes:
     print(f"- **Notes**: {notes}")
 print()
-'
+' "$render_root"
 done
