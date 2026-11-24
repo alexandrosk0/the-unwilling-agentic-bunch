@@ -26,6 +26,16 @@
 # Both are verbatim agent output stored for the reconcile pass, so they must not be
 # edited to satisfy a gate. Prose in the ledger itself (historical-review-findings.md)
 # IS still scanned and should use the move-proof tier-less form.
+#
+# Also skips docs/plans/active/_plan-locks.generated.md, the locks-render mirror of
+# refs/locks/*. This check flags ANY plan path, even one written as plain code, not
+# just links. Each lock names its originating plan, which normally exists only on the
+# lock owner's unmerged branch, and its write set may claim a plan path the slice has
+# yet to create (or an archive's docs/plans/shipped/<slug>.md target), so the mirror
+# cites plans develop does not have yet BY DESIGN; scanning it kept the bot sync PR
+# red while any lock was live. The Archive self-ref occurrence grep below skips it too.
+# locks-render-markdown.sh still links the plan only when the file exists, so the
+# markdown-link checker keeps guarding the mirror's real links.
 set -uo pipefail
 
 # Absolute self-path, taken before the cd below (the standalone skip re-runs it).
@@ -61,6 +71,7 @@ mapfile -t refs < <(git grep -hoE --untracked 'docs/plans/((active|shipped|defer
                       -- ':!.understand-anything/' ':!agents/scripts/core/test-plan-ref-integrity.sh' \
                       ':!agents/scripts/core/archive-plan.sh' ':!agents/scripts/core/test-archive-plan.sh' \
                       ':!docs/high-integrity/markdown-link-baseline.md' \
+                      ':!docs/plans/active/_plan-locks.generated.md' \
                       ':!docs/self-improvement/historical-review-findings-*.jsonl' \
                       2>/dev/null | sort -u)
 
@@ -211,7 +222,39 @@ PLAN
   gotD2=$?; rm -rf "$repoD2"
   [ "$gotD2" = "1" ] || { echo "FAIL: ledger prose dangling ref NOT flagged (exit $gotD2, want 1)"; fail=1; }
 
-  if [ "$fail" = "0" ]; then echo "test-plan-ref-integrity --selftest: PASS (5 unit + 6 e2e)"; exit 0; fi
+  # Fixture E — the plan-locks mirror cites a lock's originating plan, which lives
+  # only on the owner's unmerged branch. It must NOT be flagged. PASS(0).
+  repoE="$(mktemp -d)"
+  (
+    cd "$repoE" || exit 99
+    scaffold_fixture
+    printf -- '- **Originating plan**: `docs/plans/active/ghost-locked.md` (not on this branch yet)\n' \
+      > docs/plans/active/_plan-locks.generated.md
+    git add -A
+    bash "$SUT_REL"
+  ) >/dev/null 2>&1
+  gotE=$?; rm -rf "$repoE"
+  [ "$gotE" = "0" ] || { echo "FAIL: plan-locks mirror's lock ref wrongly flagged (exit $gotE, want 0)"; fail=1; }
+
+  # Fixture E2 — a mirror write-set entry naming an archiving plan's shipped/
+  # target must not defeat that plan's Archive self-ref carve-out. PASS(0).
+  repoE2="$(mktemp -d)"
+  (
+    cd "$repoE2" || exit 99
+    scaffold_fixture
+    cat > docs/plans/active/widget-x.md <<'PLAN'
+# Plan — widget x
+## Archive
+1. git mv docs/plans/active/widget-x.md docs/plans/shipped/widget-x.md
+PLAN
+    printf -- '  - `docs/plans/shipped/widget-x.md`\n' > docs/plans/active/_plan-locks.generated.md
+    git add -A
+    bash "$SUT_REL"
+  ) >/dev/null 2>&1
+  gotE2=$?; rm -rf "$repoE2"
+  [ "$gotE2" = "0" ] || { echo "FAIL: mirror write-set entry defeated the Archive self-ref carve-out (exit $gotE2, want 0)"; fail=1; }
+
+  if [ "$fail" = "0" ]; then echo "test-plan-ref-integrity --selftest: PASS (5 unit + 8 e2e)"; exit 0; fi
   echo "test-plan-ref-integrity --selftest: FAIL"; exit 1
 fi
 
@@ -269,6 +312,8 @@ is_archive_self_ref() {
            ':(exclude)agents/scripts/core/archive-plan.sh' \
            ':(exclude)agents/scripts/core/test-archive-plan.sh' \
            ':(exclude)docs/high-integrity/markdown-link-baseline.md' \
+           ':(exclude)docs/plans/active/_plan-locks.generated.md' \
+           ':(exclude)docs/self-improvement/historical-review-findings-*.jsonl' \
            2>/dev/null)" || return 1
   [ -n "$occ" ] || return 1
   # Reject unless every occurrence is in the owning active plan on an Archive
