@@ -17,6 +17,9 @@
 # Requires: bash, git, python(3), bats.
 
 setup() {
+    # Cleared before any skip: bats runs teardown after a setup-time skip, and an
+    # inherited SANDBOX must never reach its rm -rf.
+    SANDBOX=""
     SCRIPT="$(git rev-parse --show-toplevel)/agents/scripts/core/locks-render-markdown.sh"
     export SCRIPT
     # Exec-validate the interpreter: a bare `command -v python3` matches the
@@ -40,6 +43,7 @@ setup() {
     git clone --quiet "$REMOTE" "$CLONE" 2>/dev/null
     git -C "$CLONE" config user.email t@t
     git -C "$CLONE" config user.name t
+    git -C "$CLONE" config commit.gpgsign false
     git -C "$CLONE" commit --quiet --allow-empty -m seed
 
     # The sandbox remote URL is not a Smatchet repo URL.
@@ -65,8 +69,9 @@ JSON
     git -C "$CLONE" push --quiet origin "$commit:refs/locks/$slug"
 }
 
+# render [<dir>] — run the script from <dir> (default: the clone root).
 render() {
-    run bash -c 'cd "$1" && bash "$2"' _ "$CLONE" "$SCRIPT"
+    run bash -c 'cd "$1" && bash "$2"' _ "${1:-$CLONE}" "$SCRIPT"
 }
 
 @test "originating plan present in the checkout -> rendered as a link" {
@@ -89,4 +94,30 @@ render() {
     [[ "$output" == *'### `unlanded`'* ]]
     [[ "$output" == *'- **Originating plan**: `docs/plans/active/unlanded-plan.md` (not on this branch yet)'* ]]
     [[ "$output" != *"](../../../docs/plans/active/unlanded-plan.md)"* ]]
+}
+
+@test "rendered from a subdirectory -> existence is checked at the checkout top level" {
+    mkdir -p "$CLONE/docs/plans/active"
+    printf '# plan\n' > "$CLONE/docs/plans/active/landed-plan.md"
+    push_lock landed docs/plans/active/landed-plan.md
+
+    render "$CLONE/docs"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'- **Originating plan**: [`docs/plans/active/landed-plan.md`](../../../docs/plans/active/landed-plan.md)'* ]]
+}
+
+@test "absolute or ..-escaping plan path -> code form, never a link" {
+    mkdir -p "$CLONE/docs/plans/active"
+    printf '# plan\n' > "$CLONE/docs/plans/active/landed-plan.md"
+    push_lock abs "$CLONE/docs/plans/active/landed-plan.md"
+    push_lock dotdot docs/plans/active/../active/landed-plan.md
+
+    render
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'### `abs`'* ]]
+    [[ "$output" == *'### `dotdot`'* ]]
+    # The header's own workflow link is the only link left.
+    [[ "$output" != *'**Originating plan**: ['* ]]
+    [[ "$output" == *'landed-plan.md` (not on this branch yet)'* ]]
+    [[ "$output" == *'docs/plans/active/../active/landed-plan.md` (not on this branch yet)'* ]]
 }

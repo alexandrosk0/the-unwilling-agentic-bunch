@@ -105,8 +105,11 @@ EOF
 # so it is linked only when the file exists in this checkout; otherwise it is
 # printed as code. A dangling link reds test-markdown-links.sh and
 # test-plan-ref-integrity.sh on the sync PR, and the next lock brings another
-# unlanded plan, so the mirror PR could otherwise never go green.
+# unlanded plan, so the mirror PR could otherwise never go green. The check runs
+# from the checkout's top level so python tests a relative path against its own
+# cwd: no shell-form path (/c/... vs C:/...) crosses into a native interpreter.
 render_root=$(git rev-parse --show-toplevel)
+cd "$render_root"
 
 for ref in $refs; do
     slug=${ref#refs/locks/}
@@ -114,9 +117,17 @@ for ref in $refs; do
     printf '%s' "$claim" | "$PYBIN" -c '
 import json, os, sys
 
-root = sys.argv[1]
-
 c = json.load(sys.stdin)
+
+def linkable(p):
+    # Only a repo-relative path to a file in this checkout gets a link. A
+    # non-string, absolute or ..-escaping value from a hand-written claim is
+    # printed as code instead of crashing the render or linking outside the repo.
+    if not isinstance(p, str) or os.path.isabs(p) or p.startswith(("/", "\\")):
+        return False
+    if ".." in p.replace("\\", "/").split("/"):
+        return False
+    return os.path.isfile(p)
 
 def s(key, default=""):
     v = c.get(key, default)
@@ -135,7 +146,7 @@ print(f"### `{slug}`")
 print()
 print(f"- **Owner**: `{owner}`")
 print(f"- **Branch**: `{branch}`")
-if plan and os.path.isfile(os.path.join(root, plan)):
+if plan and linkable(plan):
     print(f"- **Originating plan**: [`{plan}`](../../../{plan})")
 elif plan:
     print(f"- **Originating plan**: `{plan}` (not on this branch yet)")
@@ -151,5 +162,5 @@ else:
 if notes:
     print(f"- **Notes**: {notes}")
 print()
-' "$render_root"
+'
 done
