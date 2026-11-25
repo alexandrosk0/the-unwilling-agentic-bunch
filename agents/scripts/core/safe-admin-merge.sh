@@ -594,12 +594,14 @@ pr_coords() {
 }
 
 # ----------------------------------------------------------------------------
-# append_admin_merge_snapshot <pr> <view_json> <cr_waived_red:0|1> — best-effort
-# ledger append after a successful admin-merge (the "remaining writer to wire"
-# named by ADR-0017). Fetches mergeCommit/mergedAt post-merge (stubbable via
-# SAFE_ADMIN_MERGE_STUB_MERGED_JSON), composes redChecks from the label-
-# downgraded reds (+ the literal "CodeRabbit" when cr-out-of-band waived a real
-# CR block — same convention as the watcher), and runs the shared idempotent
+# append_admin_merge_snapshot <pr> <view_json> <cr_waived_red:0|1> [<proof_waived>]
+# — best-effort ledger append after a successful admin-merge (the "remaining
+# writer to wire" named by ADR-0017). Fetches mergeCommit/mergedAt post-merge
+# (stubbable via SAFE_ADMIN_MERGE_STUB_MERGED_JSON), composes redChecks from the
+# label-downgraded reds (+ the literal "CodeRabbit" when cr-out-of-band waived a
+# real CR block — same convention as the watcher — + one "Plan CI-proof: …"
+# entry per line of <proof_waived>, the proofs plan-proof-out-of-band let
+# through), and runs the shared idempotent
 # helper as a CLI (NOT sourced — it sets -e). NEVER fails the caller: the
 # snapshot is detection telemetry; a write failure is logged and the merge
 # stands. The appended row lands in the working copy — commit it with the
