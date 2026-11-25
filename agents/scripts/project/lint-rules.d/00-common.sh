@@ -26,6 +26,9 @@ STRICT_GLOBS=(
     "Source/Core/include/Persistence/"
     "Source/Core/include/Config/"
     "Source/Core/include/Commands/"
+    # Single-file entry: zone_of prefix-matches, so this classifies exactly the Tracker-domain
+    # error type that moved from include/Tracker/ to the include/ root (it stays strict).
+    "Source/Core/include/TrackerError.h"
     "Source/Plugins/Mcp/"
 )
 

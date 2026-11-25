@@ -280,7 +280,7 @@ def find_violations(file_texts):
     Why both endpoints must be NAMED layers (rank >= 1): rank 0 is the leaf/unranked floor (root
     `include/*.h` interface/model headers + Diagnostics/Privacy/Imaging utility). Those headers have
     NO position in the Ui>AppController>Commands>Tracker>Sync/Persistence>Config hierarchy, so a
-    rank-0 header reaching DOWN into a named subsystem (e.g. ITrackerActivity.h -> Tracker/TrackerError.h,
+    rank-0 header reaching DOWN into a named subsystem (e.g. ITrackerActivity.h or
     GridLiveContext.h -> Tracker/TrackerFieldSchema.h) is a forward dependency of an un-categorized
     header — NOT a low->high layer back-edge. Treating rank 0 as "below Config" would false-flag the
     ~30 such legitimate forward edges (the layer-model bug caught at Phase-0 authoring; see the plan

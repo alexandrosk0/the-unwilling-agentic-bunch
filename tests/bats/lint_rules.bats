@@ -584,8 +584,9 @@ _resolve_py() {
 }
 
 # ---------- no-ui-include-in-domain (include-direction; domain zones, absolute-0) ----------
-# A quote-form `#include "Ui/..."` in a domain subsystem (Tracker/Sync/Persistence/Config +
-# include mirrors + Plugins/Mcp) inverts the layer DAG; the header->header include-cycle gate
+# A quote-form `#include "Ui/..."` — or a bare-name include resolving to an include/Ui/ header —
+# in a domain subsystem (Tracker/Sync/Persistence/Config + include mirrors + Plugins/Mcp) inverts
+# the layer DAG; the header->header include-cycle gate
 # can't see a domain .cpp -> Ui/ edge. --scan-ui-include emits the detected set for bats.
 
 @test "--scan-ui-include fires on a Ui/ include in a Tracker TU" {
@@ -646,7 +647,49 @@ _resolve_py() {
     [ -z "$output" ]
 }
 
-@test "--scan-ui-include is clean on the real first-party tree (domain zones are Ui-free)" {
+@test "--scan-ui-include fires on a bare-name include that resolves to an include/Ui/ header" {
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/Source/Core/src/Tracker" "$tmp/Source/Core/include/Ui"
+    : > "$tmp/Source/Core/include/Ui/SmatchetFieldRender.h"
+    printf '#include "TrackerLabelsPure.h"\n#include "SmatchetFieldRender.h"\n' \
+        > "$tmp/Source/Core/src/Tracker/TrackerBare.cpp"
+    ( cd "$tmp" && git init -q && git add -A ) >/dev/null 2>&1
+    run bash "$LINT" --root "$tmp" --scan-ui-include
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TrackerBare.cpp:2"* ]]
+    [[ "$output" != *"TrackerBare.cpp:1"* ]]
+}
+
+@test "--scan-ui-include: a bare name shadowed by a same-dir file or an earlier include root is not a Ui include" {
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/Source/Core/src/Sync" "$tmp/Source/Core/include/Ui" "$tmp/Source/Core/include/Tracker"
+    for h in SameDir.h RootLeaf.h TrackerSide.h; do : > "$tmp/Source/Core/include/Ui/$h"; done
+    : > "$tmp/Source/Core/src/Sync/SameDir.h"
+    : > "$tmp/Source/Core/include/RootLeaf.h"
+    : > "$tmp/Source/Core/include/Tracker/TrackerSide.h"
+    printf '#include "SameDir.h"\n#include "RootLeaf.h"\n#include "TrackerSide.h"\n' \
+        > "$tmp/Source/Core/src/Sync/SyncShadowed.cpp"
+    ( cd "$tmp" && git init -q && git add -A ) >/dev/null 2>&1
+    run bash "$LINT" --root "$tmp" --scan-ui-include
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "--scan-ui-include respects a SMATCHET_DEVIATION above a bare-name Ui include" {
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/Source/Core/src/Tracker" "$tmp/Source/Core/include/Ui"
+    : > "$tmp/Source/Core/include/Ui/SmatchetToast.h"
+    printf '// SMATCHET_DEVIATION(rule=no-ui-include-in-domain; reason=test; owner=x; revisit=2099-01-01)\n#include "SmatchetToast.h"\n' \
+        > "$tmp/Source/Core/src/Tracker/TrackerBareDev.cpp"
+    ( cd "$tmp" && git init -q && git add -A ) >/dev/null 2>&1
+    run bash "$LINT" --root "$tmp" --scan-ui-include
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# Runs vacuously in this repository's own CI (no Source/ tree); when the layer is mounted it scans the
+# host tree and asserts the rule reports no hit there.
+@test "--scan-ui-include reports no hit on the scanned tree" {
     run bash "$LINT" --scan-ui-include
     [ "$status" -eq 0 ]
     [ -z "$output" ]

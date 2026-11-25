@@ -38,9 +38,10 @@
 #                          json_safe::ParseBounded (ALL first-party .cpp/.h/.hpp; blocking)
 #   catch-all-swallow      EMPTY catch (...) body — no statement, no justifying comment
 #                          (all first-party C++; absolute-0; exception-handling-policy hard rule 1)
-#   no-ui-include-in-domain  quote-form #include "Ui/..." in a DOMAIN subsystem (Tracker/Sync/
-#                          Persistence/Config + include mirrors + Plugins/Mcp; absolute-0 —
-#                          layer-DAG inversion the header->header include-cycle gate can't see)
+#   no-ui-include-in-domain  #include "Ui/..." or a bare-name #include resolving to a src/ or include/Ui/
+#                          header, in a DOMAIN subsystem (Tracker/Sync/Persistence/Config + include
+#                          mirrors + Plugins/Mcp; absolute-0 — layer-DAG inversion the
+#                          header->header include-cycle gate can't see)
 #   (advisory)             unbounded-recursive-json-walker — self-recursive fn over a
 #                          nlohmann::json/sol::object param with no depth/budget token (WARN)
 #   (advisory)             unbounded-file-slurp — rdbuf()/istreambuf whole-file read (WARN)
@@ -427,6 +428,8 @@ case "$MODE" in
     done
     # selftest: asserts-failure — a quote-form `#include "Ui/..."` must fire; a comment mention,
     # an angle-bracket include, and an in-window SMATCHET_DEVIATION must not.
+    # Pin the resolution tree to an absent dir so these quote-form cases never depend on the cwd.
+    _uii_saved_root="$UIINCLUDE_TREE_ROOT"; UIINCLUDE_TREE_ROOT="${TMPDIR:-/tmp}/uii-no-tree.$$"; _UIINCLUDE_UI_SET_FOR=""
     _uii_tmp="$(mktemp --suffix=.cpp 2>/dev/null || echo "${TMPDIR:-/tmp}/uii_selftest.$$.cpp")"
     case "$_uii_tmp" in *.cpp) ;; *) mv -f "$_uii_tmp" "$_uii_tmp.cpp" 2>/dev/null && _uii_tmp="$_uii_tmp.cpp" ;; esac
     printf '#include "TrackerLabelsPure.h"\n#include "Ui/TouchCellEditGesture.h"\n' > "$_uii_tmp"
@@ -439,6 +442,63 @@ case "$MODE" in
     if [ -n "$(scan_ui_include_direction_file "$_uii_tmp")" ]; then
         echo "SELFTEST FAIL: no-ui-include-in-domain fired despite an in-window SMATCHET_DEVIATION" >&2; miss=1; fi
     rm -f "$_uii_tmp" 2>/dev/null || true
+    # selftest: asserts-failure — bare-name resolution against a fixture include tree: a bare name
+    # that resolves to a Ui/ header must fire; a non-Ui bare name, one shadowed by a same-directory
+    # file, and one shadowed by an earlier include root (root / Tracker) must not; a deviation
+    # suppresses the bare-name hit too.
+    _uii_fx="$(mktemp -d 2>/dev/null || { mkdir -p "${TMPDIR:-/tmp}/uii_fx.$$" && echo "${TMPDIR:-/tmp}/uii_fx.$$"; })"
+    mkdir -p "$_uii_fx/Source/Core/include/Ui" "$_uii_fx/Source/Core/include/Tracker" \
+        "$_uii_fx/Source/Core/src/Tracker/Sub" "$_uii_fx/Source/Core/src/Sync" "$_uii_fx/Source/Core/src/Ui"
+    for _h in SmatchetToast.h SameDirShadow.h RootShadow.h TrackerShadow.h SrcRootShadow.h; do
+        : > "$_uii_fx/Source/Core/include/Ui/$_h"; done
+    : > "$_uii_fx/Source/Core/include/RootShadow.h"
+    : > "$_uii_fx/Source/Core/include/Tracker/TrackerShadow.h"
+    : > "$_uii_fx/Source/Core/src/Tracker/Sub/SameDirShadow.h"  # Sub/ is not an include root
+    : > "$_uii_fx/Source/Core/src/Sync/SrcRootShadow.h"     # PRIVATE src root, searched before include/*
+    : > "$_uii_fx/Source/Core/src/Ui/SrcUiPure.h"          # a src/Ui header is a Ui include too
+    : > "$_uii_fx/Source/Core/src/Ui/RootLeaf2.h"; : > "$_uii_fx/Source/Core/include/RootLeaf2.h"
+    _uii_inc="$_uii_fx/Source/Core/src/Tracker/Sub/Fixture.cpp"
+    UIINCLUDE_TREE_ROOT="$_uii_fx"; _UIINCLUDE_UI_SET_FOR=""
+    printf '#include "SmatchetToast.h"\n#include "SrcUiPure.h"\n#include "RootLeaf2.h"\n' > "$_uii_inc"
+    if [ "$(scan_ui_include_direction_file "$_uii_inc")" != "$(printf 'no-ui-include-in-domain\t%s:1\nno-ui-include-in-domain\t%s:2\nno-ui-include-in-domain\t%s:3' "$_uii_inc" "$_uii_inc" "$_uii_inc")" ]; then
+        echo "SELFTEST FAIL: no-ui-include-in-domain missed a bare-name include of an include/Ui or src/Ui header" >&2; miss=1; fi
+    printf '#include "NotAUiHeader.h"\n#include "SameDirShadow.h"\n#include "RootShadow.h"\n#include "TrackerShadow.h"\n#include "SrcRootShadow.h"\n#include <SmatchetToast.h>\n' > "$_uii_inc"
+    if [ -n "$(scan_ui_include_direction_file "$_uii_inc")" ]; then
+        echo "SELFTEST FAIL: no-ui-include-in-domain fired on a non-Ui / same-dir / src-root / include-root-shadowed bare name" >&2; miss=1; fi
+    printf '// SMATCHET_DEVIATION(rule=no-ui-include-in-domain; reason=test; owner=x; revisit=2099-01-01)\n#include "SmatchetToast.h"\n' > "$_uii_inc"
+    if [ -n "$(scan_ui_include_direction_file "$_uii_inc")" ]; then
+        echo "SELFTEST FAIL: no-ui-include-in-domain fired on a bare-name Ui include despite a SMATCHET_DEVIATION" >&2; miss=1; fi
+    # A `|` in the name must not match across set delimiters (Ui header `a|b.h` vs `#include "a"`).
+    # `|` is not a legal NTFS file-name character, so where the fixture cannot be created the case
+    # is skipped instead of aborting the selftest under `set -e`.
+    if { : > "$_uii_fx/Source/Core/include/Ui/a|b.h"; } 2>/dev/null && [ -e "$_uii_fx/Source/Core/include/Ui/a|b.h" ]; then
+        _UIINCLUDE_UI_SET_FOR=""
+        printf '#include "a"\n#include "b.h"\n#include "a|b.h"\n' > "$_uii_inc"
+        if [ -n "$(scan_ui_include_direction_file "$_uii_inc")" ]; then
+            echo "SELFTEST FAIL: no-ui-include-in-domain matched a name across the set's | delimiters" >&2; miss=1; fi
+    fi
+    # A root-relative includer path resolves (file + same-dir shadow) against the tree root, not cwd.
+    printf '#include "SmatchetToast.h"\n#include "SameDirShadow.h"\n' > "$_uii_inc"
+    if [ "$(cd / && scan_ui_include_direction_file Source/Core/src/Tracker/Sub/Fixture.cpp)" != "$(printf 'no-ui-include-in-domain\t%s:1' Source/Core/src/Tracker/Sub/Fixture.cpp)" ]; then
+        echo "SELFTEST FAIL: no-ui-include-in-domain did not resolve a root-relative includer against UIINCLUDE_TREE_ROOT" >&2; miss=1; fi
+    # An absent Ui/ dir (no host tree) must not error, and the quote-form spelling still fires.
+    UIINCLUDE_TREE_ROOT="$_uii_fx/no-such-tree"; _UIINCLUDE_UI_SET_FOR=""
+    printf '#include "SmatchetToast.h"\n#include "Ui/SmatchetToast.h"\n' > "$_uii_inc"
+    if [ "$(scan_ui_include_direction_file "$_uii_inc" 2>&1)" != "$(printf 'no-ui-include-in-domain\t%s:2' "$_uii_inc")" ]; then
+        echo "SELFTEST FAIL: no-ui-include-in-domain misbehaved with no Ui/ include dir (want only the quote-form hit)" >&2; miss=1; fi
+    UIINCLUDE_TREE_ROOT="$_uii_saved_root"; _UIINCLUDE_UI_SET_FOR=""
+    rm -rf "$_uii_fx" 2>/dev/null || true
+    # The include/* part of the resolution order must mirror include_cycle_audit.py INCLUDE_ROOTS
+    # (prefix up to the Ui root). The src/* part (UIINCLUDE_SRC_ROOTS) mirrors the host CMake by
+    # hand — include_cycle_audit.py does not model it, so nothing here can pin it.
+    _uii_py="$LAYER_ROOT/agents/scripts/core/include_cycle_audit.py"
+    if [ -f "$_uii_py" ]; then
+        _uii_py_roots="$(sed -n '/^INCLUDE_ROOTS = (/,/^)/p' "$_uii_py" | sed -n 's/^[[:space:]]*"\([^"]*\)",.*/\1/p' | sed '/\/Ui$/q' | tr '\n' ' ')"
+        if [ "$_uii_py_roots" != "${UIINCLUDE_INCLUDE_ROOTS[*]} " ]; then
+            echo "SELFTEST FAIL: UIINCLUDE_INCLUDE_ROOTS (${UIINCLUDE_INCLUDE_ROOTS[*]}) drifted from include_cycle_audit.py INCLUDE_ROOTS ($_uii_py_roots)" >&2; miss=1; fi
+    else
+        echo "SELFTEST FAIL: include_cycle_audit.py not found at $_uii_py (UIINCLUDE_INCLUDE_ROOTS drift check)" >&2; miss=1
+    fi
     # --- pr-numbered-temporal-comments — assert the rule is documented + fires on a dev-PR-number
     # comment, and stays quiet for product-domain "PR" (no number) / Issue refs / non-comment lines /
     # a deviation. ---
@@ -1046,12 +1106,13 @@ case "$MODE" in
     fi
 
     # --- no-ui-include-in-domain (domain subsystems; ABSOLUTE-0) ---
-    # A quote-form `#include "Ui/..."` in a DOMAIN subsystem (Tracker/Sync/Persistence/Config +
-    # include mirrors + Plugins/Mcp) inverts the architecture layer DAG (Ui ranks above every domain
+    # A quote-form `#include "Ui/..."` — or a bare-name include resolving to an include/Ui/ header
+    # (same-dir + earlier include roots shadow it) — in a DOMAIN subsystem (Tracker/Sync/Persistence/
+    # Config + include mirrors + Plugins/Mcp) inverts the architecture layer DAG (Ui ranks above every domain
     # layer) and compile-couples backend logic to the render layer. The include-cycle gate's
     # back-edge check is header->header by design, so a domain .cpp -> Ui/ header edge escaped it
-    # (the TouchCellEditGesture.h class). The domain dirs are Ui-clean today, so any hit is a
-    # regression (absolute-0, no grandfathering — same model as no-glfw / ui-request-flag).
+    # (the TouchCellEditGesture.h class). Absolute-0, no grandfathering (same model as no-glfw /
+    # ui-request-flag): a hit is fixed or carries a reviewed deviation.
     # Commands/ is out of scope (sanctioned Scenario/view-visibility Ui seams — see the rule module).
     # A SMATCHET_DEVIATION(rule=no-ui-include-in-domain; ...) above the include escapes.
     uii_out="$(compute_ui_include_direction_violations)"
