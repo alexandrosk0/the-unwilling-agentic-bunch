@@ -623,6 +623,61 @@ _mg_plan_proof_verdict() {
 }
 
 # ----------------------------------------------------------------------------
+# _mg_plan_proof_decide <owner> <repo> <pr> <head sha> [<labels>] — the plan
+# CI-proof gate's decision, shared by every merge actor (poll_merge_gates and
+# safe-admin-merge.sh) so both judge a skipped proof the same way. <labels> is
+# the PR's label names, one per line; omitted, they are read over REST only
+# when the verdict needs them. Explanations go to stderr. On stdout, the first
+# line is the decision and any further lines are what a waiver let through,
+# one per line ("Plan CI-proof: <check>" / "Plan CI-proof: undecided (…)"):
+#   ok      rc 0 — nothing to prove, or every named proof ran
+#   waived  rc 0 — plan-proof-out-of-band waived a skip or an undecidable lookup
+#   block   rc 1 — a named proof skipped on this head (final for the head)
+#   hold    rc 2 — undecidable and not waived (a later read may decide it)
+# ----------------------------------------------------------------------------
+_mg_plan_proof_decide() {
+    local owner="$1" repo="$2" pr="$3" sha="$4" labels
+    local out rc=0 skips undecided check plan concl waived=""
+    out="$(_mg_plan_proof_verdict "$owner" "$repo" "$pr" "$sha")" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo ok
+        return 0
+    fi
+    if [ "$#" -ge 5 ]; then
+        labels="$5"
+    else
+        labels="$(gh api "repos/${owner}/${repo}/issues/${pr}/labels?per_page=100" --paginate \
+            --jq '.[].name' 2>/dev/null || true)"
+    fi
+    skips="$(grep -v '^UNDECIDED' <<< "$out" || true)"
+    undecided="$(grep '^UNDECIDED' <<< "$out" | cut -f2 | paste -sd';' - | sed 's/;/; /g' || true)"
+    if grep -qxF -- "plan-proof-out-of-band" <<< "$labels"; then
+        # Waived: every skipped check AND every undecided reason is reported, so
+        # the merge record names what the label let through.
+        while IFS= read -r check; do
+            [ -n "$check" ] && waived="${waived}Plan CI-proof: ${check}"$'\n'
+        done < <(cut -f2 <<< "$skips" | sed '/^$/d' | sort -u)
+        [ -z "$undecided" ] || waived="${waived}Plan CI-proof: undecided (${undecided})"$'\n'
+        echo "WARN: plan-proof-out-of-band waives the plan CI-proof gate: $(printf '%s' "$waived" | awk 'NF { printf "%s%s", (n++ ? ", " : ""), $0 }')" >&2
+        printf 'waived\n%s' "$waived"
+        return 0
+    fi
+    if [ "$rc" -eq 1 ]; then
+        echo "BLOCK: plan CI-proof skipped — a plan this PR changes names a CI check as its proof \"green on this PR\", and that check did not run on head ${sha:0:8} (SKIPPED, or no run of that name). A skipped check is a pass to branch protection, so the proof the plan asked for never ran:" >&2
+        while IFS=$'\t' read -r plan check concl; do
+            [ -n "$plan" ] && echo "  ${plan}: \"${check}\" (${concl})" >&2
+        done <<< "$skips"
+        [ -z "$undecided" ] || echo "  Also undecided: ${undecided}" >&2
+        echo "  Make the diff run the check (fix the delta gate's trigger set), or change the plan's proof to one that ran. To merge anyway, apply the 'plan-proof-out-of-band' label." >&2
+        echo block
+        return 1
+    fi
+    echo "BLOCK: plan CI-proof gate could not decide (${undecided}). If this persists, apply the 'plan-proof-out-of-band' label." >&2
+    echo hold
+    return 2
+}
+
+# ----------------------------------------------------------------------------
 # poll_merge_gates <owner> <repo> <pr_number>
 # ----------------------------------------------------------------------------
 poll_merge_gates() {
@@ -2282,44 +2337,17 @@ poll_merge_gates() {
             # an unreadable lookup only holds this poll. plan-proof-out-of-band
             # downgrades either to WARN, and a waived skip is recorded in
             # GATE_SNAPSHOT's downgraded list, one "Plan CI-proof: <check>" per check.
-            local proof_out proof_rc=0 proof_labels proof_waive=false proof_ok=false
-            proof_out="$(_mg_plan_proof_verdict "$owner" "$repo" "$prNumber" "$head_sha")" || proof_rc=$?
-            if [ "$proof_rc" -ne 0 ]; then
-                proof_labels="$(gh api "repos/${owner}/${repo}/issues/${prNumber}/labels?per_page=100" --paginate \
-                    --jq '.[].name' 2>/dev/null || true)"
-                if grep -qxF -- "plan-proof-out-of-band" <<< "$proof_labels"; then
-                    proof_waive=true
-                fi
-            fi
-            # Split the verdict: skip rows (<plan> <check> <conclusion>) and the
-            # reasons nothing could be decided for.
-            local proof_skips proof_undecided _pp_check _pp_plan _pp_concl _pp_waived=""
-            proof_skips="$(grep -v '^UNDECIDED' <<< "$proof_out" || true)"
-            proof_undecided="$(grep '^UNDECIDED' <<< "$proof_out" | cut -f2 | paste -sd';' - | sed 's/;/; /g' || true)"
+            local proof_out proof_rc=0 proof_ok=false
+            proof_out="$(_mg_plan_proof_decide "$owner" "$repo" "$prNumber" "$head_sha")" || proof_rc=$?
             if [ "$proof_rc" -eq 0 ]; then
                 proof_ok=true
-            elif [ "$proof_waive" = true ]; then
-                # Waived: every skipped check AND every undecided reason goes into
-                # GATE_SNAPSHOT, so the ledger row names what the label let through.
-                while IFS= read -r _pp_check; do
-                    [ -n "$_pp_check" ] && _pp_waived="${_pp_waived:+${_pp_waived}, }Plan CI-proof: ${_pp_check}"
-                done < <(cut -f2 <<< "$proof_skips" | sed '/^$/d' | sort -u)
-                if [ -n "$proof_undecided" ]; then
-                    _pp_waived="${_pp_waived:+${_pp_waived}, }Plan CI-proof: undecided (${proof_undecided})"
+                if [ "${proof_out%%$'\n'*}" = waived ]; then
+                    local _pp_waived
+                    _pp_waived="$(tail -n +2 <<< "$proof_out" | awk 'NF { printf "%s%s", (n++ ? ", " : ""), $0 }')"
+                    dg_names="${dg_names:+${dg_names}, }${_pp_waived}"
                 fi
-                echo "WARN: plan-proof-out-of-band waives the plan CI-proof gate: ${_pp_waived}" >&2
-                dg_names="${dg_names:+${dg_names}, }${_pp_waived}"
-                proof_ok=true
             elif [ "$proof_rc" -eq 1 ]; then
-                echo "BLOCK: plan CI-proof skipped — a plan this PR changes names a CI check as its proof \"green on this PR\", and that check did not run on head ${head_sha:0:8} (SKIPPED, or no run of that name). A skipped check is a pass to branch protection, so the proof the plan asked for never ran:" >&2
-                while IFS=$'\t' read -r _pp_plan _pp_check _pp_concl; do
-                    [ -n "$_pp_plan" ] && echo "  ${_pp_plan}: \"${_pp_check}\" (${_pp_concl})" >&2
-                done <<< "$proof_skips"
-                [ -z "$proof_undecided" ] || echo "  Also undecided: ${proof_undecided}" >&2
-                echo "  Make the diff run the check (fix the delta gate's trigger set), or change the plan's proof to one that ran. To merge anyway, apply the 'plan-proof-out-of-band' label." >&2
                 break
-            else
-                echo "BLOCK: plan CI-proof gate could not decide (${proof_undecided}); not passing this poll. If this persists, apply the 'plan-proof-out-of-band' label." >&2
             fi
             if [ "$proof_ok" = true ]; then
                 local cr_override_flag=0
