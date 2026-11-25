@@ -24,7 +24,7 @@ A list of `(file, function-or-block, scope-name)` tuples, every scope name prefi
 
 ## The macro
 
-`SMATCHET_UI_PERF_SCOPE("perf_temp:<area>")` from `Source/Core/include/Ui/UiPerfMonitor.h`. Per-call overhead ~200–500 ns (two `steady_clock::now()`, a mutex lock, an O(N) linear scan over the scope names, a sample-ring push).
+`SMATCHET_UI_PERF_SCOPE("perf_temp:<area>")` from `Source/Core/include/UiPerfMonitor.h`. Per-call overhead ~200–500 ns (two `steady_clock::now()`, a mutex lock, an O(N) linear scan over the scope names, a sample-ring push).
 
 ## Hard rules
 

@@ -26,6 +26,9 @@ STRICT_GLOBS=(
     "Source/Core/include/Persistence/"
     "Source/Core/include/Config/"
     "Source/Core/include/Commands/"
+    # Single-file entry (no trailing slash): zone_of matches it exactly. It keeps the
+    # Tracker-domain error type strict after it moved from include/Tracker/ to the include/ root.
+    "Source/Core/include/TrackerError.h"
     "Source/Plugins/Mcp/"
 )
 
@@ -36,8 +39,13 @@ zone_of() {
         ThirdParty/*|*/ThirdParty/*|build/*|*/build/*) echo exempt; return ;;
     esac
     local g
+    # A STRICT_GLOBS entry ending in `/` is a directory and prefix-matches; any other entry names
+    # one file and must match exactly (so `X.h` does not also classify `X.hpp`).
     for g in "${STRICT_GLOBS[@]}"; do
-        case "$f" in "$g"*) echo strict; return ;; esac
+        case "$g" in
+            */) case "$f" in "$g"*) echo strict; return ;; esac ;;
+            *)  if [ "$f" = "$g" ]; then echo strict; return; fi ;;
+        esac
     done
     case "$f" in
         Source/Core/src/Ui/*|Source/Core/include/Ui/*|Source/Standalone/*) echo light; return ;;

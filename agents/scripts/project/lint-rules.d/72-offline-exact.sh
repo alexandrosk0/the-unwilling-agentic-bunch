@@ -121,7 +121,7 @@ offline_kind_in_scope() {
     # $1 = logical repo path. True when tracker-error-kind-collapsed applies to it. The single scope test for
     # both the per-file scanner and the whole-tree sweep, so the sweep can never skip a path the rule covers.
     case "$1" in
-        Source/Core/src/Tracker/*|Source/Core/include/Tracker/*|Source/Core/include/ITracker*.h) return 0 ;;
+        Source/Core/src/Tracker/*|Source/Core/include/Tracker/*|Source/Core/include/ITracker*.h|Source/Core/include/TrackerError.h) return 0 ;;
     esac
     return 1
 }
