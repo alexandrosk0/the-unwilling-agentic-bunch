@@ -206,6 +206,13 @@ case "$MODE" in
         case "$g" in Source/Core/include/*) continue ;; esac
         if ! grep -qF "$g" "$_tlr_agents_md"; then echo "SELFTEST FAIL: '$g' missing from AGENTS.md" >&2; miss=1; fi
     done
+    # zone_of: directory entries prefix-match, single-file entries match exactly.
+    if [ "$(zone_of Source/Core/src/Tracker/JiraClient.cpp)" != strict ]; then
+        echo "SELFTEST FAIL: zone_of did not classify a file under a strict directory as strict" >&2; miss=1; fi
+    if [ "$(zone_of Source/Core/include/TrackerError.h)" != strict ]; then
+        echo "SELFTEST FAIL: zone_of did not classify the single-file STRICT_GLOBS entry as strict" >&2; miss=1; fi
+    if [ "$(zone_of Source/Core/include/TrackerError.hpp)" = strict ]; then
+        echo "SELFTEST FAIL: zone_of prefix-matched a single-file STRICT_GLOBS entry (X.h classified X.hpp)" >&2; miss=1; fi
     # Assert each repo-wide comment-regrowth rule-id is documented in AGENTS.md (delta-gated list).
     for r in "${COMMENT_RULES[@]}"; do
         if ! grep -qF "$r" "$_tlr_agents_md"; then echo "SELFTEST FAIL: comment rule '$r' missing from AGENTS.md" >&2; miss=1; fi
