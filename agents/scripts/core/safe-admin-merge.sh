@@ -108,6 +108,13 @@
 #                        (tooling 2026-08-18: otherwise the waiver that clears
 #                        gate 2 leaves the finding-gate context red/pending
 #                        forever).
+#   plan-proof-out-of-band → waives the plan CI-proof gate, which this guard runs
+#                        through the poller's own _mg_plan_proof_decide: a PR
+#                        that adds a `CI: "<check>" green on this PR` line to a
+#                        plan whose check SKIPPED or never ran on the head is
+#                        refused (a skipped check is green to every rollup read
+#                        above), as is an undecidable lookup. Each waived proof
+#                        joins the merge snapshot's redChecks.
 #
 # Usage:
 #   agents/scripts/core/safe-admin-merge.sh <pr>
@@ -182,7 +189,8 @@ fi
 # poller's own jq def from merge-gates.d/10-gate-filter.sh, loaded by the source
 # above — single-sourced so both merge paths accept the same attestations.
 for _sam_fn in _mg_planlock_recheck_detail _mg_planlock_verdict_report \
-               _mg_planlock_colliding_slugs _mg_planlock_slug_report; do
+               _mg_planlock_colliding_slugs _mg_planlock_slug_report \
+               _mg_plan_proof_decide; do
     if [ -z "${_MG_JQ_DISPOSITION_DEF:-}" ] || ! command -v "$_sam_fn" >/dev/null 2>&1; then
         echo "safe-admin-merge: merge-gates.sh did not provide the disposition reader / Plan-lock re-check ($_sam_fn) — refusing (fail-closed)." >&2
         exit 2
@@ -570,12 +578,30 @@ override_labels_csv() {
 }
 
 # ----------------------------------------------------------------------------
-# append_admin_merge_snapshot <pr> <view_json> <cr_waived_red:0|1> — best-effort
-# ledger append after a successful admin-merge (the "remaining writer to wire"
-# named by ADR-0017). Fetches mergeCommit/mergedAt post-merge (stubbable via
-# SAFE_ADMIN_MERGE_STUB_MERGED_JSON), composes redChecks from the label-
-# downgraded reds (+ the literal "CodeRabbit" when cr-out-of-band waived a real
-# CR block — same convention as the watcher), and runs the shared idempotent
+# pr_coords <view_json> — print "<owner> <repo>" from the PR's url
+# (https://github.com/<owner>/<repo>/pull/<n>); nothing when the url is absent
+# or not of that shape. The Plan-lock re-check and the plan CI-proof gate both
+# address the PR's own repository through it.
+# ----------------------------------------------------------------------------
+pr_coords() {
+    local url nwo
+    url=$(printf '%s' "$1" | jq -r '.url // ""' 2>/dev/null) || url=""
+    nwo="${url#*://*/}"
+    nwo="${nwo%%/pull/*}"
+    case "$nwo" in
+        */*) printf '%s %s\n' "${nwo%%/*}" "${nwo#*/}" ;;
+    esac
+}
+
+# ----------------------------------------------------------------------------
+# append_admin_merge_snapshot <pr> <view_json> <cr_waived_red:0|1> [<proof_waived>]
+# — best-effort ledger append after a successful admin-merge (the "remaining
+# writer to wire" named by ADR-0017). Fetches mergeCommit/mergedAt post-merge
+# (stubbable via SAFE_ADMIN_MERGE_STUB_MERGED_JSON), composes redChecks from the
+# label-downgraded reds (+ the literal "CodeRabbit" when cr-out-of-band waived a
+# real CR block — same convention as the watcher — + one "Plan CI-proof: …"
+# entry per line of <proof_waived>, the proofs plan-proof-out-of-band let
+# through), and runs the shared idempotent
 # helper as a CLI (NOT sourced — it sets -e). NEVER fails the caller: the
 # snapshot is detection telemetry; a write failure is logged and the merge
 # stands. The appended row lands in the working copy — commit it with the
@@ -583,7 +609,7 @@ override_labels_csv() {
 # is in flight), per ship-loops.md § Append a merge-time gate-verdict snapshot.
 # ----------------------------------------------------------------------------
 append_admin_merge_snapshot() {
-    local pr="$1" view_json="$2" cr_waived_red="$3"
+    local pr="$1" view_json="$2" cr_waived_red="$3" proof_waived="${4:-}"
     local head_sha merged_json mc merged_at red_lines red_csv override_csv
     head_sha=$(printf '%s' "$view_json" | jq -r '.headRefOid // ""' 2>/dev/null) || head_sha=""
 
@@ -615,6 +641,13 @@ append_admin_merge_snapshot() {
     if [ "$cr_waived_red" = "1" ]; then
         if [ -n "$red_csv" ]; then red_csv="$red_csv,CodeRabbit"; else red_csv="CodeRabbit"; fi
     fi
+    # Each skipped plan CI proof (or undecided lookup) plan-proof-out-of-band let
+    # through, one redChecks entry apiece, as the poller's GATE_SNAPSHOT names them.
+    local _pw
+    while IFS= read -r _pw; do
+        [ -n "$_pw" ] || continue
+        if [ -n "$red_csv" ]; then red_csv="$red_csv,$_pw"; else red_csv="$_pw"; fi
+    done <<< "$proof_waived"
     if ! override_csv=$(override_labels_csv "$view_json"); then
         echo "safe-admin-merge: WARN — overrideLabels projection failed; ledger snapshot NOT written (live fallback covers this PR)" >&2
         return 0
@@ -1058,17 +1091,11 @@ main() {
         exit 2
     fi
     if [ "$pl_applied" = "true" ]; then
-        local pl_url pl_nwo pl_owner="" pl_repo="" pl_head_ref pl_head_sha pl_verdict
+        local pl_owner="" pl_repo="" pl_head_ref pl_head_sha pl_verdict
         local pl_detail pl_slugs pl_set pl_reasons
-        pl_url=$(printf '%s' "$view_json" | jq -r '.url // ""' 2>/dev/null) || pl_url=""
         pl_head_ref=$(printf '%s' "$view_json" | jq -r '.headRefName // ""' 2>/dev/null) || pl_head_ref=""
         pl_head_sha=$(printf '%s' "$view_json" | jq -r '.headRefOid // ""' 2>/dev/null) || pl_head_sha=""
-        # https://github.com/<owner>/<repo>/pull/<n>
-        pl_nwo="${pl_url#*://*/}"
-        pl_nwo="${pl_nwo%%/pull/*}"
-        case "$pl_nwo" in
-            */*) pl_owner="${pl_nwo%%/*}"; pl_repo="${pl_nwo#*/}" ;;
-        esac
+        read -r pl_owner pl_repo <<< "$(pr_coords "$view_json")" || true
         # One re-check feeds both rules: line 1 is the verdict, line 2 the
         # colliding-slug line (a missing line 2 reads as "unknown").
         pl_detail=$(_mg_planlock_recheck_detail "$pl_owner" "$pl_repo" "$pr" "$pl_head_ref" "$pl_head_sha")
@@ -1091,6 +1118,32 @@ main() {
             exit 1
         fi
     fi
+
+    # Plan CI-proof gate — the poller's own decision (_mg_plan_proof_decide), so an
+    # admin merge cannot ship a PR whose plan names a CI check as its proof "green
+    # on this PR" when that check SKIPPED or never ran on the head: a skipped check
+    # is green to every rollup reading above. plan-proof-out-of-band waives it and
+    # each waived proof joins the snapshot's redChecks. An undecidable lookup is
+    # refused like a skip here: the admin path makes one decision, it does not
+    # poll again.
+    local pp_owner="" pp_repo="" pp_sha pp_labels pp_out pp_rc=0 pp_waived=""
+    read -r pp_owner pp_repo <<< "$(pr_coords "$view_json")" || true
+    pp_sha=$(printf '%s' "$view_json" | jq -r '.headRefOid // ""' 2>/dev/null) || pp_sha=""
+    if [ -z "$pp_owner" ] || [ -z "$pp_repo" ] || [ -z "$pp_sha" ]; then
+        echo "safe-admin-merge: PR url / head sha unavailable — cannot run the plan CI-proof gate; refusing (fail-closed)." >&2
+        exit 2
+    fi
+    pp_labels=$(printf '%s' "$view_json" | jq -r '.labels[]?.name' 2>/dev/null) || pp_labels=""
+    pp_out=$(_mg_plan_proof_decide "$pp_owner" "$pp_repo" "$pr" "$pp_sha" "$pp_labels") || pp_rc=$?
+    case "$pp_rc" in
+        0)
+            if [ "${pp_out%%$'\n'*}" = waived ]; then
+                pp_waived=$(tail -n +2 <<< "$pp_out")
+            fi ;;
+        *)
+            echo "REFUSED — PR #$pr: the plan CI-proof gate does not pass (${pp_out:-no decision}); NOT admin-merging." >&2
+            exit 1 ;;
+    esac
 
     # CodeRabbit-completion gate — CI is green, but a CI-green PR can still be
     # admin-merged before CR finishes its async review (the #1332 race). Refuse
@@ -1151,7 +1204,7 @@ main() {
         echo "safe-admin-merge: 'gh pr merge' failed — no merge, no snapshot." >&2
         exit 1
     fi
-    append_admin_merge_snapshot "$pr" "$view_json" "$cr_waived_red"
+    append_admin_merge_snapshot "$pr" "$view_json" "$cr_waived_red" "$pp_waived"
     exit 0
 }
 

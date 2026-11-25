@@ -54,6 +54,34 @@ fi
 # The re-check reads why the red Plan-lock run failed: its run id, then its
 # annotation messages ($SAM_STUB_ANNOTATIONS; unset → unreadable).
 if [ "$1" = "api" ]; then
+    # The plan CI-proof gate (merge-gates.sh _mg_plan_proof_verdict). The file list
+    # and the check-run lookup run the caller's real --jq over API-shaped JSON:
+    #   SAM_STUB_PR_FILES_JSON   pulls/<n>/files array (unset → []; "fail" → error)
+    #   SAM_STUB_PLAN_FILE       local file served as every plan's head copy
+    #   SAM_STUB_PROOF_RUNS_JSON check name → check-run array ("fail" → error)
+    _filter=""; _prev=""
+    for _a in "$@"; do
+        if [ "$_prev" = "--jq" ]; then _filter="$_a"; break; fi
+        _prev="$_a"
+    done
+    _proof_name=""
+    for _a in "$@"; do
+        case "$_a" in check_name=*) _proof_name="${_a#check_name=}" ;; esac
+    done
+    case "$2" in
+        */pulls/*/files*)
+            [ "${SAM_STUB_PR_FILES_JSON:-}" = fail ] && exit 1
+            printf '%s' "${SAM_STUB_PR_FILES_JSON:-[]}" | jq -r "$_filter"; exit $? ;;
+        */contents/docs/plans/*)
+            [ -n "${SAM_STUB_PLAN_FILE:-}" ] || exit 1
+            base64 < "$SAM_STUB_PLAN_FILE"; exit 0 ;;
+        */commits/*/statuses*) exit 0 ;;
+    esac
+    if [ -n "$_proof_name" ]; then
+        [ "${SAM_STUB_PROOF_RUNS_JSON:-}" = fail ] && exit 1
+        printf '%s' "${SAM_STUB_PROOF_RUNS_JSON:-{\}}" \
+            | jq --arg n "$_proof_name" '{check_runs: (.[$n] // [])}' | jq -r "$_filter"; exit $?
+    fi
     case "$2" in
         */commits/*/check-runs*) echo 4242; exit 0 ;;
         */check-runs/*/annotations*)
@@ -75,13 +103,14 @@ STUB
 
 teardown() {
     rm -rf "$STUB_BIN_DIR"
-    unset SAM_STUB_PR_DIFF LTC_ROWS_OVERRIDE SAM_STUB_ANNOTATIONS
+    unset SAM_STUB_PR_DIFF LTC_ROWS_OVERRIDE SAM_STUB_ANNOTATIONS \
+        SAM_STUB_PR_FILES_JSON SAM_STUB_PLAN_FILE SAM_STUB_PROOF_RUNS_JSON
 }
 
 # A green rollup: every required + allow-listed check SUCCESS.
 green_rollup() {
     cat <<'JSON'
-{"state":"OPEN","labels":[],"statusCheckRollup":[
+{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":[
   {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
   {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"},
   {"__typename":"CheckRun","name":"Bucket-C (ImGui Test Engine)","status":"COMPLETED","conclusion":"SUCCESS"},
@@ -103,7 +132,7 @@ JSON
     # SUCCESS run. The guard must dedup to the latest run BEFORE judging red/green,
     # so the stale CANCELLED row does not falsely veto a check whose re-run is
     # green. Required + allow-listed checks all green on their LATEST run.
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":[
       {"__typename":"CheckRun","name":"Coverage","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-06-20T10:00:00Z","completedAt":"2026-06-20T10:05:00Z"},
       {"__typename":"CheckRun","name":"Coverage","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-20T11:00:00Z","completedAt":"2026-06-20T11:05:00Z"},
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
@@ -116,7 +145,7 @@ JSON
 @test "dedup-to-latest: older SUCCESS with a newer FAILURE still REFUSES (exit 1, no merge)" {
     # Dedup must keep the NEWEST run, not flip a real failure green by picking the
     # wrong one: an older SUCCESS plus a newer FAILURE on the same check blocks.
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":[
       {"__typename":"CheckRun","name":"Coverage","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-06-20T10:00:00Z","completedAt":"2026-06-20T10:05:00Z"},
       {"__typename":"CheckRun","name":"Coverage","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-06-20T11:00:00Z","completedAt":"2026-06-20T11:05:00Z"},
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
@@ -135,7 +164,7 @@ JSON
     # blocking scope is every non-advisory-named check, so a red Bucket-C gates
     # the admin-merge like any other check. Required check kept green so
     # Bucket-C is the sole red.
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":[
       {"__typename":"CheckRun","name":"Bucket-C (ImGui Test Engine)","status":"COMPLETED","conclusion":"FAILURE"},
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
@@ -146,7 +175,7 @@ JSON
 }
 
 @test "REFUSES on a RED required StatusContext (exit 1, no merge)" {
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"FAILURE"}]}'
     run bash "$SCRIPT" 1180
     [ "$status" -eq 1 ]
@@ -155,7 +184,7 @@ JSON
 }
 
 @test "REFUSES on a PENDING allow-listed check (exit 1, no merge)" {
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":[
       {"__typename":"CheckRun","name":"Sanitizer","status":"IN_PROGRESS","conclusion":null},
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"}]}'
     run bash "$SCRIPT" 1180
@@ -175,7 +204,7 @@ JSON
 }
 
 @test "an advisory RED check does NOT block (exit 0, merge fires)" {
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"},
       {"__typename":"CheckRun","name":"Duplication scanner (advisory)","status":"COMPLETED","conclusion":"FAILURE"}]}'
@@ -188,7 +217,7 @@ JSON
     # Was "does NOT block" under the curated allow-list era. Under
     # block-on-any-red every non-advisory-named red gates the admin-merge; the
     # advisory-NAME escape keeps its own does-NOT-block test above.
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"},
       {"__typename":"CheckRun","name":"some-random-non-required","status":"COMPLETED","conclusion":"FAILURE"}]}'
@@ -203,7 +232,7 @@ JSON
     # workflows re-run on `labeled` and self-report green); this guard has no
     # label-event timestamps, so waiving a red run here would re-open the
     # pre-label-run race. The red blocks until the re-run goes green.
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[{"name":"perf-out-of-band"}],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[{"name":"perf-out-of-band"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"},
       {"__typename":"CheckRun","name":"Perf PR-fast (windows-2022)","status":"COMPLETED","conclusion":"FAILURE"}]}'
@@ -214,7 +243,7 @@ JSON
 }
 
 @test "intent-out-of-band still downgrades a RED Intent section (label-blind workflow: exit 0, merge fires)" {
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[{"name":"intent-out-of-band"}],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[{"name":"intent-out-of-band"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"},
       {"__typename":"CheckRun","name":"Intent section","status":"COMPLETED","conclusion":"FAILURE"}]}'
@@ -357,7 +386,7 @@ planlock_two_lock_rows() {
 @test "REFUSES when a required context is ABSENT from the rollup (exit 1, no merge)" {
     # 'Test-delta gate' is required but no row reports it — a required check
     # missing from the rollup must block, never read as a silent green.
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"}]}'
     run bash "$SCRIPT" 1180
     [ "$status" -eq 1 ]
@@ -368,7 +397,7 @@ planlock_two_lock_rows() {
 @test "FAILS CLOSED on a malformed rollup that breaks evaluation (exit 2, no merge)" {
     # state parses OPEN but statusCheckRollup is not an array -> evaluate_rollup's
     # jq errors; the call site must fail closed, never silently read zero-blockers.
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":"broken"}'
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":"broken"}'
     run bash "$SCRIPT" 1180
     [ "$status" -eq 2 ]
     [[ "$output" == *"fail-closed"* ]]
@@ -423,7 +452,7 @@ planlock_two_lock_rows() {
 
 @test "CR gate ALLOWS when CodeRabbit review is terminal-green on the head (exit 0, merge fires)" {
     export SAFE_ADMIN_MERGE_CR_INSTALLED=true
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"},
       {"__typename":"CheckRun","name":"CodeRabbit","status":"COMPLETED","conclusion":"SUCCESS"}]}'
@@ -438,7 +467,7 @@ planlock_two_lock_rows() {
     # CodeRabbit row present but not terminal — review running. Must block, not
     # treat a pending CR CheckRun as a silent pass.
     export SAFE_ADMIN_MERGE_CR_INSTALLED=true
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"},
       {"__typename":"CheckRun","name":"CodeRabbit","status":"IN_PROGRESS","conclusion":null}]}'
@@ -452,7 +481,7 @@ planlock_two_lock_rows() {
     # Explicit operator override — no CodeRabbit row, but the labels say merge
     # without waiting, with a recorded reason. CI stays green; CR is the only thing waived.
     export SAFE_ADMIN_MERGE_CR_INSTALLED=true
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[{"name":"cr-out-of-band"},{"name":"cr-disposition:rate-limit-acked"}],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[{"name":"cr-out-of-band"},{"name":"cr-disposition:rate-limit-acked"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
     run bash "$SCRIPT" 1332
@@ -464,7 +493,7 @@ planlock_two_lock_rows() {
     # The waiver needs a recorded reason, as in the rollup checks; without one the gate
     # keeps waiting for CodeRabbit.
     export SAFE_ADMIN_MERGE_CR_INSTALLED=true
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"abc123","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
     run bash "$SCRIPT" 1332
@@ -503,7 +532,7 @@ planlock_two_lock_rows() {
 # ---------- Merge-time snapshot ledger (ADR-0017 "remaining writer") ----------
 
 @test "ledger: clean green admin-merge appends a snapshot row (actor safe-admin-merge, empty redChecks)" {
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","headRefOid":"headsha1","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"headsha1","labels":[],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
     export SAFE_ADMIN_MERGE_STUB_MERGED_JSON='{"mergeCommit":{"oid":"mc1"},"mergedAt":"2026-08-16T12:00:00Z"}'
@@ -527,7 +556,7 @@ planlock_two_lock_rows() {
     # honours (tests/perf no longer merge past a red here — see the
     # stale-override tests above), so it is the arm that exercises the
     # load-bearing-override redChecks capture end-to-end.
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","headRefOid":"headsha2","labels":[{"name":"intent-out-of-band"}],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"headsha2","labels":[{"name":"intent-out-of-band"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"},
       {"__typename":"CheckRun","name":"Intent section","status":"COMPLETED","conclusion":"FAILURE"}]}'
@@ -548,7 +577,7 @@ planlock_two_lock_rows() {
     # (the watcher-path convention, ADR-0017). A PENDING CodeRabbit rollup row
     # would instead block at the CI-pending stage, before the CR gate.
     export SAFE_ADMIN_MERGE_CR_INSTALLED=true
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","headRefOid":"headsha3","labels":[{"name":"cr-out-of-band"},{"name":"cr-disposition:rate-limit-acked"}],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"headsha3","labels":[{"name":"cr-out-of-band"},{"name":"cr-disposition:rate-limit-acked"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
     export SAFE_ADMIN_MERGE_STUB_MERGED_JSON='{"mergeCommit":{"oid":"mc3"},"mergedAt":"2026-08-16T12:10:00Z"}'
@@ -565,7 +594,7 @@ planlock_two_lock_rows() {
     # The label is present but CR is green — the waiver bypassed nothing, so
     # postmortem-owed must be able to tell this moot label from a load-bearing one.
     export SAFE_ADMIN_MERGE_CR_INSTALLED=true
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","headRefOid":"headsha4","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"headsha4","labels":[{"name":"cr-out-of-band"}],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"CodeRabbit","state":"SUCCESS"}]}'
@@ -579,7 +608,7 @@ planlock_two_lock_rows() {
 }
 
 @test "ledger: post-merge mergeCommit unavailable -> WARN, no row, merge still exit 0 (best-effort)" {
-    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","headRefOid":"headsha5","labels":[],"statusCheckRollup":[
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","url":"https://github.com/o/r/pull/1","headRefOid":"headsha5","labels":[],"statusCheckRollup":[
       {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
       {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
     export SAFE_ADMIN_MERGE_STUB_MERGED_JSON='{"mergeCommit":null,"mergedAt":""}'
@@ -694,4 +723,94 @@ _cr_waiver_blockers() {
     [ "$(reads '[]' 'cr-disposition: <reason>')" = false ]
     [ "$(reads '[]' $'cr-disposition:\nUnrelated text')" = false ]
     [ "$(reads '[]' '<!-- cr-disposition: in a comment -->')" = false ]
+}
+
+# ---------- Plan CI-proof gate (shared with the poller: _mg_plan_proof_decide) ----------
+# A plan this PR adds `CI: "<check>" green on this PR` to names a proof; when that
+# check SKIPPED (or never ran) on the head, the admin path refuses as the poller
+# blocks. Every other gate in these rollups is green.
+
+# _sam_pp_setup <conclusion…> — a PR that adds the UBSan proof line to a plan, and
+# that check's runs on the head (none when no argument is given).
+_sam_pp_setup() {
+    local f="$BATS_TEST_TMPDIR/plan.md"
+    printf '%s\n' '# Plan' '## Verification' '- CI: "Sanitizer (UBSan via Clang)" green on this PR.' > "$f"
+    export SAM_STUB_PLAN_FILE="$f"
+    SAM_STUB_PR_FILES_JSON="$(jq -nc --arg p $'@@ -1,0 +1,3 @@\n+# Plan\n+## Verification\n+- CI: "Sanitizer (UBSan via Clang)" green on this PR.' \
+        '[{filename: "docs/plans/active/lane-change.md", status: "added", changes: 3, patch: $p}]')"
+    export SAM_STUB_PR_FILES_JSON
+    SAM_STUB_PROOF_RUNS_JSON="$(printf '%s\n' "$@" | jq -Rsc \
+        '{"Sanitizer (UBSan via Clang)": (split("\n") | map(select(length > 0)) | map({conclusion: .}))}')"
+    export SAM_STUB_PROOF_RUNS_JSON
+}
+
+# _sam_pp_rollup [<labels JSON>] — a green rollup with the url/head the gate needs.
+_sam_pp_rollup() {
+    jq -nc --argjson labels "${1:-[]}" '{state: "OPEN", url: "https://github.com/o/r/pull/7",
+        headRefOid: "pphead1", labels: ($labels | map({name: .})), statusCheckRollup: [
+          {__typename: "StatusContext", context: "Windows + MSVC", state: "SUCCESS"},
+          {__typename: "StatusContext", context: "Test-delta gate", state: "SUCCESS"}]}'
+}
+
+@test "plan-proof: a proof that SKIPPED on the head is REFUSED (exit 1, no merge)" {
+    _sam_pp_setup skipped
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP="$(_sam_pp_rollup)"
+    run bash "$SCRIPT" 7
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"BLOCK: plan CI-proof skipped"* ]]
+    [[ "$output" == *"REFUSED — PR #7: the plan CI-proof gate does not pass"* ]]
+    [ ! -f "$MERGE_SENTINEL" ]
+}
+
+@test "plan-proof: a proof with no run of that name is REFUSED (absent)" {
+    _sam_pp_setup
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP="$(_sam_pp_rollup)"
+    run bash "$SCRIPT" 7
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'"Sanitizer (UBSan via Clang)" (absent)'* ]]
+    [ ! -f "$MERGE_SENTINEL" ]
+}
+
+@test "plan-proof: a proof that ran lets the admin-merge fire (exit 0)" {
+    _sam_pp_setup success
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP="$(_sam_pp_rollup)"
+    run bash "$SCRIPT" 7
+    [ "$status" -eq 0 ]
+    grep -q 'pr merge 7 --squash --admin' "$MERGE_SENTINEL"
+}
+
+@test "plan-proof: plan-proof-out-of-band waives the skip and the ledger names it in redChecks" {
+    _sam_pp_setup skipped
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP="$(_sam_pp_rollup '["plan-proof-out-of-band"]')"
+    export SAFE_ADMIN_MERGE_STUB_MERGED_JSON='{"mergeCommit":{"oid":"mc7"},"mergedAt":"2026-11-25T00:00:00Z"}'
+    run bash "$SCRIPT" 7
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARN: plan-proof-out-of-band waives the plan CI-proof gate"* ]]
+    grep -q 'pr merge 7 --squash --admin' "$MERGE_SENTINEL"
+    jq -e 'select(.pr == 7) | .redChecks | index("Plan CI-proof: Sanitizer (UBSan via Clang)")' "$MERGE_SNAPSHOT_LEDGER" >/dev/null
+    jq -e 'select(.pr == 7) | .overrideLabels | index("plan-proof-out-of-band")' "$MERGE_SNAPSHOT_LEDGER" >/dev/null
+}
+
+@test "plan-proof: an undecidable gate is REFUSED; the label waives it and the ledger says so" {
+    export SAM_STUB_PR_FILES_JSON=fail
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP="$(_sam_pp_rollup)"
+    run bash "$SCRIPT" 7
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"plan CI-proof gate could not decide (the PR's file list could not be read)"* ]]
+    [ ! -f "$MERGE_SENTINEL" ]
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP="$(_sam_pp_rollup '["plan-proof-out-of-band"]')"
+    export SAFE_ADMIN_MERGE_STUB_MERGED_JSON='{"mergeCommit":{"oid":"mc7"},"mergedAt":"2026-11-25T00:00:00Z"}'
+    run bash "$SCRIPT" 7
+    [ "$status" -eq 0 ]
+    jq -e "select(.pr == 7) | .redChecks | index(\"Plan CI-proof: undecided (the PR's file list could not be read)\")" "$MERGE_SNAPSHOT_LEDGER" >/dev/null
+}
+
+@test "plan-proof: no PR url or head sha refuses fail-closed (exit 2)" {
+    export SAFE_ADMIN_MERGE_STUB_ROLLUP='{"state":"OPEN","labels":[],"statusCheckRollup":[
+      {"__typename":"StatusContext","context":"Windows + MSVC","state":"SUCCESS"},
+      {"__typename":"StatusContext","context":"Test-delta gate","state":"SUCCESS"}]}'
+    run bash "$SCRIPT" 7
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"cannot run the plan CI-proof gate"* ]]
+    [ ! -f "$MERGE_SENTINEL" ]
 }
