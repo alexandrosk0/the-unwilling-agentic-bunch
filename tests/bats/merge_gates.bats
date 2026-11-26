@@ -162,7 +162,8 @@ case "$1" in
                 ;;
             */commits/*/statuses*)
                 # Step 3b: the head's commit-status contexts, one per line.
-                #   MERGE_GATES_STUB_STATUS_CONTEXTS (default: none)
+                #   MERGE_GATES_STUB_STATUS_CONTEXTS (default: none; "fail" → read error)
+                [ "${MERGE_GATES_STUB_STATUS_CONTEXTS:-}" = fail ] && { echo "gh: stub statuses error" >&2; exit 1; }
                 [ -n "${MERGE_GATES_STUB_STATUS_CONTEXTS:-}" ] && printf '%s\n' "$MERGE_GATES_STUB_STATUS_CONTEXTS"
                 exit 0
                 ;;
@@ -5606,6 +5607,38 @@ PP_PLAN="docs/plans/active/lane-change.md"
     run poll_merge_gates org repo 1
     [ "$status" -eq 1 ]
     [[ "$output" == *'"Sanitizer (UBSan via Clang)" (skipped)'* ]]
+}
+
+@test "plan-proof: a failed commit-status read holds the poll, it is not a final 'never ran' block" {
+    # No check run of the name, and the statuses fallback errors: undecided (rc 2,
+    # retried), never the rc-1 skip that ends the poll naming the wrong cause.
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    export MERGE_GATES_MAX_POLLS=2
+    _pp_plan; _pp_file "$PP_PLAN" 1 "$PP_ADD5"
+    export MERGE_GATES_STUB_STATUS_CONTEXTS=fail
+    run poll_merge_gates org repo 1
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"GATES_PASSED"* ]]
+    [[ "$output" != *"BLOCK: plan CI-proof skipped"* ]]
+    [[ "$output" == *'could not decide (the commit statuses for "Sanitizer (UBSan via Clang)" ('"$PP_PLAN"') could not be read)'* ]]
+    # Held, so the poller polled again rather than stopping at once.
+    [ "$(grep -c '^Poll ' <<<"$output")" -eq 2 ]
+}
+
+@test "plan-proof: the _*.md meta-files in docs/plans/ are not plans" {
+    set_fixture "$FIXTURES_DIR/merge_gates_pass.json"
+    _pp_plan; _pp_runs skipped
+    local p
+    for p in docs/plans/active/_plan-template.md docs/plans/active/_plan-locks.generated.md docs/plans/shipped/_index.md; do
+        _pp_file "$p" 1 "$PP_ADD5"
+        run poll_merge_gates org repo 1
+        [ "$status" -eq 0 ] || { echo "read $p as a plan" >&2; return 1; }
+        [[ "$output" == *"GATES_PASSED"* ]]
+    done
+    # Control: the same proof in a real plan still blocks.
+    _pp_file "$PP_PLAN" 1 "$PP_ADD5"
+    run poll_merge_gates org repo 1
+    [ "$status" -eq 1 ]
 }
 
 @test "plan-proof helper: _mg_planproof_added_lines numbers only the added head-side lines" {

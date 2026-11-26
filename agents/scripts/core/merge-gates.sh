@@ -601,11 +601,17 @@ _mg_plan_proof_verdict() {
                 continue
             fi
             # A proof can also be a commit-status context; one that reported is not
-            # skipped. Captured, then matched: a `gh … | grep -q` pipe can SIGPIPE
-            # its writer.
+            # skipped. A failed read is undecided, as for the check-run read above:
+            # read as "no context", it would turn a REST blip into a final "never
+            # ran" block. Captured, then matched: a `gh … | grep -q` pipe can
+            # SIGPIPE its writer.
             if [ "$concl" = absent ]; then
-                contexts="$(gh api "repos/${owner}/${repo}/commits/${sha}/statuses?per_page=100" --paginate \
-                    --jq '.[].context' 2>/dev/null || true)"
+                if ! contexts="$(gh api "repos/${owner}/${repo}/commits/${sha}/statuses?per_page=100" --paginate \
+                    --jq '.[].context' 2>/dev/null)"; then
+                    printf 'UNDECIDED\t%s\n' "the commit statuses for \"${check}\" (${path}) could not be read"
+                    undecided=1
+                    continue
+                fi
                 if grep -qxF -- "$check" <<< "$contexts"; then
                     concl=status
                 fi
