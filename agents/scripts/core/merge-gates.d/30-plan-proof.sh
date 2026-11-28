@@ -25,10 +25,14 @@
 # ----------------------------------------------------------------------------
 
 # _mg_planproof_is_plan <path> — rc 0 when <path> is a plan doc this gate reads
-# (docs/plans/active/*.md or docs/plans/shipped/*.md, one level deep).
+# (docs/plans/active/*.md or docs/plans/shipped/*.md, one level deep). A basename
+# starting with `_` is a meta-file, not a plan (_plan-template.md carries a real
+# `## Verification` heading; _plan-locks*.md are bot-rendered), so it is skipped:
+# an example check name added to the template must not read as a proof.
 _mg_planproof_is_plan() {
     case "$1" in
         docs/plans/active/*/*|docs/plans/shipped/*/*) return 1 ;;
+        docs/plans/active/_*|docs/plans/shipped/_*) return 1 ;;
         docs/plans/active/*.md|docs/plans/shipped/*.md) return 0 ;;
     esac
     return 1
